@@ -704,81 +704,64 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
                 {
                     if (aCircuit.ServiceURLs != null && aCircuit.ServiceURLs.ContainsKey("AssetServerURI"))
                     {
+                        // Object is already AddSceneObject'd. Fetch script assets first and start scripts;
+                        // pull remaining appearance assets afterward (ISSUE-001 script-first).
                         SceneObjectGroup defso = so;
+                        AgentCircuitData defCircuit = aCircuit;
                         m_incomingSceneObjectEngine.QueueJob(
-                            string.Format("HG UUID Gather for attachment {0} for {1}", defso.Name, aCircuit.Name),
+                            string.Format("HG UUID Gather for attachment {0} for {1}", defso.Name, defCircuit.Name),
                             () =>
                             {
-                                string url = aCircuit.ServiceURLs["AssetServerURI"].ToString();
-                                //m_log.DebugFormat(
-                                //    "[HG ENTITY TRANSFER MODULE]: Incoming attachment {0} for HG user {1} with asset service {2}",
-                                //    so.Name, so.AttachedAvatar, url);
+                                if (defso.IsDeleted)
+                                    return;
+
+                                string url = defCircuit.ServiceURLs["AssetServerURI"].ToString();
+                                HGUuidGatherer assetFetcher = new HGUuidGatherer(m_scene.AssetService, url);
+
+                                List<UUID> scriptAssetIds = CollectAttachmentScriptAssetIds(defso);
+                                m_log.DebugFormat(
+                                    "[HG ENTITY TRANSFER]: Single attachment {0} for {1}: fetching {2} script asset(s) then starting scripts",
+                                    defso.Name, defCircuit.Name, scriptAssetIds.Count);
+
+                                foreach (UUID scriptAssetId in scriptAssetIds)
+                                {
+                                    if (defso.IsDeleted)
+                                        return;
+                                    assetFetcher.FetchAsset(scriptAssetId);
+                                }
+
+                                if (!defso.IsDeleted)
+                                    TryStartScriptsOnIncomingAttachment(defso);
+
+                                // Appearance / remaining assets (textures, mesh, …)
+                                if (defso.IsDeleted)
+                                    return;
 
                                 IDictionary<UUID, sbyte> ids = new Dictionary<UUID, sbyte>();
-                                HGUuidGatherer uuidGatherer = new HGUuidGatherer(m_scene.AssetService, url, ids);
-                                uuidGatherer.AddForInspection(defso);
-
-                                while (!uuidGatherer.Complete)
+                                HGUuidGatherer appearanceGatherer = new HGUuidGatherer(m_scene.AssetService, url, ids);
+                                appearanceGatherer.AddForInspection(defso);
+                                while (!appearanceGatherer.Complete)
                                 {
+                                    if (defso.IsDeleted)
+                                        return;
+
                                     int tickStart = Util.EnvironmentTickCount();
-                                    uuidGatherer.GatherNext();
-
-                                    //m_log.DebugFormat(
-                                    //    "[HG ENTITY TRANSFER]: Gathered attachment asset uuid {0} for object {1} for HG user {2} took {3} ms with asset service {4}",
-                                    //    nextUuid, so.Name, so.OwnerID, Util.EnvironmentTickCountSubtract(tickStart), url);
-
-                                    int ticksElapsed = Util.EnvironmentTickCountSubtract(tickStart);
-
-                                    if (ticksElapsed > 30000)
+                                    appearanceGatherer.GatherNext();
+                                    if (Util.EnvironmentTickCountSubtract(tickStart) > 30000)
                                     {
                                         m_log.WarnFormat(
-                                            "[HG ENTITY TRANSFER]: Removing incoming scene object jobs for HG user {0} as gather of {1} from {2} took {3} ms to respond (> {4} ms)",
-                                            so.OwnerID, so.Name, url, ticksElapsed, 30000);
-
-                                        RemoveIncomingSceneObjectJobs(OwnerID.ToString());
+                                            "[HG ENTITY TRANSFER]: Appearance gather timeout for attachment {0} of HG user {1}; stopping appearance fetch",
+                                            defso.Name, defCircuit.Name);
                                         return;
                                     }
                                 }
-
-                                //m_log.DebugFormat(
-                                //    "[HG ENTITY TRANSFER]: Fetching {0} assets for attachment {1} for HG user {2} with asset service {3}",
-                                //    ids.Count, so.Name, so.OwnerID, url);
-
-                                foreach (UUID id in ids.Keys)
-                                {
-                                    int tickStart = Util.EnvironmentTickCount();
-
-                                    uuidGatherer.FetchAsset(id);
-
-                                    int ticksElapsed = Util.EnvironmentTickCountSubtract(tickStart);
-
-                                    if (ticksElapsed > 30000)
-                                    {
-                                        m_log.WarnFormat(
-                                            "[HG ENTITY TRANSFER]: Removing incoming scene object jobs for HG user {0} as fetch of {1} from {2} took {3} ms to respond (> {4} ms)",
-                                            so.OwnerID, id, url, ticksElapsed, 30000);
-
-                                        RemoveIncomingSceneObjectJobs(OwnerID.ToString());
-                                        return;
-                                    }
-                                }
-
-                                // May no-op if already AddSceneObject'd before the job; assets are local now.
-                                base.HandleIncomingSceneObject(defso, newPosition);
-
-                                // ISSUE-001: attach path uses resumeScripts=false; start scripts now that
-                                // assets are fetched and owner is typically already a root agent.
-                                TryStartScriptsOnIncomingAttachment(defso);
-
-                                defso = null;
-                                aCircuit = null;
-                                uuidGatherer = null;
-
-                                //m_log.DebugFormat(
-                                //    "[HG ENTITY TRANSFER MODULE]: Completed incoming attachment {0} for HG user {1} with asset server {2}",
-                                //    so.Name, so.OwnerID, url);
                             },
                             OwnerID.ToString());
+                    }
+                    else
+                    {
+                        // No home asset URI; try scripts with whatever is already local.
+                        TryStartScriptsOnIncomingAttachment(so);
                     }
                 }
             }
@@ -839,19 +822,19 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
                 string.Format("HG UUID Gather attachments {0}", defsp.Name), () =>
                 {
                     string url = aCircuit.ServiceURLs["AssetServerURI"].ToString();
+                    HGUuidGatherer assetFetcher = new HGUuidGatherer(m_scene.AssetService, url);
 
+                    // Script-first path (ISSUE-001 follow-up):
+                    // Full UUID gather of an attachment pulls textures, mesh, materials, sounds,
+                    // animations, nested objects, etc. — often hundreds of assets for a worn outfit,
+                    // not just a few scripts. Scripts only need LSL assets to compile/run.
+                    // So for each attachment: fetch script assets → attach → start scripts immediately,
+                    // then pull remaining appearance assets in the background.
                     m_log.DebugFormat(
-                        "[HG ENTITY TRANSFER]: Gathering attachment assets for HG user {0} ({1} object(s)) from {2} in {3}",
+                        "[HG ENTITY TRANSFER]: HG attachment script-first path for {0} ({1} object(s)) from {2} in {3}",
                         defsp.Name, deftatt.Count, url, m_sceneName);
 
-                    // Process one attachment at a time and attach as each completes.
-                    // The old all-or-nothing path waited for every nested asset of every attachment before
-                    // calling AddSceneObject; with large HG avatars that often aborted on leave (or took
-                    // minutes) so scripts never started. On a later visit assets may already be local so
-                    // gather is fast — still must attach and start scripts every time (ISSUE-001).
-                    List<SceneObjectGroup> toadd = new List<SceneObjectGroup>(deftatt.Count);
-                    IDictionary<UUID, sbyte> ids = new Dictionary<UUID, sbyte>();
-                    HGUuidGatherer uuidGatherer = new HGUuidGatherer(m_scene.AssetService, url, ids);
+                    List<SceneObjectGroup> attached = new List<SceneObjectGroup>(deftatt.Count);
 
                     foreach (SceneObjectGroup defso in deftatt)
                     {
@@ -866,80 +849,156 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
                             continue;
                         }
 
-                        int attTickStart = Util.EnvironmentTickCount();
-                        uuidGatherer.AddForInspection(defso);
+                        List<UUID> scriptAssetIds = CollectAttachmentScriptAssetIds(defso);
+                        int scriptTickStart = Util.EnvironmentTickCount();
 
-                        bool attFailed = false;
-                        while (!uuidGatherer.Complete)
+                        m_log.DebugFormat(
+                            "[HG ENTITY TRANSFER]: Attachment {0} for {1}: fetching {2} script asset(s) (not full outfit assets)",
+                            defso.Name, defsp.Name, scriptAssetIds.Count);
+
+                        foreach (UUID scriptAssetId in scriptAssetIds)
                         {
                             if (defsp.IsDeleted)
-                            {
-                                attFailed = true;
                                 break;
-                            }
 
                             int tickStart = Util.EnvironmentTickCount();
-                            // GatherNext already fetches each asset via HGUuidGatherer.GetAsset/FetchAsset
-                            // (and RegionAssetConnector serves from local store when present). A second
-                            // pass over ids was redundant and roughly doubled first-visit fetch time.
-                            uuidGatherer.GatherNext();
-
+                            assetFetcher.FetchAsset(scriptAssetId);
                             int ticksElapsed = Util.EnvironmentTickCountSubtract(tickStart);
                             if (ticksElapsed > 30000)
                             {
                                 m_log.WarnFormat(
-                                    "[HG ENTITY TRANSFER]: Aborting gather for attachment {0} of HG user {1} (asset fetch > 30s)",
-                                    defso.Name, defsp.Name);
-                                attFailed = true;
-                                break;
+                                    "[HG ENTITY TRANSFER]: Script asset {0} for attachment {1} of {2} took > 30s; continuing",
+                                    scriptAssetId, defso.Name, defsp.Name);
                             }
                         }
 
                         if (defsp.IsDeleted)
                             break;
 
-                        if (attFailed)
+                        if (!m_scene.AddSceneObject(defso))
                         {
-                            // Skip this attachment but keep going with the rest (may already be local).
-                            // New gatherer reuses ids already fetched so we do not re-pull known assets.
-                            uuidGatherer = new HGUuidGatherer(m_scene.AssetService, url, ids);
+                            m_log.DebugFormat(
+                                "[HG ENTITY TRANSFER]: Problem adding attachment {0} {1} for {2} into {3}",
+                                defso.Name, defso.UUID, defsp.Name, m_sceneName);
                             continue;
                         }
 
-                        m_log.DebugFormat(
-                            "[HG ENTITY TRANSFER]: Gathered assets for attachment {0} of {1} in {2} ms ({3} uuid(s) known so far)",
-                            defso.Name, defsp.Name, Util.EnvironmentTickCountSubtract(attTickStart), ids.Count);
+                        attached.Add(defso);
 
-                        toadd.Add(defso);
+                        m_log.DebugFormat(
+                            "[HG ENTITY TRANSFER]: Attached {0} for {1} after {2} ms script fetch; starting scripts now",
+                            defso.Name, defsp.Name, Util.EnvironmentTickCountSubtract(scriptTickStart));
+
+                        // Start scripts as soon as this attachment is on the avatar (ISSUE-001).
+                        TryStartScriptsOnIncomingAttachment(defso);
                     }
+
+                    if (!defsp.IsDeleted)
+                        defsp.GotAttachmentsData = true;
 
                     if (defsp.IsDeleted)
                     {
                         m_log.DebugFormat(
-                            "[HG ENTITY TRANSFER]: HG user {0} left during attachment gather; not attaching {1} ready object(s)",
-                            defsp.Name, toadd.Count);
+                            "[HG ENTITY TRANSFER]: HG user {0} left after attaching {1} object(s) (script-first); skipping appearance gather",
+                            defsp.Name, attached.Count);
                         return;
                     }
 
-                    if (toadd.Count == 0)
+                    if (attached.Count == 0)
                     {
                         m_log.WarnFormat(
-                            "[HG ENTITY TRANSFER]: No attachments ready to attach for HG user {0} in {1} (source sent {2})",
+                            "[HG ENTITY TRANSFER]: No attachments attached for HG user {0} in {1} (source sent {2})",
                             defsp.Name, m_sceneName, deftatt.Count);
-                        defsp.GotAttachmentsData = true;
                         return;
                     }
 
+                    // Remaining assets (textures, mesh, sounds, materials, nested inventory, …)
+                    // so the attachment looks correct. Scripts are already running.
                     m_log.DebugFormat(
-                        "[HG ENTITY TRANSFER]: Attaching {0}/{1} object(s) for HG user {2} after asset gather in {3}",
-                        toadd.Count, deftatt.Count, defsp.Name, m_sceneName);
+                        "[HG ENTITY TRANSFER]: Fetching remaining appearance assets for {0} attachment(s) of {1} in {2}",
+                        attached.Count, defsp.Name, m_sceneName);
 
-                    // base starts scripts for root agents (ISSUE-001)
-                    base.HandleIncomingAttachments(defsp, toadd);
+                    IDictionary<UUID, sbyte> ids = new Dictionary<UUID, sbyte>();
+                    HGUuidGatherer appearanceGatherer = new HGUuidGatherer(m_scene.AssetService, url, ids);
+                    int appearanceTickStart = Util.EnvironmentTickCount();
+
+                    foreach (SceneObjectGroup defso in attached)
+                    {
+                        if (defsp.IsDeleted)
+                            break;
+
+                        appearanceGatherer.AddForInspection(defso);
+                        while (!appearanceGatherer.Complete)
+                        {
+                            if (defsp.IsDeleted)
+                                break;
+
+                            int tickStart = Util.EnvironmentTickCount();
+                            appearanceGatherer.GatherNext();
+                            if (Util.EnvironmentTickCountSubtract(tickStart) > 30000)
+                            {
+                                m_log.WarnFormat(
+                                    "[HG ENTITY TRANSFER]: Appearance asset fetch > 30s for attachment {0} of {1}; continuing",
+                                    defso.Name, defsp.Name);
+                                // Reset gatherer queue for remaining attachments; keep known ids.
+                                appearanceGatherer = new HGUuidGatherer(m_scene.AssetService, url, ids);
+                                break;
+                            }
+                        }
+                    }
+
+                    if (!defsp.IsDeleted)
+                    {
+                        m_log.DebugFormat(
+                            "[HG ENTITY TRANSFER]: Finished appearance asset gather for {0}: {1} uuid(s) in {2} ms",
+                            defsp.Name, ids.Count, Util.EnvironmentTickCountSubtract(appearanceTickStart));
+                    }
                 },
                 OwnerID.ToString());
 
             return true;
+        }
+
+        /// <summary>
+        /// Collect asset UUIDs for LSL scripts in an attachment's task inventories.
+        /// Does not include textures, mesh, sounds, or other non-script assets.
+        /// </summary>
+        private static List<UUID> CollectAttachmentScriptAssetIds(SceneObjectGroup sog)
+        {
+            List<UUID> scriptIds = new List<UUID>();
+            if (sog is null || sog.IsDeleted)
+                return scriptIds;
+
+            SceneObjectPart[] parts = sog.Parts;
+            if (parts is null)
+                return scriptIds;
+
+            HashSet<UUID> seen = new HashSet<UUID>();
+            for (int i = 0; i < parts.Length; i++)
+            {
+                SceneObjectPart part = parts[i];
+                if (part is null || part.TaskInventory is null)
+                    continue;
+
+                List<TaskInventoryItem> items = part.TaskInventory.GetItems();
+                for (int j = 0; j < items.Count; j++)
+                {
+                    TaskInventoryItem item = items[j];
+                    if (item is null || item.AssetID.IsZero())
+                        continue;
+
+                    // InvType is the reliable script marker; Type is AssetType (LSLText / LSLBytecode).
+                    if (item.InvType != (int)InventoryType.LSL
+                        && item.Type != (int)AssetType.LSLText
+                        && item.Type != (int)AssetType.LSLBytecode)
+                        continue;
+
+                    if (seen.Add(item.AssetID))
+                        scriptIds.Add(item.AssetID);
+                }
+            }
+
+            return scriptIds;
         }
 
         #endregion
