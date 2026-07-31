@@ -695,8 +695,10 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
             {
                 if ((aCircuit.teleportFlags & (uint)Constants.TeleportFlags.ViaHGLogin) == 0)
                 {
-                    // We have already pulled the necessary attachments from the source grid.
-                    base.HandleIncomingSceneObject(so, newPosition);
+                    // Already AddSceneObject'd above (assets pulled by first local region).
+                    // base.HandleIncomingSceneObject would try to add again; just start scripts if root.
+                    // ISSUE-001
+                    TryStartScriptsOnIncomingAttachment(so);
                 }
                 else
                 {
@@ -761,7 +763,12 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
                                     }
                                 }
 
+                                // May no-op if already AddSceneObject'd before the job; assets are local now.
                                 base.HandleIncomingSceneObject(defso, newPosition);
+
+                                // ISSUE-001: attach path uses resumeScripts=false; start scripts now that
+                                // assets are fetched and owner is typically already a root agent.
+                                TryStartScriptsOnIncomingAttachment(defso);
 
                                 defso = null;
                                 aCircuit = null;
@@ -861,6 +868,7 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
                                     }
                                 }
 
+                                // base starts scripts for root agents (ISSUE-001)
                                 base.HandleIncomingAttachments(sp, toadd);
 
                                 defsp = null;

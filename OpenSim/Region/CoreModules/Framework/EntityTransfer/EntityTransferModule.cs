@@ -2813,8 +2813,6 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
                     return false;
                 }
 
-                // For attachments, we need to wait until the agent is root
-                // before we restart the scripts, or else some functions won't work.
                 so.RootPart.ParentGroup.CreateScriptInstances(0, false, m_scene.DefaultScriptEngine, GetStateSource(so));
 
                 so.ResumeScripts();
@@ -2822,6 +2820,13 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
                 // AddSceneObject already does this and doing it again messes
                 //if (so.RootPart.KeyframeMotion != null)
                 //    so.RootPart.KeyframeMotion.UpdateSceneObject(so);
+            }
+            else
+            {
+                // Attachments are attached with resumeScripts=false in Scene.AddSceneObject.
+                // CompleteMovement may race with async HG asset gather and skip script start.
+                // Start scripts here once the owner is already a root agent (ISSUE-001).
+                TryStartScriptsOnIncomingAttachment(so);
             }
 
             return true;
@@ -2851,7 +2856,86 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
             }
 
             sp.GotAttachmentsData = true;
+
+            // Incoming attach deliberately does not resume scripts (see Scene.AddSceneObject).
+            // For HG, attachments often arrive after CompleteMovement (async asset fetch), so the
+            // CompleteMovement script-restart path saw an empty list. Start scripts now if root.
+            // (ISSUE-001: HG attachment scripts dead until detach/reattach)
+            TryStartScriptsOnIncomingAttachments(sp);
+
             return true;
+        }
+
+        /// <summary>
+        /// Start scripts on all attachments for a root agent after incoming attach processing.
+        /// No-op for child agents (CompleteMovement will start scripts when they become root if attachments are present).
+        /// </summary>
+        protected void TryStartScriptsOnIncomingAttachments(ScenePresence sp)
+        {
+            if (sp is null || sp.IsDeleted || sp.IsChildAgent)
+                return;
+
+            if (m_scene.RegionInfo.RegionSettings.DisableScripts)
+                return;
+
+            List<SceneObjectGroup> atts = sp.GetAttachments();
+            if (atts is null || atts.Count == 0)
+                return;
+
+            m_log.DebugFormat(
+                "[ENTITY TRANSFER MODULE]: Starting scripts on {0} incoming attachment(s) for root agent {1} in {2}",
+                atts.Count, sp.Name, m_sceneName);
+
+            int stateSource = sp.GetStateSource();
+            foreach (SceneObjectGroup sog in atts)
+            {
+                if (sog is null || sog.IsDeleted)
+                    continue;
+
+                try
+                {
+                    sog.CreateScriptInstances(0, false, m_scene.DefaultScriptEngine, stateSource);
+                    sog.ResumeScripts();
+                }
+                catch (Exception e)
+                {
+                    m_log.ErrorFormat(
+                        "[ENTITY TRANSFER MODULE]: Failed starting scripts on attachment {0} ({1}) for {2}: {3}",
+                        sog.Name, sog.UUID, sp.Name, e.Message);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Start scripts on a single incoming attachment if its owner is already a root agent.
+        /// </summary>
+        protected void TryStartScriptsOnIncomingAttachment(SceneObjectGroup so)
+        {
+            if (so is null || so.IsDeleted || !so.IsAttachment)
+                return;
+
+            if (m_scene.RegionInfo.RegionSettings.DisableScripts)
+                return;
+
+            ScenePresence sp = m_scene.GetScenePresence(so.OwnerID);
+            if (sp is null || sp.IsDeleted || sp.IsChildAgent)
+                return;
+
+            m_log.DebugFormat(
+                "[ENTITY TRANSFER MODULE]: Starting scripts on incoming attachment {0} for root agent {1} in {2}",
+                so.Name, sp.Name, m_sceneName);
+
+            try
+            {
+                so.CreateScriptInstances(0, false, m_scene.DefaultScriptEngine, GetStateSource(so));
+                so.ResumeScripts();
+            }
+            catch (Exception e)
+            {
+                m_log.ErrorFormat(
+                    "[ENTITY TRANSFER MODULE]: Failed starting scripts on attachment {0} ({1}) for {2}: {3}",
+                    so.Name, so.UUID, sp.Name, e.Message);
+            }
         }
 
         private int GetStateSource(SceneObjectGroup sog)
