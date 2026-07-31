@@ -801,84 +801,143 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
 
             // foreign user
             AgentCircuitData aCircuit = m_scene.AuthenticateHandler.GetAgentCircuitData(OwnerID);
-            if (aCircuit != null)
+            if (aCircuit is null)
             {
-                if ((aCircuit.teleportFlags & (uint)Constants.TeleportFlags.ViaHGLogin) == 0)
-                {
-                    // first region in local grid did pull the necessary attachments from the source grid.
-                    base.HandleIncomingAttachments(sp, attachments);
-                }
-                else
-                {
-                    if (aCircuit.ServiceURLs != null && aCircuit.ServiceURLs.ContainsKey("AssetServerURI"))
-                    {
-                        ScenePresence defsp = sp;
-                        List<SceneObjectGroup> deftatt = attachments;
-                        List<SceneObjectGroup> toadd = new List<SceneObjectGroup>(deftatt.Count);
-                        m_incomingSceneObjectEngine.QueueJob(
-                            string.Format("HG UUID Gather attachments {0}", defsp.Name), () =>
-                            {
-                                string url = aCircuit.ServiceURLs["AssetServerURI"].ToString();
-                                IDictionary<UUID, sbyte> ids = new Dictionary<UUID, sbyte>();
-                                HGUuidGatherer uuidGatherer = new HGUuidGatherer(m_scene.AssetService, url, ids);
-
-                                foreach (SceneObjectGroup defso in deftatt)
-                                {
-                                    if(defso.OwnerID.NotEqual(defsp.UUID))
-                                    {
-                                        m_log.ErrorFormat(
-                                            "[HG TRANSFER MODULE] attachment {0}({1} owner {2} does not match HG avatarID {3}",
-                                                defso.Name, defso.UUID, defso.OwnerID, defsp.UUID);
-                                        continue;
-                                    }
-                                    uuidGatherer.AddForInspection(defso);
-                                    while (!uuidGatherer.Complete)
-                                    {
-                                        if (sp.IsDeleted)
-                                        {
-                                            deftatt = null;
-                                            defsp = null;
-                                            uuidGatherer = null;
-                                            toadd = null;
-                                            return;
-                                        }
-                                        uuidGatherer.GatherNext();
-                                    }
-                                    toadd.Add(defso);
-                                }
-                                deftatt = null;
-
-                                foreach (UUID id in ids.Keys)
-                                {
-                                    int tickStart = Util.EnvironmentTickCount();
-
-                                    uuidGatherer.FetchAsset(id);
-
-                                    int ticksElapsed = Util.EnvironmentTickCountSubtract(tickStart);
-
-                                    if (sp.IsDeleted || ticksElapsed > 30000)
-                                    {
-                                        m_log.WarnFormat(
-                                            "[HG ENTITY TRANSFER]: Aborting fetch attachments assets for HG user {0}", sp.Name);
-
-                                        defsp = null;
-                                        uuidGatherer = null;
-                                        toadd = null;
-                                        return;
-                                    }
-                                }
-
-                                // base starts scripts for root agents (ISSUE-001)
-                                base.HandleIncomingAttachments(sp, toadd);
-
-                                defsp = null;
-                                uuidGatherer = null;
-                                toadd = null;
-                            },
-                            OwnerID.ToString());
-                    }
-                }
+                m_log.WarnFormat(
+                    "[HG ENTITY TRANSFER]: No agent circuit for foreign user {0}; attaching {1} object(s) without HG asset gather",
+                    sp.Name, attachments?.Count ?? 0);
+                return base.HandleIncomingAttachments(sp, attachments);
             }
+
+            if ((aCircuit.teleportFlags & (uint)Constants.TeleportFlags.ViaHGLogin) == 0)
+            {
+                // first region in local grid did pull the necessary attachments from the source grid.
+                return base.HandleIncomingAttachments(sp, attachments);
+            }
+
+            if (attachments is null || attachments.Count == 0)
+            {
+                m_log.DebugFormat(
+                    "[HG ENTITY TRANSFER]: HG user {0} ViaHGLogin with zero attachments to gather in {1}",
+                    sp.Name, m_sceneName);
+                sp.GotAttachmentsData = true;
+                return true;
+            }
+
+            if (aCircuit.ServiceURLs is null || !aCircuit.ServiceURLs.ContainsKey("AssetServerURI"))
+            {
+                // Cannot pull from home asset server; still attach so scripts can start if assets are already local.
+                m_log.WarnFormat(
+                    "[HG ENTITY TRANSFER]: HG user {0} has no AssetServerURI; attaching {1} object(s) without remote gather",
+                    sp.Name, attachments.Count);
+                return base.HandleIncomingAttachments(sp, attachments);
+            }
+
+            ScenePresence defsp = sp;
+            List<SceneObjectGroup> deftatt = attachments;
+            m_incomingSceneObjectEngine.QueueJob(
+                string.Format("HG UUID Gather attachments {0}", defsp.Name), () =>
+                {
+                    string url = aCircuit.ServiceURLs["AssetServerURI"].ToString();
+
+                    m_log.DebugFormat(
+                        "[HG ENTITY TRANSFER]: Gathering attachment assets for HG user {0} ({1} object(s)) from {2} in {3}",
+                        defsp.Name, deftatt.Count, url, m_sceneName);
+
+                    // Process one attachment at a time and attach as each completes.
+                    // The old all-or-nothing path waited for every nested asset of every attachment before
+                    // calling AddSceneObject; with large HG avatars that often aborted on leave (or took
+                    // minutes) so scripts never started. On a later visit assets may already be local so
+                    // gather is fast — still must attach and start scripts every time (ISSUE-001).
+                    List<SceneObjectGroup> toadd = new List<SceneObjectGroup>(deftatt.Count);
+                    IDictionary<UUID, sbyte> ids = new Dictionary<UUID, sbyte>();
+                    HGUuidGatherer uuidGatherer = new HGUuidGatherer(m_scene.AssetService, url, ids);
+
+                    foreach (SceneObjectGroup defso in deftatt)
+                    {
+                        if (defsp.IsDeleted)
+                            break;
+
+                        if (defso.OwnerID.NotEqual(defsp.UUID))
+                        {
+                            m_log.ErrorFormat(
+                                "[HG TRANSFER MODULE] attachment {0}({1}) owner {2} does not match HG avatarID {3}",
+                                defso.Name, defso.UUID, defso.OwnerID, defsp.UUID);
+                            continue;
+                        }
+
+                        int attTickStart = Util.EnvironmentTickCount();
+                        uuidGatherer.AddForInspection(defso);
+
+                        bool attFailed = false;
+                        while (!uuidGatherer.Complete)
+                        {
+                            if (defsp.IsDeleted)
+                            {
+                                attFailed = true;
+                                break;
+                            }
+
+                            int tickStart = Util.EnvironmentTickCount();
+                            // GatherNext already fetches each asset via HGUuidGatherer.GetAsset/FetchAsset
+                            // (and RegionAssetConnector serves from local store when present). A second
+                            // pass over ids was redundant and roughly doubled first-visit fetch time.
+                            uuidGatherer.GatherNext();
+
+                            int ticksElapsed = Util.EnvironmentTickCountSubtract(tickStart);
+                            if (ticksElapsed > 30000)
+                            {
+                                m_log.WarnFormat(
+                                    "[HG ENTITY TRANSFER]: Aborting gather for attachment {0} of HG user {1} (asset fetch > 30s)",
+                                    defso.Name, defsp.Name);
+                                attFailed = true;
+                                break;
+                            }
+                        }
+
+                        if (defsp.IsDeleted)
+                            break;
+
+                        if (attFailed)
+                        {
+                            // Skip this attachment but keep going with the rest (may already be local).
+                            // New gatherer reuses ids already fetched so we do not re-pull known assets.
+                            uuidGatherer = new HGUuidGatherer(m_scene.AssetService, url, ids);
+                            continue;
+                        }
+
+                        m_log.DebugFormat(
+                            "[HG ENTITY TRANSFER]: Gathered assets for attachment {0} of {1} in {2} ms ({3} uuid(s) known so far)",
+                            defso.Name, defsp.Name, Util.EnvironmentTickCountSubtract(attTickStart), ids.Count);
+
+                        toadd.Add(defso);
+                    }
+
+                    if (defsp.IsDeleted)
+                    {
+                        m_log.DebugFormat(
+                            "[HG ENTITY TRANSFER]: HG user {0} left during attachment gather; not attaching {1} ready object(s)",
+                            defsp.Name, toadd.Count);
+                        return;
+                    }
+
+                    if (toadd.Count == 0)
+                    {
+                        m_log.WarnFormat(
+                            "[HG ENTITY TRANSFER]: No attachments ready to attach for HG user {0} in {1} (source sent {2})",
+                            defsp.Name, m_sceneName, deftatt.Count);
+                        defsp.GotAttachmentsData = true;
+                        return;
+                    }
+
+                    m_log.DebugFormat(
+                        "[HG ENTITY TRANSFER]: Attaching {0}/{1} object(s) for HG user {2} after asset gather in {3}",
+                        toadd.Count, deftatt.Count, defsp.Name, m_sceneName);
+
+                    // base starts scripts for root agents (ISSUE-001)
+                    base.HandleIncomingAttachments(defsp, toadd);
+                },
+                OwnerID.ToString());
 
             return true;
         }

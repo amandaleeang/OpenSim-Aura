@@ -1336,7 +1336,16 @@ namespace OpenSim.Region.Framework.Scenes
         public AssetBase FetchAsset(UUID assetID)
         {
             string IDstr = assetID.ToString();
-            AssetBase asset = m_assetService.Get(IDstr, m_assetServerURL, true);
+            // Prefer an already-local copy (second HG visit, or prior gather). Only log a remote copy
+            // when the foreign service is actually contacted via Get(id, ForeignAssetService, ...).
+            AssetBase asset = m_assetService.Get(IDstr);
+            if (asset is not null)
+            {
+                // Quiet on cache/local hits so logs show real remote work (ISSUE-001 retest).
+                return asset;
+            }
+
+            asset = m_assetService.Get(IDstr, m_assetServerURL, true);
             if (asset is null)
                 m_log.Debug($"[HGUUIDGatherer]: Failed to fetch asset {IDstr} from {m_assetServerURL}");
             else
