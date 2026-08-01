@@ -1319,10 +1319,12 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
 
         protected virtual bool CreateAgent(ScenePresence sp, GridRegion reg, GridRegion finalDestination, AgentCircuitData agentCircuit, uint teleportFlags, EntityTransferContext ctx, out string reason, out bool logout)
         {
-            GridRegion source = new(m_sceneRegionInfo)
-            {
-                RawServerURI = m_thisGridInfo.GateKeeperURL
-            };
+            // Prefer this region's ServerURI (HTTP that can serve /assets via AssetServiceIn)
+            // so the destination can pull temp bake textures. Fall back to gatekeeper only
+            // if RegionInfo has no ServerURI. ISSUE-004 previous-sim fetch.
+            GridRegion source = new(m_sceneRegionInfo);
+            if (string.IsNullOrEmpty(source.RawServerURI) && !string.IsNullOrEmpty(m_thisGridInfo.GateKeeperURL))
+                source.RawServerURI = m_thisGridInfo.GateKeeperURL;
 
             logout = false;
             bool success = m_scene.SimulationService.CreateAgent(source, finalDestination, agentCircuit, teleportFlags, ctx, out reason);

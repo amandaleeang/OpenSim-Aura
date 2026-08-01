@@ -4170,6 +4170,20 @@ namespace OpenSim.Region.Framework.Scenes
                 // If the checks fail, we remove the circuit.
                 acd.teleportFlags = teleportFlags;
 
+                // ISSUE-004: remember previous region HTTP endpoint so AvatarFactory can try
+                // GET /assets/{bakeUuid} from that sim before home / rebake.
+                if (source is not null)
+                {
+                    acd.ServiceURLs ??= new Dictionary<string, object>();
+                    string srcUri = source.ServerURI;
+                    if (!string.IsNullOrWhiteSpace(srcUri))
+                        acd.ServiceURLs["SourceRegionURI"] = srcUri;
+                    if (!string.IsNullOrWhiteSpace(source.RegionName))
+                        acd.ServiceURLs["SourceRegionName"] = source.RegionName;
+                    if (source.RegionID.IsNotZero())
+                        acd.ServiceURLs["SourceRegionID"] = source.RegionID.ToString();
+                }
+
                 if (vialogin)
                 {
                     IUserAccountCacheModule cache = RequestModuleInterface<IUserAccountCacheModule>();

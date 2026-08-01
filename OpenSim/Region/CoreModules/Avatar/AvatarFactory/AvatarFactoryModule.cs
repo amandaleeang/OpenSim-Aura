@@ -848,38 +848,157 @@ namespace OpenSim.Region.CoreModules.Avatar.AvatarFactory
         }
 
         /// <summary>
-        /// Resolve visitor/local asset server URI for foreign bake fetch (empty if local-only).
+        /// Read a ServiceURLs string for this agent (empty if missing).
         /// </summary>
-        private string GetAgentAssetServerURI(IScenePresence sp)
+        private string GetAgentServiceUrl(IScenePresence sp, string key)
         {
             try
             {
                 AgentCircuitData acd = m_scene.AuthenticateHandler.GetAgentCircuitData(sp.UUID);
-                if (acd?.ServiceURLs == null)
+                if (acd?.ServiceURLs == null || !acd.ServiceURLs.ContainsKey(key))
                     return string.Empty;
 
-                if (!acd.ServiceURLs.ContainsKey("AssetServerURI"))
-                    return string.Empty;
-
-                object raw = acd.ServiceURLs["AssetServerURI"];
+                object raw = acd.ServiceURLs[key];
                 if (raw == null)
                     return string.Empty;
 
                 string url = raw.ToString();
-                return string.IsNullOrWhiteSpace(url) ? string.Empty : url;
+                return string.IsNullOrWhiteSpace(url) ? string.Empty : url.Trim();
             }
             catch (Exception e)
             {
-                m_log.DebugFormat("[AVFACTORY]: Could not resolve AssetServerURI for {0}: {1}", sp.Name, e.Message);
+                m_log.DebugFormat("[AVFACTORY]: Could not resolve ServiceURLs[{0}] for {1}: {2}", key, sp.Name, e.Message);
                 return string.Empty;
             }
         }
 
+        private static string NormalizeAssetBaseUrl(string url)
+        {
+            if (string.IsNullOrWhiteSpace(url))
+                return string.Empty;
+            url = url.Trim();
+            if (!url.EndsWith("/"))
+                url += "/";
+            return url;
+        }
+
+        private static bool SameAssetBase(string a, string b)
+        {
+            a = NormalizeAssetBaseUrl(a);
+            b = NormalizeAssetBaseUrl(b);
+            if (string.IsNullOrEmpty(a) || string.IsNullOrEmpty(b))
+                return false;
+            return string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private List<UUID> FilterStillMissingBakes(IList<UUID> ids, IAssetCache cache, IAssetService assetService)
+        {
+            List<UUID> missing = new List<UUID>();
+            if (ids == null)
+                return missing;
+
+            foreach (UUID id in ids)
+            {
+                if (id.IsZero() || id.Equals(AppearanceManager.DEFAULT_AVATAR_TEXTURE))
+                    continue;
+
+                string idStr = id.ToString();
+                if (cache != null && cache.Check(idStr))
+                    continue;
+
+                try
+                {
+                    AssetBase asset = assetService.GetCached(idStr);
+                    if (asset == null)
+                        asset = assetService.Get(idStr);
+                    if (asset != null)
+                    {
+                        cache?.Cache(asset);
+                        continue;
+                    }
+                }
+                catch
+                {
+                }
+
+                missing.Add(id);
+            }
+
+            return missing;
+        }
+
+        private void FetchBakesFromUrl(IAssetService assetService, string url, List<UUID> need)
+        {
+            if (need == null || need.Count == 0)
+                return;
+
+            try
+            {
+                HGUuidGatherer gatherer = new HGUuidGatherer(assetService, url ?? string.Empty);
+                gatherer.FetchConcurrency = m_bakeFetchConcurrency;
+                gatherer.FetchTimeoutMs = m_bakeFetchTimeoutMs;
+                gatherer.FetchAssetsParallel(need);
+            }
+            catch (Exception e)
+            {
+                m_log.DebugFormat("[AVFACTORY]: Bake fetch from '{0}' failed: {1}", url ?? "local", e.Message);
+            }
+        }
+
         /// <summary>
-        /// ISSUE-004 phase 1: fetch bake texture assets into local cache via IAssetService
-        /// (cache + durable local store), and when the agent has a foreign AssetServerURI,
-        /// pull from home on miss (HGUuidGatherer / same path as ISSUE-003).
-        /// Does not request viewer rebake. Returns count of assets now present in cache.
+        /// Optional XBakes / IBakedTextureModule — full set by agent UUID.
+        /// </summary>
+        private int TryFetchBakesFromXBakes(IScenePresence sp, List<UUID> need, IAssetCache cache)
+        {
+            if (need == null || need.Count == 0)
+                return 0;
+
+            IBakedTextureModule bakedModule = m_scene.RequestModuleInterface<IBakedTextureModule>();
+            if (bakedModule == null)
+                return 0;
+
+            WearableCacheItem[] items;
+            try
+            {
+                items = bakedModule.Get(sp.UUID);
+            }
+            catch (Exception e)
+            {
+                m_log.DebugFormat("[AVFACTORY]: XBakes Get failed for {0}: {1}", sp.Name, e.Message);
+                return 0;
+            }
+
+            if (items == null || items.Length == 0)
+                return 0;
+
+            HashSet<UUID> want = new HashSet<UUID>(need);
+            int hit = 0;
+            foreach (WearableCacheItem item in items)
+            {
+                if (item == null || item.TextureAsset == null || item.TextureID.IsZero())
+                    continue;
+                if (!want.Contains(item.TextureID))
+                    continue;
+
+                try
+                {
+                    item.TextureAsset.Temporary = true;
+                    item.TextureAsset.Local = true;
+                    cache?.Cache(item.TextureAsset);
+                    hit++;
+                }
+                catch
+                {
+                }
+            }
+
+            return hit;
+        }
+
+        /// <summary>
+        /// ISSUE-004: resolve bake texture assets into local cache before rebake.
+        /// Order: local → previous sim (SourceRegionURI) → home AssetServerURI → XBakes → (caller rebakes).
+        /// Returns count of originally-missing assets now present in cache.
         /// </summary>
         private int TryFetchBakeAssets(IScenePresence sp, IList<UUID> bakeIds)
         {
@@ -916,52 +1035,70 @@ namespace OpenSim.Region.CoreModules.Avatar.AvatarFactory
             if (need.Count == 0)
                 return 0;
 
-            string foreignUrl = GetAgentAssetServerURI(sp);
+            int initialNeed = need.Count;
+            string previousUrl = NormalizeAssetBaseUrl(GetAgentServiceUrl(sp, "SourceRegionURI"));
+            string homeUrl = NormalizeAssetBaseUrl(GetAgentServiceUrl(sp, "AssetServerURI"));
+            string previousName = GetAgentServiceUrl(sp, "SourceRegionName");
 
-            try
-            {
-                HGUuidGatherer gatherer = new HGUuidGatherer(assetService, foreignUrl);
-                gatherer.FetchConcurrency = m_bakeFetchConcurrency;
-                gatherer.FetchTimeoutMs = m_bakeFetchTimeoutMs;
-                gatherer.FetchAssetsParallel(need);
-            }
-            catch (Exception e)
-            {
-                m_log.DebugFormat("[AVFACTORY]: Bake asset fetch error for {0}: {1}", sp.Name, e.Message);
-            }
+            // 1) Local asset service / Flotsam (HGUuidGatherer with empty foreign URL)
+            FetchBakesFromUrl(assetService, string.Empty, need);
+            need = FilterStillMissingBakes(need, cache, assetService);
+            int afterLocal = initialNeed - need.Count;
 
-            int resolved = 0;
-            foreach (UUID id in need)
+            // 2) Previous sim HTTP (SourceRegionURI from NewUserConnection)
+            int afterPrevious = afterLocal;
+            if (need.Count > 0 && !string.IsNullOrEmpty(previousUrl))
             {
-                string idStr = id.ToString();
-                if (cache != null && cache.Check(idStr))
+                // Skip if previous is clearly this region's own public endpoint (already local)
+                string selfUri = NormalizeAssetBaseUrl(m_scene.RegionInfo?.ServerURI);
+                if (!SameAssetBase(previousUrl, selfUri))
                 {
-                    resolved++;
-                    continue;
-                }
-
-                // Ensure anything returned only into durable store is also in IAssetCache
-                // (UpdateBakedTextureCache checks the cache, not AssetService directly).
-                try
-                {
-                    AssetBase asset = assetService.GetCached(idStr);
-                    if (asset == null)
-                        asset = assetService.Get(idStr);
-                    if (asset != null)
-                    {
-                        cache?.Cache(asset);
-                        resolved++;
-                    }
-                }
-                catch
-                {
+                    m_log.DebugFormat(
+                        "[AVFACTORY]: Bake fetch trying previous sim for {0}: {1} ({2}) missing={3}",
+                        sp.Name, previousName, previousUrl, need.Count);
+                    FetchBakesFromUrl(assetService, previousUrl, need);
+                    need = FilterStillMissingBakes(need, cache, assetService);
+                    afterPrevious = initialNeed - need.Count;
                 }
             }
 
-            m_log.DebugFormat(
-                "[AVFACTORY]: Bake fetch for {0}: need={1} resolved={2} source={3}",
-                sp.Name, need.Count, resolved,
-                string.IsNullOrEmpty(foreignUrl) ? "local" : foreignUrl);
+            // 3) Home AssetServerURI (HG) — skip if same as previous
+            int afterHome = afterPrevious;
+            if (need.Count > 0 && !string.IsNullOrEmpty(homeUrl) && !SameAssetBase(homeUrl, previousUrl))
+            {
+                m_log.DebugFormat(
+                    "[AVFACTORY]: Bake fetch trying home for {0}: {1} missing={2}",
+                    sp.Name, homeUrl, need.Count);
+                FetchBakesFromUrl(assetService, homeUrl, need);
+                need = FilterStillMissingBakes(need, cache, assetService);
+                afterHome = initialNeed - need.Count;
+            }
+
+            // 4) XBakes / IBakedTextureModule (optional)
+            int afterXbake = afterHome;
+            if (need.Count > 0)
+            {
+                int xb = TryFetchBakesFromXBakes(sp, need, cache);
+                if (xb > 0)
+                {
+                    need = FilterStillMissingBakes(need, cache, assetService);
+                    afterXbake = initialNeed - need.Count;
+                }
+            }
+
+            int resolved = initialNeed - need.Count;
+            m_log.InfoFormat(
+                "[AVFACTORY]: Bake fetch for {0}: need={1} resolved={2} (local={3} previous={4} home={5} xbake={6} still={7}) previous={8} home={9}",
+                sp.Name,
+                initialNeed,
+                resolved,
+                afterLocal,
+                Math.Max(0, afterPrevious - afterLocal),
+                Math.Max(0, afterHome - afterPrevious),
+                Math.Max(0, afterXbake - afterHome),
+                need.Count,
+                string.IsNullOrEmpty(previousUrl) ? "-" : previousUrl,
+                string.IsNullOrEmpty(homeUrl) ? "-" : homeUrl);
 
             return resolved;
         }

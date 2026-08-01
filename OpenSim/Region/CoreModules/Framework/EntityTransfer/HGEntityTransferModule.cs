@@ -309,10 +309,10 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
                     else
                         connector = new UserAgentServiceConnector(userAgentDriver);
 
-                    GridRegion source = new GridRegion(m_sceneRegionInfo)
-                    {
-                        RawServerURI = m_thisGridInfo.GateKeeperURL
-                    };
+                    // ISSUE-004: export region ServerURI when set so destination can fetch bakes
+                    GridRegion source = new GridRegion(m_sceneRegionInfo);
+                    if (string.IsNullOrEmpty(source.RawServerURI) && !string.IsNullOrEmpty(m_thisGridInfo.GateKeeperURL))
+                        source.RawServerURI = m_thisGridInfo.GateKeeperURL;
 
                     bool success = connector.LoginAgentToGrid(source, agentCircuit, reg, finalDestination, false, out reason);
                     //logout = success & !isLocal; // flag for later logout from this grid; this is an HG TP
