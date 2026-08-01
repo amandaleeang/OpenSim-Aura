@@ -2283,8 +2283,9 @@ namespace OpenSim.Region.Framework.Scenes
                         ParentPart.ParentGroup.SendFullAnimUpdateToClient(ControllingClient);
                     }
 
-                    // verify baked textures and cache
-                    if (m_scene.AvatarFactory != null && !isHGTP)
+                    // verify baked textures and cache (ISSUE-004: include HG — pre-fetch
+                    // bake assets before rebake; previously skipped for ViaHGLogin)
+                    if (m_scene.AvatarFactory != null)
                     {
                         if (!m_scene.AvatarFactory.ValidateBakedTextureCache(this))
                             m_scene.AvatarFactory.QueueAppearanceSave(UUID);
