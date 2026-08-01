@@ -1485,14 +1485,43 @@ namespace OpenSim.Region.Framework.Scenes
         }
 
         /// <summary>
+        /// Visual-critical asset types for two-phase HG appearance (ISSUE-003 phase 2).
+        /// Textures, mesh, materials, wearables, and object definitions first;
+        /// sounds/animations/etc. deferred so the avatar looks right sooner.
+        /// </summary>
+        public static bool IsVisualAppearanceAssetType(sbyte assetType)
+        {
+            switch ((AssetType)assetType)
+            {
+                case AssetType.Texture:
+                case AssetType.TextureTGA:
+                case AssetType.ImageJPEG:
+                case AssetType.ImageTGA:
+                case AssetType.Mesh:
+                case AssetType.Material:
+                case AssetType.Clothing:
+                case AssetType.Bodypart:
+                case AssetType.Object:
+                    return true;
+                default:
+                    // OSMaterial is outside some AssetType enums; UuidGatherer casts it explicitly
+                    if (assetType == (sbyte)AssetType.OSMaterial)
+                        return true;
+                    return false;
+            }
+        }
+
+        /// <summary>
         /// Wave-parallel gather: dequeue a batch, fetch in parallel, then inspect nested UUIDs serially.
-        /// Compatible with stock GET /assets/{uuid} (ISSUE-003).
+        /// Then two-phase ensure: visual assets first, sounds/anims second (ISSUE-003).
+        /// Compatible with stock GET /assets/{uuid}.
         /// </summary>
         public void GatherAllParallel(Func<bool> shouldAbort = null)
         {
             int concurrency = Math.Max(1, FetchConcurrency);
             int timeoutMs = Math.Max(500, FetchTimeoutMs);
             int waves = 0;
+            int waveTickStart = Util.EnvironmentTickCount();
 
             while (!Complete)
             {
@@ -1556,36 +1585,76 @@ namespace OpenSim.Region.Framework.Scenes
                 }
             }
 
-            // Face textures etc. are often recorded in GatheredUuids without a GET — ensure local copy.
-            EnsureGatheredAssetsPresent(shouldAbort);
+            int inspectMs = Util.EnvironmentTickCountSubtract(waveTickStart);
+
+            // Phase 1 — visual (textures, mesh, materials, wearables, objects)
+            int p1Start = Util.EnvironmentTickCount();
+            int p1Count = EnsureGatheredAssetsPresent(shouldAbort, visualOnly: true);
+            int p1Ms = Util.EnvironmentTickCountSubtract(p1Start);
+            m_log.DebugFormat(
+                "[HGUUIDGatherer]: Appearance phase1 (visual) ensured {0} missing asset(s) in {1} ms",
+                p1Count, p1Ms);
+
+            if (shouldAbort != null && shouldAbort())
+                return;
+
+            // Phase 2 — deferred (sounds, animations, gestures, notecards, …)
+            int p2Start = Util.EnvironmentTickCount();
+            int p2Count = EnsureGatheredAssetsPresent(shouldAbort, visualOnly: false);
+            int p2Ms = Util.EnvironmentTickCountSubtract(p2Start);
+            m_log.DebugFormat(
+                "[HGUUIDGatherer]: Appearance phase2 (audio/anim/other) ensured {0} missing asset(s) in {1} ms",
+                p2Count, p2Ms);
 
             m_log.DebugFormat(
-                "[HGUUIDGatherer]: Parallel gather done waves={0} concurrency={1} timeoutMs={2} gathered={3} failed={4}",
-                waves, concurrency, timeoutMs, GatheredUuids.Count, FailedUUIDs.Count);
+                "[HGUUIDGatherer]: Parallel gather done waves={0} concurrency={1} timeoutMs={2} gathered={3} failed={4} inspectMs={5} phase1Ms={6} phase2Ms={7}",
+                waves, concurrency, timeoutMs, GatheredUuids.Count, FailedUUIDs.Count, inspectMs, p1Ms, p2Ms);
         }
 
         /// <summary>
-        /// Ensure every UUID already listed in GatheredUuids exists locally (fetch foreign if needed).
-        /// Fixes textures marked gathered without download (legacy UuidGatherer behaviour).
+        /// Ensure UUIDs listed in GatheredUuids exist locally (fetch foreign if needed).
+        /// When <paramref name="visualOnly"/> is true, only visual-critical types.
+        /// When false, only non-visual (deferred) types.
+        /// Returns how many assets were scheduled for fetch (missing locally).
         /// </summary>
-        public void EnsureGatheredAssetsPresent(Func<bool> shouldAbort = null)
+        public int EnsureGatheredAssetsPresent(Func<bool> shouldAbort, bool visualOnly)
         {
             List<UUID> need = new();
-            foreach (UUID id in GatheredUuids.Keys)
+            foreach (KeyValuePair<UUID, sbyte> kv in GatheredUuids)
             {
+                UUID id = kv.Key;
                 if (id.IsZero() || FailedUUIDs.Contains(id))
                     continue;
+
+                bool isVisual = IsVisualAppearanceAssetType(kv.Value);
+                if (visualOnly && !isVisual)
+                    continue;
+                if (!visualOnly && isVisual)
+                    continue;
+
                 if (m_assetService.Get(id.ToString()) is null)
                     need.Add(id);
             }
 
             if (need.Count == 0)
-                return;
+                return 0;
 
             m_log.DebugFormat(
-                "[HGUUIDGatherer]: Ensuring {0} gathered asset(s) are present locally (parallel)",
-                need.Count);
+                "[HGUUIDGatherer]: Ensuring {0} {1} asset(s) are present locally (parallel)",
+                need.Count, visualOnly ? "visual" : "deferred");
             FetchAssetsParallel(need, shouldAbort);
+            return need.Count;
+        }
+
+        /// <summary>
+        /// Ensure every UUID already listed in GatheredUuids exists locally (fetch foreign if needed).
+        /// </summary>
+        public void EnsureGatheredAssetsPresent(Func<bool> shouldAbort = null)
+        {
+            EnsureGatheredAssetsPresent(shouldAbort, visualOnly: true);
+            if (shouldAbort != null && shouldAbort())
+                return;
+            EnsureGatheredAssetsPresent(shouldAbort, visualOnly: false);
         }
     }
 }

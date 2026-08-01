@@ -903,10 +903,10 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
                         return;
                     }
 
-                    // Remaining assets (textures, mesh, sounds, materials, nested inventory, …)
-                    // Parallel wave gather — still one GET per asset (ISSUE-003 compatible).
+                    // Remaining assets: parallel wave gather + two-phase ensure
+                    // (visual textures/mesh first, sounds/anims second) — ISSUE-003.
                     m_log.DebugFormat(
-                        "[HG ENTITY TRANSFER]: Fetching remaining appearance assets for {0} attachment(s) of {1} in {2} (parallel concurrency={3})",
+                        "[HG ENTITY TRANSFER]: Fetching appearance assets for {0} attachment(s) of {1} in {2} (parallel concurrency={3}, two-phase visual then audio/anim)",
                         attached.Count, defsp.Name, m_sceneName, m_hgAssetFetchConcurrency);
 
                     IDictionary<UUID, sbyte> ids = new Dictionary<UUID, sbyte>();
@@ -927,7 +927,7 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
                     if (!defsp.IsDeleted)
                     {
                         m_log.DebugFormat(
-                            "[HG ENTITY TRANSFER]: Finished appearance asset gather for {0}: {1} uuid(s) in {2} ms (parallel)",
+                            "[HG ENTITY TRANSFER]: Finished appearance asset gather for {0}: {1} uuid(s) in {2} ms (parallel, two-phase)",
                             defsp.Name, ids.Count, Util.EnvironmentTickCountSubtract(appearanceTickStart));
                     }
                 },
