@@ -115,6 +115,12 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
         /// </summary>
         private JobEngine m_incomingSceneObjectEngine;
 
+        /// <summary>ISSUE-003: max concurrent HG asset GETs (compatible single-asset protocol).</summary>
+        private int m_hgAssetFetchConcurrency = 8;
+
+        /// <summary>ISSUE-003: per-asset fetch timeout in milliseconds.</summary>
+        private int m_hgAssetFetchTimeoutMs = 8000;
+
         #region ISharedRegionModule
 
         public override string Name
@@ -143,12 +149,32 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
                             if (m_AccountName.Length == 0)
                                 m_log.WarnFormat("[HG ENTITY TRANSFER MODULE]: RestrictAppearanceAbroad is on, but no account has been given for avatar appearance!");
                         }
+
+                        m_hgAssetFetchConcurrency = transferConfig.GetInt("HGAssetFetchConcurrency", m_hgAssetFetchConcurrency);
+                        if (m_hgAssetFetchConcurrency < 1)
+                            m_hgAssetFetchConcurrency = 1;
+                        if (m_hgAssetFetchConcurrency > 32)
+                            m_hgAssetFetchConcurrency = 32;
+
+                        m_hgAssetFetchTimeoutMs = transferConfig.GetInt("HGAssetFetchTimeoutMs", m_hgAssetFetchTimeoutMs);
+                        if (m_hgAssetFetchTimeoutMs < 500)
+                            m_hgAssetFetchTimeoutMs = 500;
                     }
 
                     InitialiseCommon(source);
-                    m_log.DebugFormat("[HG ENTITY TRANSFER MODULE]: {0} enabled.", Name);
+                    m_log.DebugFormat(
+                        "[HG ENTITY TRANSFER MODULE]: {0} enabled (HGAssetFetchConcurrency={1}, HGAssetFetchTimeoutMs={2}).",
+                        Name, m_hgAssetFetchConcurrency, m_hgAssetFetchTimeoutMs);
                 }
             }
+        }
+
+        private void ConfigureHgGatherer(HGUuidGatherer gatherer)
+        {
+            if (gatherer is null)
+                return;
+            gatherer.FetchConcurrency = m_hgAssetFetchConcurrency;
+            gatherer.FetchTimeoutMs = m_hgAssetFetchTimeoutMs;
         }
 
         public override void AddRegion(Scene scene)
@@ -717,18 +743,14 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
 
                                 string url = defCircuit.ServiceURLs["AssetServerURI"].ToString();
                                 HGUuidGatherer assetFetcher = new HGUuidGatherer(m_scene.AssetService, url);
+                                ConfigureHgGatherer(assetFetcher);
 
                                 List<UUID> scriptAssetIds = CollectAttachmentScriptAssetIds(defso);
                                 m_log.DebugFormat(
                                     "[HG ENTITY TRANSFER]: Single attachment {0} for {1}: fetching {2} script asset(s) then starting scripts",
                                     defso.Name, defCircuit.Name, scriptAssetIds.Count);
 
-                                foreach (UUID scriptAssetId in scriptAssetIds)
-                                {
-                                    if (defso.IsDeleted)
-                                        return;
-                                    assetFetcher.FetchAsset(scriptAssetId);
-                                }
+                                assetFetcher.FetchAssetsParallel(scriptAssetIds, () => defso.IsDeleted);
 
                                 if (!defso.IsDeleted)
                                     TryStartScriptsOnIncomingAttachment(defso);
@@ -739,22 +761,9 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
 
                                 IDictionary<UUID, sbyte> ids = new Dictionary<UUID, sbyte>();
                                 HGUuidGatherer appearanceGatherer = new HGUuidGatherer(m_scene.AssetService, url, ids);
+                                ConfigureHgGatherer(appearanceGatherer);
                                 appearanceGatherer.AddForInspection(defso);
-                                while (!appearanceGatherer.Complete)
-                                {
-                                    if (defso.IsDeleted)
-                                        return;
-
-                                    int tickStart = Util.EnvironmentTickCount();
-                                    appearanceGatherer.GatherNext();
-                                    if (Util.EnvironmentTickCountSubtract(tickStart) > 30000)
-                                    {
-                                        m_log.WarnFormat(
-                                            "[HG ENTITY TRANSFER]: Appearance gather timeout for attachment {0} of HG user {1}; stopping appearance fetch",
-                                            defso.Name, defCircuit.Name);
-                                        return;
-                                    }
-                                }
+                                appearanceGatherer.GatherAllParallel(() => defso.IsDeleted);
                             },
                             OwnerID.ToString());
                     }
@@ -823,16 +832,12 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
                 {
                     string url = aCircuit.ServiceURLs["AssetServerURI"].ToString();
                     HGUuidGatherer assetFetcher = new HGUuidGatherer(m_scene.AssetService, url);
+                    ConfigureHgGatherer(assetFetcher);
 
-                    // Script-first path (ISSUE-001 follow-up):
-                    // Full UUID gather of an attachment pulls textures, mesh, materials, sounds,
-                    // animations, nested objects, etc. — often hundreds of assets for a worn outfit,
-                    // not just a few scripts. Scripts only need LSL assets to compile/run.
-                    // So for each attachment: fetch script assets → attach → start scripts immediately,
-                    // then pull remaining appearance assets in the background.
+                    // Script-first path (ISSUE-001) + parallel asset GET (ISSUE-003, still stock /assets/{uuid}).
                     m_log.DebugFormat(
-                        "[HG ENTITY TRANSFER]: HG attachment script-first path for {0} ({1} object(s)) from {2} in {3}",
-                        defsp.Name, deftatt.Count, url, m_sceneName);
+                        "[HG ENTITY TRANSFER]: HG attachment script-first path for {0} ({1} object(s)) from {2} in {3} (concurrency={4}, timeoutMs={5})",
+                        defsp.Name, deftatt.Count, url, m_sceneName, m_hgAssetFetchConcurrency, m_hgAssetFetchTimeoutMs);
 
                     List<SceneObjectGroup> attached = new List<SceneObjectGroup>(deftatt.Count);
 
@@ -856,21 +861,7 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
                             "[HG ENTITY TRANSFER]: Attachment {0} for {1}: fetching {2} script asset(s) (not full outfit assets)",
                             defso.Name, defsp.Name, scriptAssetIds.Count);
 
-                        foreach (UUID scriptAssetId in scriptAssetIds)
-                        {
-                            if (defsp.IsDeleted)
-                                break;
-
-                            int tickStart = Util.EnvironmentTickCount();
-                            assetFetcher.FetchAsset(scriptAssetId);
-                            int ticksElapsed = Util.EnvironmentTickCountSubtract(tickStart);
-                            if (ticksElapsed > 30000)
-                            {
-                                m_log.WarnFormat(
-                                    "[HG ENTITY TRANSFER]: Script asset {0} for attachment {1} of {2} took > 30s; continuing",
-                                    scriptAssetId, defso.Name, defsp.Name);
-                            }
-                        }
+                        assetFetcher.FetchAssetsParallel(scriptAssetIds, () => defsp.IsDeleted);
 
                         if (defsp.IsDeleted)
                             break;
@@ -913,44 +904,30 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
                     }
 
                     // Remaining assets (textures, mesh, sounds, materials, nested inventory, …)
-                    // so the attachment looks correct. Scripts are already running.
+                    // Parallel wave gather — still one GET per asset (ISSUE-003 compatible).
                     m_log.DebugFormat(
-                        "[HG ENTITY TRANSFER]: Fetching remaining appearance assets for {0} attachment(s) of {1} in {2}",
-                        attached.Count, defsp.Name, m_sceneName);
+                        "[HG ENTITY TRANSFER]: Fetching remaining appearance assets for {0} attachment(s) of {1} in {2} (parallel concurrency={3})",
+                        attached.Count, defsp.Name, m_sceneName, m_hgAssetFetchConcurrency);
 
                     IDictionary<UUID, sbyte> ids = new Dictionary<UUID, sbyte>();
                     HGUuidGatherer appearanceGatherer = new HGUuidGatherer(m_scene.AssetService, url, ids);
+                    ConfigureHgGatherer(appearanceGatherer);
                     int appearanceTickStart = Util.EnvironmentTickCount();
 
                     foreach (SceneObjectGroup defso in attached)
                     {
                         if (defsp.IsDeleted)
                             break;
-
                         appearanceGatherer.AddForInspection(defso);
-                        while (!appearanceGatherer.Complete)
-                        {
-                            if (defsp.IsDeleted)
-                                break;
-
-                            int tickStart = Util.EnvironmentTickCount();
-                            appearanceGatherer.GatherNext();
-                            if (Util.EnvironmentTickCountSubtract(tickStart) > 30000)
-                            {
-                                m_log.WarnFormat(
-                                    "[HG ENTITY TRANSFER]: Appearance asset fetch > 30s for attachment {0} of {1}; continuing",
-                                    defso.Name, defsp.Name);
-                                // Reset gatherer queue for remaining attachments; keep known ids.
-                                appearanceGatherer = new HGUuidGatherer(m_scene.AssetService, url, ids);
-                                break;
-                            }
-                        }
                     }
+
+                    if (!defsp.IsDeleted)
+                        appearanceGatherer.GatherAllParallel(() => defsp.IsDeleted);
 
                     if (!defsp.IsDeleted)
                     {
                         m_log.DebugFormat(
-                            "[HG ENTITY TRANSFER]: Finished appearance asset gather for {0}: {1} uuid(s) in {2} ms",
+                            "[HG ENTITY TRANSFER]: Finished appearance asset gather for {0}: {1} uuid(s) in {2} ms (parallel)",
                             defsp.Name, ids.Count, Util.EnvironmentTickCountSubtract(appearanceTickStart));
                     }
                 },

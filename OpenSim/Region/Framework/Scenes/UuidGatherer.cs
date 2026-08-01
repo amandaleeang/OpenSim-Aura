@@ -26,10 +26,13 @@
  */
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 using log4net;
 using OpenMetaverse;
 using OpenMetaverse.StructuredData;
@@ -235,7 +238,7 @@ namespace OpenSim.Region.Framework.Scenes
         public HashSet<UUID> FailedUUIDs { get; private set; }
         public HashSet<UUID> UncertainAssetsUUIDs { get; private set; }
         public int possibleNotAssetCount { get; set; }
-        public int ErrorCount { get; private set; }
+        public int ErrorCount { get; protected set; }
         public int AssetGetCount;
         private bool verbose = true;
 
@@ -578,11 +581,25 @@ namespace OpenSim.Region.Framework.Scenes
                 return;
             }
 
+            ProcessFetchedAsset(assetUuid, assetBase);
+        }
+
+        /// <summary>
+        /// Record a fetched asset and enqueue any nested UUIDs it references.
+        /// Used by serial GatherNext and by parallel batch gather after HTTP completes.
+        /// </summary>
+        protected void ProcessFetchedAsset(UUID assetUuid, AssetBase assetBase)
+        {
+            if (assetUuid.IsZero() || assetBase is null)
+                return;
+
+            if (FailedUUIDs.Contains(assetUuid))
+                return;
+
             ++AssetGetCount;
 
             if(UncertainAssetsUUIDs.Contains(assetUuid))
                 UncertainAssetsUUIDs.Remove(assetUuid);
-
 
             if(assetBase.Data == null || assetBase.Data.Length == 0)
             {
@@ -640,6 +657,24 @@ namespace OpenSim.Region.Framework.Scenes
                 ErrorCount++;
                 FailedUUIDs.Add(assetUuid);
             }
+        }
+
+        /// <summary>
+        /// Dequeue up to <paramref name="maxCount"/> UUIDs waiting for inspection (serial-safe).
+        /// </summary>
+        protected List<UUID> DequeueInspectionBatch(int maxCount)
+        {
+            List<UUID> batch = new(Math.Max(1, maxCount));
+            while (batch.Count < maxCount && m_assetUuidsToInspect.Count > 0)
+            {
+                UUID id = m_assetUuidsToInspect.Dequeue();
+                if (id.IsZero())
+                    continue;
+                if (FailedUUIDs.Contains(id) || GatheredUuids.ContainsKey(id))
+                    continue;
+                batch.Add(id);
+            }
+            return batch;
         }
 
         private void AddForInspection(UUID assetUuid, sbyte assetType)
@@ -1314,7 +1349,18 @@ namespace OpenSim.Region.Framework.Scenes
     {
         private static readonly ILog m_log = LogManager.GetLogger(MethodBase.GetCurrentMethod().DeclaringType);
 
+        /// <summary>
+        /// In-flight foreign fetches keyed by assetServerURL|uuid — dedupe concurrent getters.
+        /// </summary>
+        private static readonly ConcurrentDictionary<string, Task<AssetBase>> s_InflightFetches = new();
+
         protected string m_assetServerURL;
+
+        /// <summary>Max concurrent foreign/local asset GETs (ISSUE-003). Default 8.</summary>
+        public int FetchConcurrency { get; set; } = 8;
+
+        /// <summary>Per-asset wait timeout in ms (ISSUE-003). Default 8000.</summary>
+        public int FetchTimeoutMs { get; set; } = 8000;
 
         public HGUuidGatherer(IAssetService assetService, string assetServerURL)
             : this(assetService, assetServerURL, new Dictionary<UUID, sbyte>()) {}
@@ -1335,23 +1381,211 @@ namespace OpenSim.Region.Framework.Scenes
 
         public AssetBase FetchAsset(UUID assetID)
         {
+            return FetchAsset(assetID, FetchTimeoutMs);
+        }
+
+        /// <summary>
+        /// Local-first asset get; on miss, pull from foreign AssetServerURI and store locally.
+        /// Concurrent callers for the same foreign id share one in-flight request (ISSUE-003).
+        /// </summary>
+        public AssetBase FetchAsset(UUID assetID, int timeoutMs)
+        {
+            if (assetID.IsZero())
+                return null;
+
             string IDstr = assetID.ToString();
-            // Prefer an already-local copy (second HG visit, or prior gather). Only log a remote copy
-            // when the foreign service is actually contacted via Get(id, ForeignAssetService, ...).
             AssetBase asset = m_assetService.Get(IDstr);
             if (asset is not null)
-            {
-                // Quiet on cache/local hits so logs show real remote work (ISSUE-001 retest).
                 return asset;
+
+            if (string.IsNullOrWhiteSpace(m_assetServerURL))
+                return null;
+
+            string inflightKey = m_assetServerURL + "|" + IDstr;
+            try
+            {
+                Task<AssetBase> task = s_InflightFetches.GetOrAdd(inflightKey, key =>
+                {
+                    Task<AssetBase> t = Task.Run(() =>
+                    {
+                        AssetBase a = m_assetService.Get(IDstr, m_assetServerURL, true);
+                        if (a is null)
+                            m_log.Debug($"[HGUUIDGatherer]: Failed to fetch asset {IDstr} from {m_assetServerURL}");
+                        else
+                            m_log.Debug($"[HGUUIDGatherer]: Copied asset {IDstr} from {m_assetServerURL} to local asset server");
+                        return a;
+                    });
+                    // Always clear in-flight slot when done so timeouts do not pin the entry forever
+                    _ = t.ContinueWith(_ => s_InflightFetches.TryRemove(key, out _),
+                        TaskContinuationOptions.ExecuteSynchronously);
+                    return t;
+                });
+
+                if (timeoutMs <= 0)
+                    return task.GetAwaiter().GetResult();
+
+                if (task.Wait(timeoutMs))
+                    return task.Result;
+
+                m_log.WarnFormat(
+                    "[HGUUIDGatherer]: Fetch timeout {0}ms for asset {1} from {2}",
+                    timeoutMs, IDstr, m_assetServerURL);
+                return null;
+            }
+            catch (Exception e)
+            {
+                m_log.Debug($"[HGUUIDGatherer]: Fetch exception for {IDstr}: {e.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Fetch many assets with bounded parallelism (local-first, foreign on miss). ISSUE-003.
+        /// </summary>
+        public void FetchAssetsParallel(IEnumerable<UUID> assetIds, Func<bool> shouldAbort = null)
+        {
+            if (assetIds is null)
+                return;
+
+            List<UUID> list = new();
+            HashSet<UUID> seen = new();
+            foreach (UUID id in assetIds)
+            {
+                if (id.IsZero() || !seen.Add(id))
+                    continue;
+                if (FailedUUIDs.Contains(id))
+                    continue;
+                list.Add(id);
             }
 
-            asset = m_assetService.Get(IDstr, m_assetServerURL, true);
-            if (asset is null)
-                m_log.Debug($"[HGUUIDGatherer]: Failed to fetch asset {IDstr} from {m_assetServerURL}");
-            else
-                m_log.Debug($"[HGUUIDGatherer]: Copied asset {IDstr} from {m_assetServerURL} to local asset server");
+            if (list.Count == 0)
+                return;
 
-            return asset;
+            int concurrency = Math.Max(1, FetchConcurrency);
+            int timeoutMs = Math.Max(500, FetchTimeoutMs);
+
+            System.Threading.Tasks.Parallel.ForEach(list,
+                new ParallelOptions { MaxDegreeOfParallelism = concurrency },
+                (UUID id, ParallelLoopState state) =>
+                {
+                    if (shouldAbort != null && shouldAbort())
+                    {
+                        state.Stop();
+                        return;
+                    }
+                    try
+                    {
+                        FetchAsset(id, timeoutMs);
+                    }
+                    catch (Exception e)
+                    {
+                        m_log.Debug($"[HGUUIDGatherer]: Parallel fetch failed for {id}: {e.Message}");
+                    }
+                });
+        }
+
+        /// <summary>
+        /// Wave-parallel gather: dequeue a batch, fetch in parallel, then inspect nested UUIDs serially.
+        /// Compatible with stock GET /assets/{uuid} (ISSUE-003).
+        /// </summary>
+        public void GatherAllParallel(Func<bool> shouldAbort = null)
+        {
+            int concurrency = Math.Max(1, FetchConcurrency);
+            int timeoutMs = Math.Max(500, FetchTimeoutMs);
+            int waves = 0;
+
+            while (!Complete)
+            {
+                if (shouldAbort != null && shouldAbort())
+                    return;
+
+                List<UUID> batch = DequeueInspectionBatch(concurrency);
+                if (batch.Count == 0)
+                {
+                    if (Complete)
+                        break;
+                    // Only duplicates left that were skipped — drain carefully
+                    if (m_assetUuidsToInspect.Count > 0)
+                    {
+                        UUID id = m_assetUuidsToInspect.Dequeue();
+                        if (!id.IsZero() && !FailedUUIDs.Contains(id) && !GatheredUuids.ContainsKey(id))
+                            batch.Add(id);
+                        else
+                            continue;
+                    }
+                    else
+                        break;
+                }
+
+                waves++;
+                ConcurrentDictionary<UUID, AssetBase> fetched = new();
+
+                System.Threading.Tasks.Parallel.ForEach(batch,
+                    new ParallelOptions { MaxDegreeOfParallelism = concurrency },
+                    uuid =>
+                    {
+                        if (shouldAbort != null && shouldAbort())
+                            return;
+                        try
+                        {
+                            AssetBase a = FetchAsset(uuid, timeoutMs);
+                            if (a != null)
+                                fetched[uuid] = a;
+                        }
+                        catch (Exception e)
+                        {
+                            m_log.Debug($"[HGUUIDGatherer]: Parallel gather fetch failed for {uuid}: {e.Message}");
+                        }
+                    });
+
+                if (shouldAbort != null && shouldAbort())
+                    return;
+
+                foreach (UUID uuid in batch)
+                {
+                    if (fetched.TryGetValue(uuid, out AssetBase asset))
+                        ProcessFetchedAsset(uuid, asset);
+                    else
+                    {
+                        if (!FailedUUIDs.Contains(uuid))
+                        {
+                            FailedUUIDs.Add(uuid);
+                            ErrorCount++;
+                        }
+                    }
+                }
+            }
+
+            // Face textures etc. are often recorded in GatheredUuids without a GET — ensure local copy.
+            EnsureGatheredAssetsPresent(shouldAbort);
+
+            m_log.DebugFormat(
+                "[HGUUIDGatherer]: Parallel gather done waves={0} concurrency={1} timeoutMs={2} gathered={3} failed={4}",
+                waves, concurrency, timeoutMs, GatheredUuids.Count, FailedUUIDs.Count);
+        }
+
+        /// <summary>
+        /// Ensure every UUID already listed in GatheredUuids exists locally (fetch foreign if needed).
+        /// Fixes textures marked gathered without download (legacy UuidGatherer behaviour).
+        /// </summary>
+        public void EnsureGatheredAssetsPresent(Func<bool> shouldAbort = null)
+        {
+            List<UUID> need = new();
+            foreach (UUID id in GatheredUuids.Keys)
+            {
+                if (id.IsZero() || FailedUUIDs.Contains(id))
+                    continue;
+                if (m_assetService.Get(id.ToString()) is null)
+                    need.Add(id);
+            }
+
+            if (need.Count == 0)
+                return;
+
+            m_log.DebugFormat(
+                "[HGUUIDGatherer]: Ensuring {0} gathered asset(s) are present locally (parallel)",
+                need.Count);
+            FetchAssetsParallel(need, shouldAbort);
         }
     }
 }
