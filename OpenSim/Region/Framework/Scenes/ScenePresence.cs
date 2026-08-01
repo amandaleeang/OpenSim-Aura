@@ -2283,28 +2283,22 @@ namespace OpenSim.Region.Framework.Scenes
                         ParentPart.ParentGroup.SendFullAnimUpdateToClient(ControllingClient);
                     }
 
-                    // ISSUE-004: do NOT block CompleteMovement on remote bake GET (previous/home).
-                    // Sync multi-source fetch races with concurrent HG attachment jobs and can
-                    // throw "Collection was modified" while enumerating presences/attachments.
-                    // Warm bakes asynchronously; UpdateBakedTextureCache still fetch-before-rebake.
+                    // ISSUE-004: restore local bake store (disk, fast) before appearance is sent.
+                    // Must be sync so SendAppearance below uses restored TE UUIDs.
+                    // No remote previous/home GET here (that caused CompleteMovement races).
                     if (m_scene.AvatarFactory != null)
                     {
-                        IAvatarFactoryModule avFactory = m_scene.AvatarFactory;
-                        ScenePresence self = this;
-                        Util.FireAndForget(_ =>
+                        try
                         {
-                            try
-                            {
-                                if (!avFactory.ValidateBakedTextureCache(self))
-                                    avFactory.QueueAppearanceSave(self.UUID);
-                            }
-                            catch (Exception e)
-                            {
-                                m_log.DebugFormat(
-                                    "[CompleteMovement]: Async bake validate failed for {0}: {1}",
-                                    self.Name, e.Message);
-                            }
-                        });
+                            if (!m_scene.AvatarFactory.ValidateBakedTextureCache(this))
+                                m_scene.AvatarFactory.QueueAppearanceSave(UUID);
+                        }
+                        catch (Exception e)
+                        {
+                            m_log.DebugFormat(
+                                "[CompleteMovement]: Bake validate failed for {0}: {1}",
+                                Name, e.Message);
+                        }
                     }
                 }
 

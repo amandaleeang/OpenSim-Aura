@@ -28,6 +28,7 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.Concurrent;
+using System.IO;
 using System.Reflection;
 using System.Threading;
 using System.Text;
@@ -35,6 +36,7 @@ using System.Timers;
 using log4net;
 using Nini.Config;
 using OpenMetaverse;
+using OpenMetaverse.StructuredData;
 using OpenSim.Framework;
 using OpenSim.Framework.Monitoring;
 using OpenSim.Region.Framework.Interfaces;
@@ -71,10 +73,9 @@ namespace OpenSim.Region.CoreModules.Avatar.AvatarFactory
         private const int REBAKE_THROTTLE_SECONDS = 30;
         readonly ExpiringKey<string> m_rebakeThrottle = new(500 * REBAKE_THROTTLE_SECONDS);
 
-        // ISSUE-004 phase 1: fetch bake assets before requesting viewer rebake
-        private bool m_bakeFetchEnabled = true;
-        private int m_bakeFetchConcurrency = 8;
-        private int m_bakeFetchTimeoutMs = 8000;
+        // ISSUE-004: local-only bake store for next visit (no previous-sim / home fetch)
+        private bool m_localBakeStoreEnabled = true;
+        private string m_localBakeStorePath = "avatar_bake_cache";
         
         #region Region Module interface
 
@@ -88,33 +89,17 @@ namespace OpenSim.Region.CoreModules.Avatar.AvatarFactory
                 m_sendtime = appearanceConfig.GetInt("DelayBeforeAppearanceSend", m_sendtime);
                 // m_log.InfoFormat("[AVFACTORY] configured for {0} save and {1} send",m_savetime,m_sendtime);
 
-                m_bakeFetchEnabled = appearanceConfig.GetBoolean("BakeFetchEnabled", m_bakeFetchEnabled);
-                m_bakeFetchConcurrency = appearanceConfig.GetInt("BakeFetchConcurrency", m_bakeFetchConcurrency);
-                m_bakeFetchTimeoutMs = appearanceConfig.GetInt("BakeFetchTimeoutMs", m_bakeFetchTimeoutMs);
+                m_localBakeStoreEnabled = appearanceConfig.GetBoolean("LocalBakeStoreEnabled", m_localBakeStoreEnabled);
+                m_localBakeStorePath = appearanceConfig.GetString("LocalBakeStorePath", m_localBakeStorePath);
             }
 
-            // Align concurrency/timeout with ISSUE-003 HG fetch knobs when Appearance does not override
-            IConfig transferConfig = config.Configs["EntityTransfer"];
-            if (transferConfig != null)
-            {
-                if (appearanceConfig == null || appearanceConfig.GetString("BakeFetchConcurrency", null) == null)
-                    m_bakeFetchConcurrency = transferConfig.GetInt("HGAssetFetchConcurrency", m_bakeFetchConcurrency);
-                if (appearanceConfig == null || appearanceConfig.GetString("BakeFetchTimeoutMs", null) == null)
-                    m_bakeFetchTimeoutMs = transferConfig.GetInt("HGAssetFetchTimeoutMs", m_bakeFetchTimeoutMs);
-            }
+            if (string.IsNullOrWhiteSpace(m_localBakeStorePath))
+                m_localBakeStorePath = "avatar_bake_cache";
 
-            if (m_bakeFetchConcurrency < 1)
-                m_bakeFetchConcurrency = 1;
-            else if (m_bakeFetchConcurrency > 32)
-                m_bakeFetchConcurrency = 32;
-
-            if (m_bakeFetchTimeoutMs < 500)
-                m_bakeFetchTimeoutMs = 500;
-
-            if (m_bakeFetchEnabled)
+            if (m_localBakeStoreEnabled)
                 m_log.InfoFormat(
-                    "[AVFACTORY]: Bake fetch-before-rebake enabled (concurrency={0}, timeoutMs={1})",
-                    m_bakeFetchConcurrency, m_bakeFetchTimeoutMs);
+                    "[AVFACTORY]: Local bake store enabled (path={0}) — restore on enter, save after rebake",
+                    m_localBakeStorePath);
         }
 
         public void AddRegion(Scene scene)
@@ -396,26 +381,10 @@ namespace OpenSim.Region.CoreModules.Avatar.AvatarFactory
             // uploaded baked textures will be in assets local cache
             IAssetCache cache = m_scene.RequestModuleInterface<IAssetCache>();
 
-            // ISSUE-004 phase 1: try to pull missing bake assets (local service / HG home)
-            // into cache before treating them as rebake-required.
-            if (m_bakeFetchEnabled && cache != null && sp.Appearance?.Texture?.FaceTextures != null)
-            {
-                List<UUID> toFetch = new List<UUID>();
-                for (int i = 0; i < cacheItems.Length; i++)
-                {
-                    uint pidx = cacheItems[i].TextureIndex;
-                    if (pidx >= AvatarAppearance.TEXTURE_COUNT)
-                        continue;
-                    Primitive.TextureEntryFace pface = sp.Appearance.Texture.FaceTextures[pidx];
-                    if (pface == null || pface.TextureID.IsZero() ||
-                            pface.TextureID.Equals(AppearanceManager.DEFAULT_AVATAR_TEXTURE))
-                        continue;
-                    if (!cache.Check(pface.TextureID.ToString()))
-                        toFetch.Add(pface.TextureID);
-                }
-                if (toFetch.Count > 0)
-                    TryFetchBakeAssets(sp, toFetch);
-            }
+            // ISSUE-004: if TE bake UUIDs are not in Flotsam, try last visit's stored set
+            // for this agent (rewrites TE to those UUIDs + reloads asset bytes).
+            if (m_localBakeStoreEnabled && cache != null && !AppearanceBakesPresentInCache(sp, cache))
+                TryRestoreLocalAgentBakes(sp, cache);
 
             int validDirtyBakes = 0;
             int hits = 0;
@@ -542,6 +511,10 @@ namespace OpenSim.Region.CoreModules.Avatar.AvatarFactory
                 m_log.DebugFormat("[UpdateBakedCache] cache hits: {0} changed entries: {1} rebakes {2}",
                         hits.ToString(), validDirtyBakes.ToString(), missing.Count);
 
+            // ISSUE-004: persist full bake set under agent UUID for next visit to this sim
+            if (m_localBakeStoreEnabled && missing.Count == 0 && cache != null)
+                StoreLocalAgentBakes(sp, wearableCache, cache);
+
             for (int iter = 0; iter < AvatarAppearance.BAKE_INDICES.Length; iter++)
             {
                 int j = AvatarAppearance.BAKE_INDICES[iter];
@@ -567,14 +540,9 @@ namespace OpenSim.Region.CoreModules.Avatar.AvatarFactory
             if (cache == null)
                 return false;
 
-            // ISSUE-004 phase 1: pre-warm bake assets from local asset service / HG home
-            // before validating (and before any later rebake path). Outside lock — may network I/O.
-            if (m_bakeFetchEnabled)
-            {
-                List<UUID> bakeIds = CollectAppearanceBakeTextureIds(sp);
-                if (bakeIds.Count > 0)
-                    TryFetchBakeAssets(sp, bakeIds);
-            }
+            // ISSUE-004: restore last local bake set for this agent if TE UUIDs are missing
+            if (m_localBakeStoreEnabled && !AppearanceBakesPresentInCache(sp, cache))
+                TryRestoreLocalAgentBakes(sp, cache);
 
             IBakedTextureModule bakedModule = m_scene.RequestModuleInterface<IBakedTextureModule>();
 
@@ -760,23 +728,10 @@ namespace OpenSim.Region.CoreModules.Avatar.AvatarFactory
             int texturesRebaked = 0;
             IAssetCache cache = m_scene.RequestModuleInterface<IAssetCache>();
 
-            // ISSUE-004 phase 1: attempt asset resolve before mass rebake of missing faces
-            if (missingTexturesOnly && m_bakeFetchEnabled)
-            {
-                List<UUID> missing = new List<UUID>();
-                for (int i = 0; i < AvatarAppearance.BAKE_INDICES.Length; i++)
-                {
-                    int idx = AvatarAppearance.BAKE_INDICES[i];
-                    Primitive.TextureEntryFace face = sp.Appearance.Texture.FaceTextures[idx];
-                    if (face == null || face.TextureID.IsZero() ||
-                            face.TextureID.Equals(AppearanceManager.DEFAULT_AVATAR_TEXTURE))
-                        continue;
-                    if (cache == null || !cache.Check(face.TextureID.ToString()))
-                        missing.Add(face.TextureID);
-                }
-                if (missing.Count > 0)
-                    TryFetchBakeAssets(sp, missing);
-            }
+            // ISSUE-004: try local agent bake store before mass rebake
+            if (missingTexturesOnly && m_localBakeStoreEnabled && cache != null &&
+                    !AppearanceBakesPresentInCache(sp, cache))
+                TryRestoreLocalAgentBakes(sp, cache);
 
             for (int i = 0; i < AvatarAppearance.BAKE_INDICES.Length; i++)
             {
@@ -822,16 +777,16 @@ namespace OpenSim.Region.CoreModules.Avatar.AvatarFactory
         #region AvatarFactoryModule private methods
 
         /// <summary>
-        /// Collect non-default bake face texture UUIDs from the presence appearance TE.
+        /// True when every non-default bake face UUID in the appearance TE is already in IAssetCache.
         /// </summary>
-        private static List<UUID> CollectAppearanceBakeTextureIds(IScenePresence sp)
+        private static bool AppearanceBakesPresentInCache(IScenePresence sp, IAssetCache cache)
         {
-            List<UUID> ids = new List<UUID>();
-            if (sp?.Appearance?.Texture?.FaceTextures == null)
-                return ids;
+            if (sp?.Appearance?.Texture?.FaceTextures == null || cache == null)
+                return false;
 
             Primitive.TextureEntryFace[] faces = sp.Appearance.Texture.FaceTextures;
-            HashSet<UUID> seen = new HashSet<UUID>();
+            int needed = 0;
+            int present = 0;
             for (int i = 0; i < AvatarAppearance.BAKE_INDICES.Length; i++)
             {
                 int idx = AvatarAppearance.BAKE_INDICES[i];
@@ -841,266 +796,162 @@ namespace OpenSim.Region.CoreModules.Avatar.AvatarFactory
                 if (face == null || face.TextureID.IsZero() ||
                         face.TextureID.Equals(AppearanceManager.DEFAULT_AVATAR_TEXTURE))
                     continue;
-                if (seen.Add(face.TextureID))
-                    ids.Add(face.TextureID);
+                // skirt optional
+                if (idx == 19)
+                    continue;
+                needed++;
+                if (cache.Check(face.TextureID.ToString()))
+                    present++;
             }
-            return ids;
+            return needed > 0 && present >= needed;
+        }
+
+        private string GetAgentBakeStoreFile(UUID agentId)
+        {
+            return Path.Combine(m_localBakeStorePath, agentId.ToString() + ".osd");
         }
 
         /// <summary>
-        /// Read a ServiceURLs string for this agent (empty if missing).
+        /// Save bake face textures for this agent (bytes + UUIDs) for the next visit to this sim.
         /// </summary>
-        private string GetAgentServiceUrl(IScenePresence sp, string key)
+        private void StoreLocalAgentBakes(IScenePresence sp, WearableCacheItem[] wearableCache, IAssetCache cache)
         {
-            try
-            {
-                AgentCircuitData acd = m_scene.AuthenticateHandler.GetAgentCircuitData(sp.UUID);
-                if (acd?.ServiceURLs == null || !acd.ServiceURLs.ContainsKey(key))
-                    return string.Empty;
-
-                object raw = acd.ServiceURLs[key];
-                if (raw == null)
-                    return string.Empty;
-
-                string url = raw.ToString();
-                return string.IsNullOrWhiteSpace(url) ? string.Empty : url.Trim();
-            }
-            catch (Exception e)
-            {
-                m_log.DebugFormat("[AVFACTORY]: Could not resolve ServiceURLs[{0}] for {1}: {2}", key, sp.Name, e.Message);
-                return string.Empty;
-            }
-        }
-
-        private static string NormalizeAssetBaseUrl(string url)
-        {
-            if (string.IsNullOrWhiteSpace(url))
-                return string.Empty;
-            url = url.Trim();
-            if (!url.EndsWith("/"))
-                url += "/";
-            return url;
-        }
-
-        private static bool SameAssetBase(string a, string b)
-        {
-            a = NormalizeAssetBaseUrl(a);
-            b = NormalizeAssetBaseUrl(b);
-            if (string.IsNullOrEmpty(a) || string.IsNullOrEmpty(b))
-                return false;
-            return string.Equals(a, b, StringComparison.OrdinalIgnoreCase);
-        }
-
-        private List<UUID> FilterStillMissingBakes(IList<UUID> ids, IAssetCache cache, IAssetService assetService)
-        {
-            List<UUID> missing = new List<UUID>();
-            if (ids == null)
-                return missing;
-
-            foreach (UUID id in ids)
-            {
-                if (id.IsZero() || id.Equals(AppearanceManager.DEFAULT_AVATAR_TEXTURE))
-                    continue;
-
-                string idStr = id.ToString();
-                if (cache != null && cache.Check(idStr))
-                    continue;
-
-                try
-                {
-                    AssetBase asset = assetService.GetCached(idStr);
-                    if (asset == null)
-                        asset = assetService.Get(idStr);
-                    if (asset != null)
-                    {
-                        cache?.Cache(asset);
-                        continue;
-                    }
-                }
-                catch
-                {
-                }
-
-                missing.Add(id);
-            }
-
-            return missing;
-        }
-
-        private void FetchBakesFromUrl(IAssetService assetService, string url, List<UUID> need)
-        {
-            if (need == null || need.Count == 0)
+            if (!m_localBakeStoreEnabled || sp == null || wearableCache == null || cache == null)
                 return;
 
             try
             {
-                HGUuidGatherer gatherer = new HGUuidGatherer(assetService, url ?? string.Empty);
-                gatherer.FetchConcurrency = m_bakeFetchConcurrency;
-                gatherer.FetchTimeoutMs = m_bakeFetchTimeoutMs;
-                gatherer.FetchAssetsParallel(need);
+                List<WearableCacheItem> bakeItems = new List<WearableCacheItem>();
+                for (int i = 0; i < AvatarAppearance.BAKE_INDICES.Length; i++)
+                {
+                    int idx = AvatarAppearance.BAKE_INDICES[i];
+                    if (idx >= wearableCache.Length)
+                        continue;
+                    WearableCacheItem item = wearableCache[idx];
+                    if (item == null || item.TextureID.IsZero() ||
+                            item.TextureID.Equals(AppearanceManager.DEFAULT_AVATAR_TEXTURE))
+                        continue;
+                    if (!cache.Check(item.TextureID.ToString()))
+                        continue;
+                    bakeItems.Add(item);
+                }
+
+                // Need a solid body set (skirt optional) — BAKES_COUNT_PV7 includes skirt at index slot 19
+                int bodyCount = 0;
+                foreach (WearableCacheItem item in bakeItems)
+                {
+                    if (item.TextureIndex != 19)
+                        bodyCount++;
+                }
+                if (bodyCount < 5)
+                    return;
+
+                OSD osd = WearableCacheItem.ToOSD(bakeItems.ToArray(), cache);
+                if (osd == null)
+                    return;
+
+                // Ensure every item actually embedded asset bytes
+                if (osd is OSDArray arr)
+                {
+                    int withData = 0;
+                    foreach (OSD o in arr)
+                    {
+                        if (o is OSDMap map && map.ContainsKey("assetdata"))
+                            withData++;
+                    }
+                    if (withData < 5)
+                        return;
+                }
+
+                Directory.CreateDirectory(m_localBakeStorePath);
+                string path = GetAgentBakeStoreFile(sp.UUID);
+                byte[] data = OSDParser.SerializeLLSDXmlBytes(osd);
+                File.WriteAllBytes(path, data);
+
+                m_log.InfoFormat(
+                    "[AVFACTORY]: Stored local bakes for {0} ({1} face(s), {2} bytes) → {3}",
+                    sp.Name, bakeItems.Count, data.Length, path);
             }
             catch (Exception e)
             {
-                m_log.DebugFormat("[AVFACTORY]: Bake fetch from '{0}' failed: {1}", url ?? "local", e.Message);
+                m_log.WarnFormat("[AVFACTORY]: Failed to store local bakes for {0}: {1}", sp.Name, e.Message);
             }
         }
 
         /// <summary>
-        /// Optional XBakes / IBakedTextureModule — full set by agent UUID.
+        /// Load last stored bake set for this agent into Flotsam and rewrite appearance TE
+        /// to those UUIDs so the next visit does not need a viewer rebake.
         /// </summary>
-        private int TryFetchBakesFromXBakes(IScenePresence sp, List<UUID> need, IAssetCache cache)
+        private bool TryRestoreLocalAgentBakes(IScenePresence sp, IAssetCache cache)
         {
-            if (need == null || need.Count == 0)
-                return 0;
+            if (!m_localBakeStoreEnabled || sp == null || cache == null)
+                return false;
 
-            IBakedTextureModule bakedModule = m_scene.RequestModuleInterface<IBakedTextureModule>();
-            if (bakedModule == null)
-                return 0;
+            string path = GetAgentBakeStoreFile(sp.UUID);
+            if (!File.Exists(path))
+                return false;
 
-            WearableCacheItem[] items;
             try
             {
-                items = bakedModule.Get(sp.UUID);
-            }
-            catch (Exception e)
-            {
-                m_log.DebugFormat("[AVFACTORY]: XBakes Get failed for {0}: {1}", sp.Name, e.Message);
-                return 0;
-            }
+                byte[] raw = File.ReadAllBytes(path);
+                if (raw == null || raw.Length == 0)
+                    return false;
 
-            if (items == null || items.Length == 0)
-                return 0;
+                OSD osd = OSDParser.DeserializeLLSDXml(raw);
+                // FromOSD loads TextureIDs and injects assetdata into IAssetCache
+                WearableCacheItem[] loaded = WearableCacheItem.FromOSD(osd, cache);
+                if (loaded == null || loaded.Length == 0)
+                    return false;
 
-            HashSet<UUID> want = new HashSet<UUID>(need);
-            int hit = 0;
-            foreach (WearableCacheItem item in items)
-            {
-                if (item == null || item.TextureAsset == null || item.TextureID.IsZero())
-                    continue;
-                if (!want.Contains(item.TextureID))
-                    continue;
+                WearableCacheItem[] wearable = sp.Appearance.WearableCacheItems
+                    ?? WearableCacheItem.GetDefaultCacheItem();
 
-                try
+                int restored = 0;
+                foreach (WearableCacheItem item in loaded)
                 {
-                    item.TextureAsset.Temporary = true;
-                    item.TextureAsset.Local = true;
-                    cache?.Cache(item.TextureAsset);
-                    hit++;
+                    if (item == null || item.TextureID.IsZero())
+                        continue;
+
+                    uint idx = item.TextureIndex;
+                    if (idx >= AvatarAppearance.TEXTURE_COUNT)
+                        continue;
+
+                    if (!cache.Check(item.TextureID.ToString()))
+                    {
+                        // FromOSD should have cached; skip face if still missing bytes
+                        continue;
+                    }
+
+                    Primitive.TextureEntryFace face = sp.Appearance.Texture.CreateFace(idx);
+                    face.TextureID = item.TextureID;
+
+                    wearable[idx].TextureIndex = idx;
+                    wearable[idx].TextureID = item.TextureID;
+                    wearable[idx].CacheId = item.CacheId.IsNotZero() ? item.CacheId : item.TextureID;
+                    wearable[idx].TextureAsset = null;
+                    restored++;
                 }
-                catch
-                {
-                }
-            }
 
-            return hit;
-        }
-
-        /// <summary>
-        /// ISSUE-004: resolve bake texture assets into local cache before rebake.
-        /// Order: local → previous sim (SourceRegionURI) → home AssetServerURI → XBakes → (caller rebakes).
-        /// Returns count of originally-missing assets now present in cache.
-        /// </summary>
-        private int TryFetchBakeAssets(IScenePresence sp, IList<UUID> bakeIds)
-        {
-            if (!m_bakeFetchEnabled || sp == null || bakeIds == null || bakeIds.Count == 0)
-                return 0;
-
-            IAssetService assetService;
-            try
-            {
-                assetService = m_scene.AssetService;
-            }
-            catch
-            {
-                return 0;
-            }
-            if (assetService == null)
-                return 0;
-
-            IAssetCache cache = m_scene.RequestModuleInterface<IAssetCache>();
-
-            List<UUID> need = new List<UUID>();
-            HashSet<UUID> seen = new HashSet<UUID>();
-            foreach (UUID id in bakeIds)
-            {
-                if (id.IsZero() || !seen.Add(id))
-                    continue;
-                if (id.Equals(AppearanceManager.DEFAULT_AVATAR_TEXTURE))
-                    continue;
-                if (cache != null && cache.Check(id.ToString()))
-                    continue;
-                need.Add(id);
-            }
-
-            if (need.Count == 0)
-                return 0;
-
-            int initialNeed = need.Count;
-            string previousUrl = NormalizeAssetBaseUrl(GetAgentServiceUrl(sp, "SourceRegionURI"));
-            string homeUrl = NormalizeAssetBaseUrl(GetAgentServiceUrl(sp, "AssetServerURI"));
-            string previousName = GetAgentServiceUrl(sp, "SourceRegionName");
-
-            // 1) Local asset service / Flotsam (HGUuidGatherer with empty foreign URL)
-            FetchBakesFromUrl(assetService, string.Empty, need);
-            need = FilterStillMissingBakes(need, cache, assetService);
-            int afterLocal = initialNeed - need.Count;
-
-            // 2) Previous sim HTTP (SourceRegionURI from NewUserConnection)
-            int afterPrevious = afterLocal;
-            if (need.Count > 0 && !string.IsNullOrEmpty(previousUrl))
-            {
-                // Skip if previous is clearly this region's own public endpoint (already local)
-                string selfUri = NormalizeAssetBaseUrl(m_scene.RegionInfo?.ServerURI);
-                if (!SameAssetBase(previousUrl, selfUri))
+                if (restored < 5)
                 {
                     m_log.DebugFormat(
-                        "[AVFACTORY]: Bake fetch trying previous sim for {0}: {1} ({2}) missing={3}",
-                        sp.Name, previousName, previousUrl, need.Count);
-                    FetchBakesFromUrl(assetService, previousUrl, need);
-                    need = FilterStillMissingBakes(need, cache, assetService);
-                    afterPrevious = initialNeed - need.Count;
+                        "[AVFACTORY]: Local bake restore incomplete for {0}: only {1} face(s) from {2}",
+                        sp.Name, restored, path);
+                    return false;
                 }
-            }
 
-            // 3) Home AssetServerURI (HG) — skip if same as previous
-            int afterHome = afterPrevious;
-            if (need.Count > 0 && !string.IsNullOrEmpty(homeUrl) && !SameAssetBase(homeUrl, previousUrl))
+                sp.Appearance.WearableCacheItems = wearable;
+
+                m_log.InfoFormat(
+                    "[AVFACTORY]: Restored local bakes for {0}: {1} face(s) from {2}",
+                    sp.Name, restored, path);
+                return true;
+            }
+            catch (Exception e)
             {
-                m_log.DebugFormat(
-                    "[AVFACTORY]: Bake fetch trying home for {0}: {1} missing={2}",
-                    sp.Name, homeUrl, need.Count);
-                FetchBakesFromUrl(assetService, homeUrl, need);
-                need = FilterStillMissingBakes(need, cache, assetService);
-                afterHome = initialNeed - need.Count;
+                m_log.WarnFormat("[AVFACTORY]: Failed to restore local bakes for {0}: {1}", sp.Name, e.Message);
+                return false;
             }
-
-            // 4) XBakes / IBakedTextureModule (optional)
-            int afterXbake = afterHome;
-            if (need.Count > 0)
-            {
-                int xb = TryFetchBakesFromXBakes(sp, need, cache);
-                if (xb > 0)
-                {
-                    need = FilterStillMissingBakes(need, cache, assetService);
-                    afterXbake = initialNeed - need.Count;
-                }
-            }
-
-            int resolved = initialNeed - need.Count;
-            m_log.InfoFormat(
-                "[AVFACTORY]: Bake fetch for {0}: need={1} resolved={2} (local={3} previous={4} home={5} xbake={6} still={7}) previous={8} home={9}",
-                sp.Name,
-                initialNeed,
-                resolved,
-                afterLocal,
-                Math.Max(0, afterPrevious - afterLocal),
-                Math.Max(0, afterHome - afterPrevious),
-                Math.Max(0, afterXbake - afterHome),
-                need.Count,
-                string.IsNullOrEmpty(previousUrl) ? "-" : previousUrl,
-                string.IsNullOrEmpty(homeUrl) ? "-" : homeUrl);
-
-            return resolved;
         }
 
         private Dictionary<BakeType, Primitive.TextureEntryFace> GetBakedTextureFaces(ScenePresence sp)
