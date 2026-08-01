@@ -39,6 +39,7 @@ using OpenSim.Framework;
 using OpenSim.Region.Framework.Interfaces;
 using OpenSim.Region.Framework.Scenes;
 using OpenSim.Services.Interfaces;
+using OpenSim.Services.Connectors.Friends;
 using OpenSim.Services.Connectors.Hypergrid;
 using FriendInfo = OpenSim.Services.Interfaces.FriendInfo;
 using PresenceInfo = OpenSim.Services.Interfaces.PresenceInfo;
@@ -373,17 +374,76 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
             if (agentIsLocal)
                 return base.GetFriendsFromService(client);
 
-            // Foreigner
+            // Foreigner — local DB only has friendships made while visiting this grid.
+            // Pull the full list from home FriendsServerURI so CacheFriends can seed
+            // UserManagement (HomeURL) and profile lookup for same-home friends works.
             AgentCircuitData agentClientCircuit = ((Scene)(client.Scene)).AuthenticateHandler.GetAgentCircuitData(client.CircuitCode);
-            if (agentClientCircuit is not null)
-            {
-                // Note that this is calling a different interface than base; this one calls with a string param!
-                FriendInfo[] finfos = FriendsService.GetFriends(client.AgentId.ToString());
-                m_log.DebugFormat("[HGFRIENDS MODULE]: Fetched {0} local friends for visitor {1}", finfos.Length, client.AgentId.ToString());
-                return finfos;
-            }
-            else
+            if (agentClientCircuit is null)
                 return Array.Empty<FriendInfo>();
+
+            List<FriendInfo> all = new();
+
+            FriendInfo[] localFriends = FriendsService.GetFriends(client.AgentId.ToString());
+            if (localFriends is not null && localFriends.Length > 0)
+                all.AddRange(localFriends);
+
+            m_log.DebugFormat(
+                "[HGFRIENDS MODULE]: Fetched {0} local friends for visitor {1}",
+                localFriends?.Length ?? 0, client.AgentId);
+
+            try
+            {
+                string friendsUri = null;
+                if (agentClientCircuit.ServiceURLs is not null)
+                {
+                    if (agentClientCircuit.ServiceURLs.TryGetValue("FriendsServerURI", out object fsu) && fsu != null)
+                        friendsUri = fsu.ToString();
+                    if (string.IsNullOrWhiteSpace(friendsUri)
+                            && agentClientCircuit.ServiceURLs.TryGetValue("HomeURI", out object hu) && hu != null)
+                        friendsUri = hu.ToString();
+                }
+
+                if (!string.IsNullOrWhiteSpace(friendsUri))
+                {
+                    var homeFriends = new FriendsServicesConnector(friendsUri);
+                    FriendInfo[] remote = homeFriends.GetFriends(client.AgentId);
+                    if (remote is not null && remote.Length > 0)
+                    {
+                        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                        foreach (FriendInfo f in all)
+                        {
+                            if (f?.Friend is not null)
+                                seen.Add(f.Friend);
+                        }
+                        int added = 0;
+                        foreach (FriendInfo f in remote)
+                        {
+                            if (f?.Friend is null || seen.Contains(f.Friend))
+                                continue;
+                            all.Add(f);
+                            seen.Add(f.Friend);
+                            added++;
+                        }
+                        m_log.DebugFormat(
+                            "[HGFRIENDS MODULE]: Fetched {0} home friends for visitor {1} from {2} ({3} new)",
+                            remote.Length, client.Name, friendsUri, added);
+                    }
+                }
+                else
+                {
+                    m_log.DebugFormat(
+                        "[HGFRIENDS MODULE]: No FriendsServerURI/HomeURI for visitor {0}; only local friends available",
+                        client.Name);
+                }
+            }
+            catch (Exception e)
+            {
+                m_log.DebugFormat(
+                    "[HGFRIENDS MODULE]: Failed to fetch home friends for visitor {0}: {1}",
+                    client.Name, e.Message);
+            }
+
+            return all.ToArray();
         }
 
         protected override bool StoreRights(UUID agentID, UUID friendID, int rights)
