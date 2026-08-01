@@ -827,108 +827,125 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
 
             ScenePresence defsp = sp;
             List<SceneObjectGroup> deftatt = attachments;
+
+            // ISSUE-005: mark before queue so SetAppearance during CompleteMovement defers rebake
+            IAvatarFactoryModule avFactoryEarly = m_scene.RequestModuleInterface<IAvatarFactoryModule>();
+            avFactoryEarly?.MarkAppearanceGatherInProgress(defsp.UUID);
+
             m_incomingSceneObjectEngine.QueueJob(
                 string.Format("HG UUID Gather attachments {0}", defsp.Name), () =>
                 {
-                    string url = aCircuit.ServiceURLs["AssetServerURI"].ToString();
-                    HGUuidGatherer assetFetcher = new HGUuidGatherer(m_scene.AssetService, url);
-                    ConfigureHgGatherer(assetFetcher);
+                    IAvatarFactoryModule avFactory = m_scene.RequestModuleInterface<IAvatarFactoryModule>()
+                        ?? avFactoryEarly;
 
-                    // Script-first path (ISSUE-001) + parallel asset GET (ISSUE-003, still stock /assets/{uuid}).
-                    m_log.DebugFormat(
-                        "[HG ENTITY TRANSFER]: HG attachment script-first path for {0} ({1} object(s)) from {2} in {3} (concurrency={4}, timeoutMs={5})",
-                        defsp.Name, deftatt.Count, url, m_sceneName, m_hgAssetFetchConcurrency, m_hgAssetFetchTimeoutMs);
-
-                    List<SceneObjectGroup> attached = new List<SceneObjectGroup>(deftatt.Count);
-
-                    foreach (SceneObjectGroup defso in deftatt)
+                    try
                     {
-                        if (defsp.IsDeleted)
-                            break;
+                        string url = aCircuit.ServiceURLs["AssetServerURI"].ToString();
+                        HGUuidGatherer assetFetcher = new HGUuidGatherer(m_scene.AssetService, url);
+                        ConfigureHgGatherer(assetFetcher);
 
-                        if (defso.OwnerID.NotEqual(defsp.UUID))
+                        // Script-first path (ISSUE-001) + parallel asset GET (ISSUE-003, still stock /assets/{uuid}).
+                        m_log.DebugFormat(
+                            "[HG ENTITY TRANSFER]: HG attachment script-first path for {0} ({1} object(s)) from {2} in {3} (concurrency={4}, timeoutMs={5})",
+                            defsp.Name, deftatt.Count, url, m_sceneName, m_hgAssetFetchConcurrency, m_hgAssetFetchTimeoutMs);
+
+                        List<SceneObjectGroup> attached = new List<SceneObjectGroup>(deftatt.Count);
+
+                        foreach (SceneObjectGroup defso in deftatt)
                         {
-                            m_log.ErrorFormat(
-                                "[HG TRANSFER MODULE] attachment {0}({1}) owner {2} does not match HG avatarID {3}",
-                                defso.Name, defso.UUID, defso.OwnerID, defsp.UUID);
-                            continue;
+                            if (defsp.IsDeleted)
+                                break;
+
+                            if (defso.OwnerID.NotEqual(defsp.UUID))
+                            {
+                                m_log.ErrorFormat(
+                                    "[HG TRANSFER MODULE] attachment {0}({1}) owner {2} does not match HG avatarID {3}",
+                                    defso.Name, defso.UUID, defso.OwnerID, defsp.UUID);
+                                continue;
+                            }
+
+                            List<UUID> scriptAssetIds = CollectAttachmentScriptAssetIds(defso);
+                            int scriptTickStart = Util.EnvironmentTickCount();
+
+                            m_log.DebugFormat(
+                                "[HG ENTITY TRANSFER]: Attachment {0} for {1}: fetching {2} script asset(s) (not full outfit assets)",
+                                defso.Name, defsp.Name, scriptAssetIds.Count);
+
+                            assetFetcher.FetchAssetsParallel(scriptAssetIds, () => defsp.IsDeleted);
+
+                            if (defsp.IsDeleted)
+                                break;
+
+                            if (!m_scene.AddSceneObject(defso))
+                            {
+                                m_log.DebugFormat(
+                                    "[HG ENTITY TRANSFER]: Problem adding attachment {0} {1} for {2} into {3}",
+                                    defso.Name, defso.UUID, defsp.Name, m_sceneName);
+                                continue;
+                            }
+
+                            attached.Add(defso);
+
+                            m_log.DebugFormat(
+                                "[HG ENTITY TRANSFER]: Attached {0} for {1} after {2} ms script fetch; starting scripts now",
+                                defso.Name, defsp.Name, Util.EnvironmentTickCountSubtract(scriptTickStart));
+
+                            // Start scripts as soon as this attachment is on the avatar (ISSUE-001).
+                            TryStartScriptsOnIncomingAttachment(defso);
                         }
 
-                        List<UUID> scriptAssetIds = CollectAttachmentScriptAssetIds(defso);
-                        int scriptTickStart = Util.EnvironmentTickCount();
-
-                        m_log.DebugFormat(
-                            "[HG ENTITY TRANSFER]: Attachment {0} for {1}: fetching {2} script asset(s) (not full outfit assets)",
-                            defso.Name, defsp.Name, scriptAssetIds.Count);
-
-                        assetFetcher.FetchAssetsParallel(scriptAssetIds, () => defsp.IsDeleted);
+                        if (!defsp.IsDeleted)
+                            defsp.GotAttachmentsData = true;
 
                         if (defsp.IsDeleted)
-                            break;
-
-                        if (!m_scene.AddSceneObject(defso))
                         {
                             m_log.DebugFormat(
-                                "[HG ENTITY TRANSFER]: Problem adding attachment {0} {1} for {2} into {3}",
-                                defso.Name, defso.UUID, defsp.Name, m_sceneName);
-                            continue;
+                                "[HG ENTITY TRANSFER]: HG user {0} left after attaching {1} object(s) (script-first); skipping appearance gather",
+                                defsp.Name, attached.Count);
+                            return;
                         }
 
-                        attached.Add(defso);
+                        if (attached.Count == 0)
+                        {
+                            m_log.WarnFormat(
+                                "[HG ENTITY TRANSFER]: No attachments attached for HG user {0} in {1} (source sent {2})",
+                                defsp.Name, m_sceneName, deftatt.Count);
+                            return;
+                        }
 
+                        // Remaining assets: parallel wave gather + two-phase ensure
+                        // (visual textures/mesh first, sounds/anims second) — ISSUE-003.
                         m_log.DebugFormat(
-                            "[HG ENTITY TRANSFER]: Attached {0} for {1} after {2} ms script fetch; starting scripts now",
-                            defso.Name, defsp.Name, Util.EnvironmentTickCountSubtract(scriptTickStart));
+                            "[HG ENTITY TRANSFER]: Fetching appearance assets for {0} attachment(s) of {1} in {2} (parallel concurrency={3}, two-phase visual then audio/anim)",
+                            attached.Count, defsp.Name, m_sceneName, m_hgAssetFetchConcurrency);
 
-                        // Start scripts as soon as this attachment is on the avatar (ISSUE-001).
-                        TryStartScriptsOnIncomingAttachment(defso);
+                        IDictionary<UUID, sbyte> ids = new Dictionary<UUID, sbyte>();
+                        HGUuidGatherer appearanceGatherer = new HGUuidGatherer(m_scene.AssetService, url, ids);
+                        ConfigureHgGatherer(appearanceGatherer);
+                        int appearanceTickStart = Util.EnvironmentTickCount();
+
+                        foreach (SceneObjectGroup defso in attached)
+                        {
+                            if (defsp.IsDeleted)
+                                break;
+                            appearanceGatherer.AddForInspection(defso);
+                        }
+
+                        if (!defsp.IsDeleted)
+                            appearanceGatherer.GatherAllParallel(() => defsp.IsDeleted);
+
+                        if (!defsp.IsDeleted)
+                        {
+                            m_log.DebugFormat(
+                                "[HG ENTITY TRANSFER]: Finished appearance asset gather for {0}: {1} uuid(s) in {2} ms (parallel, two-phase)",
+                                defsp.Name, ids.Count, Util.EnvironmentTickCountSubtract(appearanceTickStart));
+                        }
                     }
-
-                    if (!defsp.IsDeleted)
-                        defsp.GotAttachmentsData = true;
-
-                    if (defsp.IsDeleted)
+                    finally
                     {
-                        m_log.DebugFormat(
-                            "[HG ENTITY TRANSFER]: HG user {0} left after attaching {1} object(s) (script-first); skipping appearance gather",
-                            defsp.Name, attached.Count);
-                        return;
-                    }
-
-                    if (attached.Count == 0)
-                    {
-                        m_log.WarnFormat(
-                            "[HG ENTITY TRANSFER]: No attachments attached for HG user {0} in {1} (source sent {2})",
-                            defsp.Name, m_sceneName, deftatt.Count);
-                        return;
-                    }
-
-                    // Remaining assets: parallel wave gather + two-phase ensure
-                    // (visual textures/mesh first, sounds/anims second) — ISSUE-003.
-                    m_log.DebugFormat(
-                        "[HG ENTITY TRANSFER]: Fetching appearance assets for {0} attachment(s) of {1} in {2} (parallel concurrency={3}, two-phase visual then audio/anim)",
-                        attached.Count, defsp.Name, m_sceneName, m_hgAssetFetchConcurrency);
-
-                    IDictionary<UUID, sbyte> ids = new Dictionary<UUID, sbyte>();
-                    HGUuidGatherer appearanceGatherer = new HGUuidGatherer(m_scene.AssetService, url, ids);
-                    ConfigureHgGatherer(appearanceGatherer);
-                    int appearanceTickStart = Util.EnvironmentTickCount();
-
-                    foreach (SceneObjectGroup defso in attached)
-                    {
-                        if (defsp.IsDeleted)
-                            break;
-                        appearanceGatherer.AddForInspection(defso);
-                    }
-
-                    if (!defsp.IsDeleted)
-                        appearanceGatherer.GatherAllParallel(() => defsp.IsDeleted);
-
-                    if (!defsp.IsDeleted)
-                    {
-                        m_log.DebugFormat(
-                            "[HG ENTITY TRANSFER]: Finished appearance asset gather for {0}: {1} uuid(s) in {2} ms (parallel, two-phase)",
-                            defsp.Name, ids.Count, Util.EnvironmentTickCountSubtract(appearanceTickStart));
+                        // ISSUE-005: flush deferred rebake (or no-op if none pending)
+                        if (!defsp.IsDeleted)
+                            avFactory?.NotifyAppearanceGatherComplete(defsp.UUID);
                     }
                 },
                 OwnerID.ToString());

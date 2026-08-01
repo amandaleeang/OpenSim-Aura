@@ -90,6 +90,16 @@ namespace OpenSim.Region.Framework.Interfaces
         /// </returns>
         int RequestRebake(IScenePresence sp, bool missingTexturesOnly);
 
+        /// <summary>
+        /// ISSUE-005: HG appearance asset gather is in progress — defer rebake waves until complete or timeout.
+        /// </summary>
+        void MarkAppearanceGatherInProgress(UUID agentId);
+
+        /// <summary>
+        /// ISSUE-005: appearance gather finished (or failed); flush any deferred rebake wave.
+        /// </summary>
+        void NotifyAppearanceGatherComplete(UUID agentId);
+
         void QueueAppearanceSend(UUID agentid);
         void QueueAppearanceSave(UUID agentid);
 

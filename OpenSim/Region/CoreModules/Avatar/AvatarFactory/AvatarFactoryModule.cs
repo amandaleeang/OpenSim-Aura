@@ -69,13 +69,22 @@ namespace OpenSim.Region.CoreModules.Avatar.AvatarFactory
 
         private object m_setAppearanceLock = new object();
 
-        // add throttle
+        // add throttle (per bake UUID — legacy; wave throttle below for ISSUE-005)
         private const int REBAKE_THROTTLE_SECONDS = 30;
         readonly ExpiringKey<string> m_rebakeThrottle = new(500 * REBAKE_THROTTLE_SECONDS);
 
         // ISSUE-004: local-only bake store for next visit (no previous-sim / home fetch)
         private bool m_localBakeStoreEnabled = true;
         private string m_localBakeStorePath = "avatar_bake_cache";
+
+        // ISSUE-005: defer multi-face rebake until HG appearance gather completes
+        private bool m_rebakeDeferEnabled = true;
+        private int m_rebakeDeferTimeoutMs = 20000;
+        private int m_rebakeWaveThrottleSeconds = 30;
+        readonly ExpiringKey<string> m_rebakeWaveThrottle = new(500 * REBAKE_THROTTLE_SECONDS);
+        private readonly ConcurrentDictionary<UUID, byte> m_gatherInProgress = new();
+        private readonly ConcurrentDictionary<UUID, ConcurrentDictionary<UUID, byte>> m_pendingRebakeFaces = new();
+        private readonly ConcurrentDictionary<UUID, System.Timers.Timer> m_rebakeDeferTimers = new();
         
         #region Region Module interface
 
@@ -91,15 +100,32 @@ namespace OpenSim.Region.CoreModules.Avatar.AvatarFactory
 
                 m_localBakeStoreEnabled = appearanceConfig.GetBoolean("LocalBakeStoreEnabled", m_localBakeStoreEnabled);
                 m_localBakeStorePath = appearanceConfig.GetString("LocalBakeStorePath", m_localBakeStorePath);
+
+                m_rebakeDeferEnabled = appearanceConfig.GetBoolean("RebakeDeferUntilGather", m_rebakeDeferEnabled);
+                m_rebakeDeferTimeoutMs = appearanceConfig.GetInt("RebakeDeferTimeoutMs", m_rebakeDeferTimeoutMs);
+                m_rebakeWaveThrottleSeconds = appearanceConfig.GetInt("RebakeWaveThrottleSeconds", m_rebakeWaveThrottleSeconds);
             }
 
             if (string.IsNullOrWhiteSpace(m_localBakeStorePath))
                 m_localBakeStorePath = "avatar_bake_cache";
 
+            if (m_rebakeDeferTimeoutMs < 1000)
+                m_rebakeDeferTimeoutMs = 1000;
+            else if (m_rebakeDeferTimeoutMs > 120000)
+                m_rebakeDeferTimeoutMs = 120000;
+
+            if (m_rebakeWaveThrottleSeconds < 5)
+                m_rebakeWaveThrottleSeconds = 5;
+
             if (m_localBakeStoreEnabled)
                 m_log.InfoFormat(
                     "[AVFACTORY]: Local bake store enabled (path={0}) — restore on enter, save after rebake",
                     m_localBakeStorePath);
+
+            if (m_rebakeDeferEnabled)
+                m_log.InfoFormat(
+                    "[AVFACTORY]: ISSUE-005 rebake defer enabled (timeoutMs={0}, waveThrottleSec={1})",
+                    m_rebakeDeferTimeoutMs, m_rebakeWaveThrottleSeconds);
         }
 
         public void AddRegion(Scene scene)
@@ -476,22 +502,9 @@ namespace OpenSim.Region.CoreModules.Avatar.AvatarFactory
  
             sp.Appearance.WearableCacheItems = wearableCache;
 
-            // throttle rebake requests
+            // ISSUE-005: queue/coalesce rebake (defer while HG gather in progress)
             if (missing.Count > 0)
-            {
-                string spuuidstr = sp.UUID.ToString();
-                foreach (UUID id in missing)
-                {
-                    string key = spuuidstr + id.ToString();
-
-                    if(m_rebakeThrottle.AddOrUpdate(key, 1000 * REBAKE_THROTTLE_SECONDS))
-                        continue;
-
-                    m_log.Debug($"[AVFACTORY]: Missing baked texture {id} for {sp.Name}, requesting rebake");
-
-                    sp.ControllingClient.SendRebakeAvatarTextures(id);
-                }
-            }
+                QueueOrSendRebakeWave(sp, missing);
 
             bool changed = false;
             if (validDirtyBakes > 0 && hits == cacheItems.Length)
@@ -725,7 +738,6 @@ namespace OpenSim.Region.CoreModules.Avatar.AvatarFactory
             if (((ScenePresence)sp).IsNPC)
                 return 0;
 
-            int texturesRebaked = 0;
             IAssetCache cache = m_scene.RequestModuleInterface<IAssetCache>();
 
             // ISSUE-004: try local agent bake store before mass rebake
@@ -733,12 +745,12 @@ namespace OpenSim.Region.CoreModules.Avatar.AvatarFactory
                     !AppearanceBakesPresentInCache(sp, cache))
                 TryRestoreLocalAgentBakes(sp, cache);
 
+            List<UUID> missing = new List<UUID>();
             for (int i = 0; i < AvatarAppearance.BAKE_INDICES.Length; i++)
             {
                 int idx = AvatarAppearance.BAKE_INDICES[i];
                 Primitive.TextureEntryFace face = sp.Appearance.Texture.FaceTextures[idx];
 
-                // if there is no texture entry, skip it
                 if (face == null)
                     continue;
 
@@ -747,34 +759,251 @@ namespace OpenSim.Region.CoreModules.Avatar.AvatarFactory
 
                 if (missingTexturesOnly)
                 {
-                    if (cache != null &&  cache.Check(face.TextureID.ToString()))
-                    {
+                    if (cache != null && cache.Check(face.TextureID.ToString()))
                         continue;
-                    }
-                    else
-                    {
-                        m_log.DebugFormat(
-                            "[AVFACTORY]: Missing baked texture {0} ({1}) for {2}, requesting rebake.",
-                            face.TextureID, idx, sp.Name);
-                    }
+                    missing.Add(face.TextureID);
                 }
                 else
                 {
-                    m_log.DebugFormat(
-                        "[AVFACTORY]: Requesting rebake of {0} ({1}) for {2}.",
-                        face.TextureID, idx, sp.Name);
+                    missing.Add(face.TextureID);
                 }
-
-                texturesRebaked++;
-                sp.ControllingClient.SendRebakeAvatarTextures(face.TextureID);
             }
 
-            return texturesRebaked;
+            if (missing.Count == 0)
+                return 0;
+
+            // Force path: do not defer when caller asked for full rebake of known faces
+            if (!missingTexturesOnly)
+            {
+                FlushRebakeWave(sp, missing, "request-full");
+                return missing.Count;
+            }
+
+            QueueOrSendRebakeWave(sp, missing);
+            return missing.Count;
+        }
+
+        /// <summary>
+        /// ISSUE-005: HG attachment/appearance gather started — hold rebake waves.
+        /// </summary>
+        public void MarkAppearanceGatherInProgress(UUID agentId)
+        {
+            if (!m_rebakeDeferEnabled || agentId.IsZero())
+                return;
+
+            m_gatherInProgress[agentId] = 0;
+            ScheduleRebakeDeferTimeout(agentId);
+
+            m_log.DebugFormat(
+                "[AVFACTORY]: Appearance gather in progress for {0} — rebake deferred (timeout {1} ms)",
+                agentId, m_rebakeDeferTimeoutMs);
+        }
+
+        /// <summary>
+        /// ISSUE-005: gather finished or timed out — send one coalesced rebake wave if needed.
+        /// </summary>
+        public void NotifyAppearanceGatherComplete(UUID agentId)
+        {
+            if (agentId.IsZero())
+                return;
+
+            m_gatherInProgress.TryRemove(agentId, out _);
+            CancelRebakeDeferTimeout(agentId);
+
+            if (!m_pendingRebakeFaces.TryGetValue(agentId, out ConcurrentDictionary<UUID, byte> pending) ||
+                    pending.IsEmpty)
+                return;
+
+            ScenePresence sp = m_scene.GetScenePresence(agentId);
+            if (sp == null || sp.IsDeleted || sp.IsChildAgent)
+            {
+                m_pendingRebakeFaces.TryRemove(agentId, out _);
+                return;
+            }
+
+            List<UUID> faces = new List<UUID>(pending.Keys);
+            FlushRebakeWave(sp, faces, "gather-complete");
         }
 
         #endregion
 
         #region AvatarFactoryModule private methods
+
+        private void QueueOrSendRebakeWave(IScenePresence sp, List<UUID> missing)
+        {
+            if (sp == null || missing == null || missing.Count == 0)
+                return;
+
+            ConcurrentDictionary<UUID, byte> pending = m_pendingRebakeFaces.GetOrAdd(
+                sp.UUID, _ => new ConcurrentDictionary<UUID, byte>());
+            foreach (UUID id in missing)
+            {
+                if (id.IsNotZero())
+                    pending[id] = 0;
+            }
+
+            bool gatherBusy = m_rebakeDeferEnabled && m_gatherInProgress.ContainsKey(sp.UUID);
+            if (gatherBusy)
+            {
+                m_log.InfoFormat(
+                    "[AVFACTORY]: Rebake deferred for {0}: {1} face(s) pending (waiting for appearance gather)",
+                    sp.Name, pending.Count);
+                ScheduleRebakeDeferTimeout(sp.UUID);
+                return;
+            }
+
+            List<UUID> faces = new List<UUID>(pending.Keys);
+            FlushRebakeWave(sp, faces, "immediate");
+        }
+
+        private void FlushRebakeWave(IScenePresence sp, List<UUID> faceIds, string reason)
+        {
+            if (sp == null || ((ScenePresence)sp).IsNPC)
+                return;
+
+            m_pendingRebakeFaces.TryRemove(sp.UUID, out _);
+            m_gatherInProgress.TryRemove(sp.UUID, out _);
+            CancelRebakeDeferTimeout(sp.UUID);
+
+            IAssetCache cache = m_scene.RequestModuleInterface<IAssetCache>();
+
+            // Last chance local restore (ISSUE-004)
+            if (m_localBakeStoreEnabled && cache != null && !AppearanceBakesPresentInCache(sp, cache))
+                TryRestoreLocalAgentBakes(sp, cache);
+
+            List<UUID> still = new List<UUID>();
+            HashSet<UUID> seen = new HashSet<UUID>();
+            if (faceIds != null)
+            {
+                foreach (UUID id in faceIds)
+                {
+                    if (id.IsZero() || !seen.Add(id))
+                        continue;
+                    if (id.Equals(AppearanceManager.DEFAULT_AVATAR_TEXTURE))
+                        continue;
+                    if (cache != null && cache.Check(id.ToString()))
+                        continue;
+                    still.Add(id);
+                }
+            }
+
+            // Also re-scan TE after possible restore
+            if (sp.Appearance?.Texture?.FaceTextures != null)
+            {
+                for (int i = 0; i < AvatarAppearance.BAKE_INDICES.Length; i++)
+                {
+                    int idx = AvatarAppearance.BAKE_INDICES[i];
+                    Primitive.TextureEntryFace face = sp.Appearance.Texture.FaceTextures[idx];
+                    if (face == null || face.TextureID.IsZero() ||
+                            face.TextureID.Equals(AppearanceManager.DEFAULT_AVATAR_TEXTURE))
+                        continue;
+                    if (cache != null && cache.Check(face.TextureID.ToString()))
+                        continue;
+                    if (seen.Add(face.TextureID))
+                        still.Add(face.TextureID);
+                }
+            }
+
+            if (still.Count == 0)
+            {
+                m_log.InfoFormat(
+                    "[AVFACTORY]: Rebake wave skipped for {0} reason={1} (bakes present after restore/check)",
+                    sp.Name, reason);
+                return;
+            }
+
+            // One wave per agent per throttle window (ISSUE-005)
+            string waveKey = sp.UUID.ToString();
+            if (m_rebakeWaveThrottle.AddOrUpdate(waveKey, 1000 * m_rebakeWaveThrottleSeconds))
+            {
+                m_log.DebugFormat(
+                    "[AVFACTORY]: Rebake wave throttled for {0} reason={1} ({2} face(s) not sent)",
+                    sp.Name, reason, still.Count);
+                return;
+            }
+
+            int sent = 0;
+            foreach (UUID id in still)
+            {
+                string faceKey = waveKey + id.ToString();
+                if (m_rebakeThrottle.AddOrUpdate(faceKey, 1000 * REBAKE_THROTTLE_SECONDS))
+                    continue;
+
+                try
+                {
+                    sp.ControllingClient.SendRebakeAvatarTextures(id);
+                    sent++;
+                }
+                catch (Exception e)
+                {
+                    m_log.DebugFormat("[AVFACTORY]: SendRebake failed for {0} {1}: {2}", sp.Name, id, e.Message);
+                }
+            }
+
+            m_log.InfoFormat(
+                "[AVFACTORY]: Rebake wave for {0}: sent={1} faces={2} reason={3}",
+                sp.Name, sent, still.Count, reason);
+        }
+
+        private void ScheduleRebakeDeferTimeout(UUID agentId)
+        {
+            if (!m_rebakeDeferEnabled)
+                return;
+
+            System.Timers.Timer existing;
+            System.Timers.Timer timer = new System.Timers.Timer(m_rebakeDeferTimeoutMs)
+            {
+                AutoReset = false
+            };
+            timer.Elapsed += (sender, args) =>
+            {
+                try
+                {
+                    if (!m_gatherInProgress.ContainsKey(agentId))
+                        return;
+
+                    m_log.InfoFormat(
+                        "[AVFACTORY]: Rebake defer timeout ({0} ms) for {1} — flushing pending wave",
+                        m_rebakeDeferTimeoutMs, agentId);
+
+                    NotifyAppearanceGatherComplete(agentId);
+                }
+                catch (Exception e)
+                {
+                    m_log.DebugFormat("[AVFACTORY]: Defer timeout handler error: {0}", e.Message);
+                }
+                finally
+                {
+                    CancelRebakeDeferTimeout(agentId);
+                }
+            };
+
+            if (m_rebakeDeferTimers.TryRemove(agentId, out existing))
+            {
+                try { existing.Stop(); existing.Dispose(); } catch { }
+            }
+
+            if (m_rebakeDeferTimers.TryAdd(agentId, timer))
+                timer.Start();
+            else
+            {
+                try { timer.Dispose(); } catch { }
+            }
+        }
+
+        private void CancelRebakeDeferTimeout(UUID agentId)
+        {
+            if (m_rebakeDeferTimers.TryRemove(agentId, out System.Timers.Timer timer))
+            {
+                try
+                {
+                    timer.Stop();
+                    timer.Dispose();
+                }
+                catch { }
+            }
+        }
+
 
         /// <summary>
         /// True when every non-default bake face UUID in the appearance TE is already in IAssetCache.
