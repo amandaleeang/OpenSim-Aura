@@ -241,13 +241,20 @@ namespace OpenSim.Region.CoreModules.Avatar.AvatarFactory
                 // Process the baked texture array
                 if (textureEntry != null)
                 {
-                    m_log.DebugFormat("[AVFACTORY]: Received texture update for {0} {1}", sp.Name, sp.UUID);
+                    m_log.InfoFormat(
+                        "[AVFACTORY]: Received texture update for {0} {1} (cacheItems={2})",
+                        sp.Name, sp.UUID, cacheItems != null ? cacheItems.Length : 0);
 
 //                    WriteBakedTexturesReport(sp, m_log.DebugFormat);
 
                     changed = sp.Appearance.SetTextureEntries(textureEntry) || changed;
 
                     //WriteBakedTexturesReport(sp, m_log.DebugFormat);
+
+                    if (cacheItems == null || cacheItems.Length == 0)
+                        m_log.InfoFormat(
+                            "[AVFACTORY]: Texture update for {0} has empty WearableCacheItems — bake faces not validated this packet",
+                            sp.Name);
 
                     UpdateBakedTextureCache(sp, cacheItems);
 
