@@ -125,12 +125,15 @@ namespace OpenSim.Region.CoreModules.Avatar.UserProfiles
                     ScenePresence p = req.presence;
 
                     bool foreign = GetUserProfileServerURI(req.agent, out string serverURI);
-                    bool ok  = serverURI.Length > 0;
+                    bool ok  = !string.IsNullOrEmpty(serverURI);
 
                     byte[] membershipType = new byte[1];
                     string born = string.Empty;
                     uint flags = 0x00;
 
+                    // Account metadata (born date, title, flags) is best-effort only.
+                    // Do not fail the whole profile when get_user_info / local account lookup
+                    // fails — ProfileServerURI may still return the profile body (HG visitors).
                     if (ok && GetUserAccountData(req.agent, out UserAccount acc))
                     {
                         flags = (uint)(acc.UserFlags & 0xff);
@@ -144,8 +147,6 @@ namespace OpenSim.Region.CoreModules.Avatar.UserProfiles
                         if (val_born != 0)
                             born = Util.ToDateTime(val_born).ToString("M/d/yyyy", CultureInfo.InvariantCulture);
                     }
-                    else
-                        ok = false;
 
                     UserProfileProperties props = new() { UserId = req.agent };
 
@@ -1839,8 +1840,12 @@ namespace OpenSim.Region.CoreModules.Avatar.UserProfiles
             }
             else
             {
-                // Is Foreign
+                // Is Foreign — prefer ServiceURLs HomeURI, fall back to UserManagement HomeURL
+                // (get_server_urls cache may omit HomeURI even when we already know the home from HG login).
                 string home_url = m_userManagementModule.GetUserServerURL(userID, "HomeURI", out bool recentFailedWeb);
+                if (string.IsNullOrEmpty(home_url))
+                    home_url = m_userManagementModule.GetUserHomeURL(userID, out recentFailedWeb);
+
                 if (recentFailedWeb || string.IsNullOrEmpty(home_url))
                     return false;
 
@@ -1868,7 +1873,11 @@ namespace OpenSim.Region.CoreModules.Avatar.UserProfiles
                 if (info.ContainsKey("user_created"))
                     account.Created = (int)info["user_created"];
 
-                account.UserTitle = "HG Visitor";
+                if (info.ContainsKey("user_title") && info["user_title"] != null
+                        && !string.IsNullOrEmpty(info["user_title"].ToString()))
+                    account.UserTitle = info["user_title"].ToString();
+                else
+                    account.UserTitle = "HG Visitor";
                 return true;
             }
         }
@@ -1890,7 +1899,27 @@ namespace OpenSim.Region.CoreModules.Avatar.UserProfiles
             if (!m_userManagementModule.IsLocalGridUser(userID))
             {
                 serverURI = m_userManagementModule.GetUserServerURL(userID, "ProfileServerURI", out bool failed);
-                if(failed)
+                if (failed || string.IsNullOrEmpty(serverURI))
+                {
+                    // HomeURI from cache / UserManagement, then ProfileServerURI via get_server_urls on home
+                    string home = m_userManagementModule.GetUserHomeURL(userID, out bool homeFail);
+                    if (!homeFail && !string.IsNullOrEmpty(home))
+                    {
+                        // Force a fresh ServiceURLs pull when ProfileServerURI was missing from a partial cache
+                        try
+                        {
+                            UserAgentServiceConnector uConn = new(home);
+                            Dictionary<string, object> urls = uConn.GetServerURLs(userID);
+                            if (urls != null && urls.TryGetValue("ProfileServerURI", out object purl) && purl != null)
+                                serverURI = purl.ToString();
+                        }
+                        catch (Exception e)
+                        {
+                            m_log.Debug($"[PROFILES]: GetServerURLs for profile URI failed for {userID}: {e.Message}");
+                        }
+                    }
+                }
+                if (string.IsNullOrWhiteSpace(serverURI))
                     serverURI = string.Empty;
                 // Is Foreign
                 return true;
