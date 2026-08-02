@@ -83,8 +83,12 @@ namespace OpenSim.Region.CoreModules.Avatar.AvatarFactory
         private bool m_rebakeDeferEnabled = true;
         private int m_rebakeDeferTimeoutMs = 20000;
         private int m_rebakeWaveThrottleSeconds = 30;
+        // Defer enter-time rebake until first AgentSetAppearance with non-empty WearableCacheItems
+        // (viewer further along in appearance transaction). Safety: same RebakeDeferTimeoutMs.
+        private bool m_rebakeDeferUntilClientAppearance = true;
         readonly ExpiringKey<string> m_rebakeWaveThrottle = new(500 * REBAKE_THROTTLE_SECONDS);
         private readonly ConcurrentDictionary<UUID, byte> m_gatherInProgress = new();
+        private readonly ConcurrentDictionary<UUID, byte> m_awaitingClientAppearance = new();
         private readonly ConcurrentDictionary<UUID, ConcurrentDictionary<UUID, byte>> m_pendingRebakeFaces = new();
         private readonly ConcurrentDictionary<UUID, System.Timers.Timer> m_rebakeDeferTimers = new();
         
@@ -106,6 +110,8 @@ namespace OpenSim.Region.CoreModules.Avatar.AvatarFactory
                 m_rebakeDeferEnabled = appearanceConfig.GetBoolean("RebakeDeferUntilGather", m_rebakeDeferEnabled);
                 m_rebakeDeferTimeoutMs = appearanceConfig.GetInt("RebakeDeferTimeoutMs", m_rebakeDeferTimeoutMs);
                 m_rebakeWaveThrottleSeconds = appearanceConfig.GetInt("RebakeWaveThrottleSeconds", m_rebakeWaveThrottleSeconds);
+                m_rebakeDeferUntilClientAppearance = appearanceConfig.GetBoolean(
+                    "RebakeDeferUntilClientAppearance", m_rebakeDeferUntilClientAppearance);
             }
 
             if (string.IsNullOrWhiteSpace(m_localBakeStorePath))
@@ -126,8 +132,13 @@ namespace OpenSim.Region.CoreModules.Avatar.AvatarFactory
 
             if (m_rebakeDeferEnabled)
                 m_log.InfoFormat(
-                    "[AVFACTORY]: ISSUE-005 rebake defer enabled (timeoutMs={0}, waveThrottleSec={1})",
+                    "[AVFACTORY]: ISSUE-005 rebake defer until HG gather enabled (timeoutMs={0}, waveThrottleSec={1})",
                     m_rebakeDeferTimeoutMs, m_rebakeWaveThrottleSeconds);
+
+            if (m_rebakeDeferUntilClientAppearance)
+                m_log.InfoFormat(
+                    "[AVFACTORY]: Rebake defer until client appearance cache items enabled (timeoutMs={0})",
+                    m_rebakeDeferTimeoutMs);
         }
 
         public void AddRegion(Scene scene)
@@ -413,6 +424,10 @@ namespace OpenSim.Region.CoreModules.Avatar.AvatarFactory
             if (((ScenePresence)sp).IsNPC)
                 return true;
 
+            // First non-empty WearableCacheItems: client is in a real appearance bake transaction.
+            // Release enter-time "wait for client" defer (HG gather may still hold).
+            ClearAwaitingClientAppearance(sp.UUID);
+
             // uploaded baked textures will be in assets local cache
             IAssetCache cache = m_scene.RequestModuleInterface<IAssetCache>();
 
@@ -518,6 +533,11 @@ namespace OpenSim.Region.CoreModules.Avatar.AvatarFactory
                     sp.Name, missing.Count);
                 QueueOrSendRebakeWave(sp, missing);
             }
+            else
+            {
+                // Full hit on this transaction — drop any enter-time pending faces.
+                m_pendingRebakeFaces.TryRemove(sp.UUID, out _);
+            }
 
             bool changed = false;
             if (validDirtyBakes > 0 && hits == cacheItems.Length)
@@ -569,31 +589,6 @@ namespace OpenSim.Region.CoreModules.Avatar.AvatarFactory
             if (m_localBakeStoreEnabled)
                 HydrateLocalBakeStoreIntoCache(sp.UUID, cache);
 
-            // Optional external bake package (XBakes): inject assets by UUID only
-            IBakedTextureModule bakedModule = m_scene.RequestModuleInterface<IBakedTextureModule>();
-            if (bakedModule != null)
-            {
-                try
-                {
-                    WearableCacheItem[] bakedModuleCache = bakedModule.Get(sp.UUID);
-                    if (bakedModuleCache != null)
-                    {
-                        foreach (WearableCacheItem item in bakedModuleCache)
-                        {
-                            if (item?.TextureAsset == null || item.TextureID.IsZero())
-                                continue;
-                            item.TextureAsset.Temporary = true;
-                            item.TextureAsset.Local = true;
-                            cache.Cache(item.TextureAsset);
-                        }
-                    }
-                }
-                catch (Exception e)
-                {
-                    m_log.DebugFormat("[AVFACTORY]: bakedModule Get failed for {0}: {1}", sp.Name, e.Message);
-                }
-            }
-
             // 2) Check EVERY bake face UUID in TE against cache (full pass, no rebake mid-loop).
             List<UUID> missing = CollectMissingBakeTextureIds(sp, cache, out int present, out int listed);
 
@@ -601,9 +596,46 @@ namespace OpenSim.Region.CoreModules.Avatar.AvatarFactory
                 "[AVFACTORY]: Bake UUID check on enter for {0}: listed={1} present={2} missing={3}",
                 sp.Name, listed, present, missing.Count);
 
-            // 3) Only after full check: one coalesced request to the client if anything missing.
+            // 2b) CacheId reconcile: a TE face may carry a UUID minted by another sim for the same
+            //     outfit.  If the local store has bytes for that slot with the SAME CacheId under a
+            //     different UUID, reuse them under the current TE UUID so we skip the rebake.
+            if (missing.Count > 0 && m_localBakeStoreEnabled)
+            {
+                int reconciled = ReconcileLocalBakeStoreToTE(sp.UUID, sp, cache, missing);
+                if (reconciled > 0)
+                {
+                    missing = CollectMissingBakeTextureIds(sp, cache, out present, out listed);
+                    m_log.InfoFormat(
+                        "[AVFACTORY]: Bake UUID check after CacheId reconcile for {0}: listed={1} present={2} missing={3} (reconciled={4})",
+                        sp.Name, listed, present, missing.Count, reconciled);
+                }
+            }
+
+            // 3) Optional XBakes only if still missing after local hydrate — avoid remote GET on full local hit.
             if (missing.Count > 0)
+            {
+                int injected = TryInjectXBakesIntoCache(sp.UUID, cache);
+                if (injected > 0)
+                {
+                    missing = CollectMissingBakeTextureIds(sp, cache, out present, out listed);
+                    m_log.InfoFormat(
+                        "[AVFACTORY]: Bake UUID check after XBakes for {0}: listed={1} present={2} missing={3} (injected={4})",
+                        sp.Name, listed, present, missing.Count, injected);
+                }
+            }
+
+            // 4) On miss: hold rebake until first non-empty AgentSetAppearance cache items
+            //    (and/or HG gather). Safety flush via RebakeDeferTimeoutMs.
+            if (missing.Count > 0)
+            {
+                if (m_rebakeDeferUntilClientAppearance)
+                    MarkAwaitingClientAppearance(sp.UUID);
                 QueueOrSendRebakeWave(sp, missing);
+            }
+            else
+            {
+                ClearAwaitingClientAppearance(sp.UUID);
+            }
 
             // Sync WearableCacheItems TextureIDs from TE for faces we have
             WearableCacheItem[] wearableCache = sp.Appearance.WearableCacheItems
@@ -696,6 +728,7 @@ namespace OpenSim.Region.CoreModules.Avatar.AvatarFactory
 
         /// <summary>
         /// ISSUE-005: gather finished — flush any pending coalesced rebake (after full face checks already queued).
+        /// If still waiting for first non-empty client cache items, keep holding until that or timeout.
         /// </summary>
         public void NotifyAppearanceGatherComplete(UUID agentId)
         {
@@ -703,14 +736,27 @@ namespace OpenSim.Region.CoreModules.Avatar.AvatarFactory
                 return;
 
             m_gatherInProgress.TryRemove(agentId, out _);
-            CancelRebakeDeferTimeout(agentId);
 
             ScenePresence sp = m_scene.GetScenePresence(agentId);
             if (sp == null || sp.IsDeleted || sp.IsChildAgent)
             {
                 m_pendingRebakeFaces.TryRemove(agentId, out _);
+                m_awaitingClientAppearance.TryRemove(agentId, out _);
+                CancelRebakeDeferTimeout(agentId);
                 return;
             }
+
+            // Still waiting for AgentSetAppearance with WearableCacheItems — do not rebake yet.
+            if (m_rebakeDeferUntilClientAppearance && m_awaitingClientAppearance.ContainsKey(agentId))
+            {
+                m_log.InfoFormat(
+                    "[AVFACTORY]: Appearance gather complete for {0} — still waiting for client appearance cache items (or timeout {1} ms)",
+                    sp.Name, m_rebakeDeferTimeoutMs);
+                ScheduleRebakeDeferTimeout(agentId);
+                return;
+            }
+
+            CancelRebakeDeferTimeout(agentId);
 
             // Re-check all bake UUIDs once after gather (assets may have been pulled); one wave only if still missing.
             IAssetCache cache = m_scene.RequestModuleInterface<IAssetCache>();
@@ -738,6 +784,56 @@ namespace OpenSim.Region.CoreModules.Avatar.AvatarFactory
 
         #region AvatarFactoryModule private methods
 
+        private void MarkAwaitingClientAppearance(UUID agentId)
+        {
+            if (!m_rebakeDeferUntilClientAppearance || agentId.IsZero())
+                return;
+
+            m_awaitingClientAppearance[agentId] = 0;
+            ScheduleRebakeDeferTimeout(agentId);
+            m_log.DebugFormat(
+                "[AVFACTORY]: Waiting for client appearance cache items for {0} before rebake (timeout {1} ms)",
+                agentId, m_rebakeDeferTimeoutMs);
+        }
+
+        private void ClearAwaitingClientAppearance(UUID agentId)
+        {
+            if (agentId.IsZero())
+                return;
+
+            if (m_awaitingClientAppearance.TryRemove(agentId, out _))
+            {
+                m_log.DebugFormat(
+                    "[AVFACTORY]: Client appearance cache items received for {0} — enter-time client wait cleared",
+                    agentId);
+            }
+
+            // Drop timer only if nothing else is holding the defer.
+            if (!m_gatherInProgress.ContainsKey(agentId))
+                CancelRebakeDeferTimeout(agentId);
+        }
+
+        private bool IsRebakeDeferred(UUID agentId, out string reason)
+        {
+            reason = null;
+            if (agentId.IsZero())
+                return false;
+
+            if (m_rebakeDeferEnabled && m_gatherInProgress.ContainsKey(agentId))
+            {
+                reason = "appearance gather";
+                return true;
+            }
+
+            if (m_rebakeDeferUntilClientAppearance && m_awaitingClientAppearance.ContainsKey(agentId))
+            {
+                reason = "client appearance cache items";
+                return true;
+            }
+
+            return false;
+        }
+
         private void QueueOrSendRebakeWave(IScenePresence sp, List<UUID> missing)
         {
             if (sp == null || missing == null || missing.Count == 0)
@@ -751,12 +847,11 @@ namespace OpenSim.Region.CoreModules.Avatar.AvatarFactory
                     pending[id] = 0;
             }
 
-            bool gatherBusy = m_rebakeDeferEnabled && m_gatherInProgress.ContainsKey(sp.UUID);
-            if (gatherBusy)
+            if (IsRebakeDeferred(sp.UUID, out string deferReason))
             {
                 m_log.InfoFormat(
-                    "[AVFACTORY]: Rebake deferred for {0}: {1} face(s) pending (waiting for appearance gather)",
-                    sp.Name, pending.Count);
+                    "[AVFACTORY]: Rebake deferred for {0}: {1} face(s) pending (waiting for {2})",
+                    sp.Name, pending.Count, deferReason);
                 ScheduleRebakeDeferTimeout(sp.UUID);
                 return;
             }
@@ -772,6 +867,7 @@ namespace OpenSim.Region.CoreModules.Avatar.AvatarFactory
 
             m_pendingRebakeFaces.TryRemove(sp.UUID, out _);
             m_gatherInProgress.TryRemove(sp.UUID, out _);
+            m_awaitingClientAppearance.TryRemove(sp.UUID, out _);
             CancelRebakeDeferTimeout(sp.UUID);
 
             IAssetCache cache = m_scene.RequestModuleInterface<IAssetCache>();
@@ -837,10 +933,14 @@ namespace OpenSim.Region.CoreModules.Avatar.AvatarFactory
 
         private void ScheduleRebakeDeferTimeout(UUID agentId)
         {
-            if (!m_rebakeDeferEnabled)
+            // Active if either HG gather defer or client-appearance defer may hold a wave.
+            if ((!m_rebakeDeferEnabled && !m_rebakeDeferUntilClientAppearance) || agentId.IsZero())
                 return;
 
-            System.Timers.Timer existing;
+            // Already have a timer — do not reset (enter-time / gather should share one deadline).
+            if (m_rebakeDeferTimers.ContainsKey(agentId))
+                return;
+
             System.Timers.Timer timer = new System.Timers.Timer(m_rebakeDeferTimeoutMs)
             {
                 AutoReset = false
@@ -849,14 +949,31 @@ namespace OpenSim.Region.CoreModules.Avatar.AvatarFactory
             {
                 try
                 {
-                    if (!m_gatherInProgress.ContainsKey(agentId))
+                    bool heldGather = m_gatherInProgress.ContainsKey(agentId);
+                    bool heldClient = m_awaitingClientAppearance.ContainsKey(agentId);
+                    bool hadPending = m_pendingRebakeFaces.ContainsKey(agentId);
+                    if (!heldGather && !heldClient && !hadPending)
                         return;
 
                     m_log.InfoFormat(
-                        "[AVFACTORY]: Rebake defer timeout ({0} ms) for {1} — flushing pending wave",
-                        m_rebakeDeferTimeoutMs, agentId);
+                        "[AVFACTORY]: Rebake defer timeout ({0} ms) for {1} — flushing (gather={2} clientWait={3} pending={4})",
+                        m_rebakeDeferTimeoutMs, agentId, heldGather, heldClient, hadPending);
 
-                    NotifyAppearanceGatherComplete(agentId);
+                    m_gatherInProgress.TryRemove(agentId, out _);
+                    m_awaitingClientAppearance.TryRemove(agentId, out _);
+
+                    ScenePresence sp = m_scene.GetScenePresence(agentId);
+                    if (sp == null || sp.IsDeleted || sp.IsChildAgent)
+                    {
+                        m_pendingRebakeFaces.TryRemove(agentId, out _);
+                        return;
+                    }
+
+                    List<UUID> pending = null;
+                    if (m_pendingRebakeFaces.TryGetValue(agentId, out ConcurrentDictionary<UUID, byte> map))
+                        pending = new List<UUID>(map.Keys);
+
+                    FlushRebakeWave(sp, pending, "defer-timeout");
                 }
                 catch (Exception e)
                 {
@@ -867,11 +984,6 @@ namespace OpenSim.Region.CoreModules.Avatar.AvatarFactory
                     CancelRebakeDeferTimeout(agentId);
                 }
             };
-
-            if (m_rebakeDeferTimers.TryRemove(agentId, out existing))
-            {
-                try { existing.Stop(); existing.Dispose(); } catch { }
-            }
 
             if (m_rebakeDeferTimers.TryAdd(agentId, timer))
                 timer.Start();
@@ -901,45 +1013,95 @@ namespace OpenSim.Region.CoreModules.Avatar.AvatarFactory
         }
 
         /// <summary>
+        /// Optional XBakes / IBakedTextureModule package: inject TextureAssets into Flotsam by UUID.
+        /// Call only after local hydrate when TE bake faces are still missing (avoids remote GET on full hit).
+        /// Returns number of assets cached (0 if module off, empty, or error).
+        /// </summary>
+        private int TryInjectXBakesIntoCache(UUID agentId, IAssetCache cache)
+        {
+            if (cache == null || agentId.IsZero())
+                return 0;
+
+            IBakedTextureModule bakedModule = m_scene.RequestModuleInterface<IBakedTextureModule>();
+            if (bakedModule == null)
+                return 0;
+
+            try
+            {
+                WearableCacheItem[] bakedModuleCache = bakedModule.Get(agentId);
+                if (bakedModuleCache == null || bakedModuleCache.Length == 0)
+                    return 0;
+
+                int injected = 0;
+                foreach (WearableCacheItem item in bakedModuleCache)
+                {
+                    if (item?.TextureAsset == null || item.TextureID.IsZero())
+                        continue;
+                    item.TextureAsset.Temporary = true;
+                    item.TextureAsset.Local = true;
+                    cache.Cache(item.TextureAsset);
+                    injected++;
+                }
+                return injected;
+            }
+            catch (Exception e)
+            {
+                m_log.DebugFormat("[AVFACTORY]: XBakes Get failed for {0}: {1}", agentId, e.Message);
+                return 0;
+            }
+        }
+
+        /// <summary>
         /// Load bake asset bytes from disk store into IAssetCache keyed by their Texture UUIDs.
         /// Does not modify appearance TE — TE remains whatever login/TP provided.
         /// </summary>
         private void HydrateLocalBakeStoreIntoCache(UUID agentId, IAssetCache cache)
         {
-            if (!m_localBakeStoreEnabled || cache == null || agentId.IsZero())
+            WearableCacheItem[] loaded = LoadLocalBakeStore(agentId, cache);
+            if (loaded == null || loaded.Length == 0)
                 return;
+
+            int n = 0;
+            foreach (WearableCacheItem item in loaded)
+            {
+                if (item != null && item.TextureID.IsNotZero() && cache.Check(item.TextureID.ToString()))
+                    n++;
+            }
+            m_log.DebugFormat(
+                "[AVFACTORY]: Hydrated {0} bake asset(s) from local store into cache for {1}",
+                n, agentId);
+        }
+
+        /// <summary>
+        /// Read the agent bake store from disk and inject every embedded asset's bytes into the
+        /// cache keyed by its stored Texture UUID.  Returns the stored cache items
+        /// (TextureIndex/CacheId/TextureID) so callers can match by CacheId; null if no store.
+        /// </summary>
+        private WearableCacheItem[] LoadLocalBakeStore(UUID agentId, IAssetCache cache)
+        {
+            if (!m_localBakeStoreEnabled || cache == null || agentId.IsZero())
+                return null;
 
             string path = GetAgentBakeStoreFile(agentId);
             if (!File.Exists(path))
-                return;
+                return null;
 
             try
             {
                 byte[] raw = File.ReadAllBytes(path);
                 if (raw == null || raw.Length == 0)
-                    return;
+                    return null;
 
                 OSD osd = OSDParser.DeserializeLLSDXml(raw);
                 // FromOSD injects assetdata into cache under each item's TextureID
-                WearableCacheItem[] loaded = WearableCacheItem.FromOSD(osd, cache);
-                if (loaded == null || loaded.Length == 0)
-                    return;
-
-                int n = 0;
-                foreach (WearableCacheItem item in loaded)
-                {
-                    if (item != null && item.TextureID.IsNotZero() && cache.Check(item.TextureID.ToString()))
-                        n++;
-                }
-                m_log.DebugFormat(
-                    "[AVFACTORY]: Hydrated {0} bake asset(s) from local store into cache for {1}",
-                    n, agentId);
+                return WearableCacheItem.FromOSD(osd, cache);
             }
             catch (Exception e)
             {
                 m_log.DebugFormat(
-                    "[AVFACTORY]: Hydrate local bake store failed for {0}: {1}",
+                    "[AVFACTORY]: Load local bake store failed for {0}: {1}",
                     agentId, e.Message);
+                return null;
             }
         }
 
@@ -1037,19 +1199,141 @@ namespace OpenSim.Region.CoreModules.Avatar.AvatarFactory
                         return;
                 }
 
-                Directory.CreateDirectory(m_localBakeStorePath);
-                string path = GetAgentBakeStoreFile(sp.UUID);
-                byte[] data = OSDParser.SerializeLLSDXmlBytes(osd);
-                File.WriteAllBytes(path, data);
-
-                m_log.InfoFormat(
-                    "[AVFACTORY]: Stored local bakes for {0} ({1} face(s), {2} bytes) → {3}",
-                    sp.Name, bakeItems.Count, data.Length, path);
+                if (WriteLocalBakeStore(sp.UUID, bakeItems.ToArray(), cache))
+                    m_log.InfoFormat(
+                        "[AVFACTORY]: Stored local bakes for {0} ({1} face(s))",
+                        sp.Name, bakeItems.Count);
             }
             catch (Exception e)
             {
                 m_log.WarnFormat("[AVFACTORY]: Failed to store local bakes for {0}: {1}", sp.Name, e.Message);
             }
+        }
+
+        /// <summary>
+        /// Serialize and persist a bake cache item set to disk, embedding each item's asset bytes
+        /// from the cache (by its TextureID).
+        /// </summary>
+        private bool WriteLocalBakeStore(UUID agentId, WearableCacheItem[] items, IAssetCache cache)
+        {
+            if (!m_localBakeStoreEnabled || agentId.IsZero() || items == null || items.Length == 0 || cache == null)
+                return false;
+
+            try
+            {
+                OSD osd = WearableCacheItem.ToOSD(items, cache);
+                if (osd == null)
+                    return false;
+
+                Directory.CreateDirectory(m_localBakeStorePath);
+                string path = GetAgentBakeStoreFile(agentId);
+                byte[] data = OSDParser.SerializeLLSDXmlBytes(osd);
+                File.WriteAllBytes(path, data);
+
+                m_log.InfoFormat(
+                    "[AVFACTORY]: Wrote local bakes for {0} ({1} face(s), {2} bytes) → {3}",
+                    agentId, items.Length, data.Length, path);
+                return true;
+            }
+            catch (Exception e)
+            {
+                m_log.WarnFormat("[AVFACTORY]: Failed to write local bakes for {0}: {1}", agentId, e.Message);
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Break the endless rebake loop when teleporting between sims mints a new random bake
+        /// UUID each time even though the outfit is unchanged.
+        /// </summary>
+        /// <remarks>
+        /// For each TE bake face that is missing from cache, look up the local store entry for that
+        /// slot.  If its CacheId equals the incoming CacheId (same outfit) but the stored TextureID
+        /// differs (UUID minted elsewhere), copy the stored bytes under the current TE UUID so the
+        /// face is served without a rebake.  Re-keys the store entry to the current TE UUID and
+        /// expires the old key so the store always tracks the current UUIDs — bounded, no unbounded
+        /// R1→R2→R3 accumulation.
+        ///
+        /// Only matches when both CacheIds are non-zero; zero CacheIds fall back to a rebake.
+        /// </remarks>
+        /// <returns>Number of faces reconciled (bytes reused, rebake avoided).</returns>
+        private int ReconcileLocalBakeStoreToTE(UUID agentId, IScenePresence sp, IAssetCache cache, List<UUID> missing)
+        {
+            if (!m_localBakeStoreEnabled || cache == null || agentId.IsZero())
+                return 0;
+            if (missing == null || missing.Count == 0)
+                return 0;
+            if (sp?.Appearance?.WearableCacheItems == null || sp.Appearance.Texture?.FaceTextures == null)
+                return 0;
+
+            WearableCacheItem[] storeItems = LoadLocalBakeStore(agentId, cache);
+            if (storeItems == null || storeItems.Length == 0)
+                return 0;
+
+            WearableCacheItem[] wearableCache = sp.Appearance.WearableCacheItems;
+            Primitive.TextureEntryFace[] faces = sp.Appearance.Texture.FaceTextures;
+            HashSet<UUID> missingSet = new HashSet<UUID>(missing);
+
+            int reconciled = 0;
+            List<UUID> expired = new List<UUID>();
+
+            for (int i = 0; i < AvatarAppearance.BAKE_INDICES.Length; i++)
+            {
+                int idx = AvatarAppearance.BAKE_INDICES[i];
+                if (idx >= faces.Length || idx >= wearableCache.Length)
+                    continue;
+
+                Primitive.TextureEntryFace face = faces[idx];
+                if (face == null || face.TextureID.IsZero() ||
+                        face.TextureID.Equals(AppearanceManager.DEFAULT_AVATAR_TEXTURE))
+                    continue;
+
+                UUID teId = face.TextureID;
+                if (!missingSet.Contains(teId) || cache.Check(teId.ToString()))
+                    continue;
+
+                UUID incomingCacheId = wearableCache[idx].CacheId;
+                if (incomingCacheId.IsZero())
+                    continue;
+
+                WearableCacheItem storeItem = WearableCacheItem.SearchTextureIndex((uint)idx, storeItems);
+                if (storeItem == null || storeItem.CacheId.IsZero() || !storeItem.CacheId.Equals(incomingCacheId))
+                    continue;
+
+                UUID storedId = storeItem.TextureID;
+                if (storedId.IsZero() || storedId.Equals(teId))
+                    continue;
+
+                AssetBase stored;
+                if (!cache.Get(storedId.ToString(), out stored) || stored == null || stored.Data == null)
+                    continue;
+
+                AssetBase copy = new AssetBase(teId, stored.Name, stored.Type, stored.CreatorID)
+                {
+                    Data = stored.Data,
+                    Temporary = true,
+                    Local = true
+                };
+                cache.Cache(copy, true);
+
+                storeItem.TextureID = teId;
+                expired.Add(storedId);
+                reconciled++;
+            }
+
+            if (reconciled > 0)
+            {
+                // Persist the re-keyed store so it tracks the current TE UUIDs, then drop the old keys.
+                WriteLocalBakeStore(agentId, storeItems, cache);
+                foreach (UUID oldId in expired)
+                    cache.Expire(oldId.ToString());
+
+                m_log.InfoFormat(
+                    "[AVFACTORY]: Reconcile {0} bake face(s) for {1} by CacheId — reused stored bytes under current TE UUIDs, no rebake",
+                    reconciled, agentId);
+            }
+
+            return reconciled;
         }
 
         private Dictionary<BakeType, Primitive.TextureEntryFace> GetBakedTextureFaces(ScenePresence sp)
