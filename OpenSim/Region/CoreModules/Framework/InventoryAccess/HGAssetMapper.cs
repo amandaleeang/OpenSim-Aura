@@ -88,11 +88,6 @@ namespace OpenSim.Region.CoreModules.Framework.InventoryAccess
             return meta;
         }
 
-        private AssetBase FetchAsset(string url, UUID assetID)
-        {
-            return m_scene.AssetService.Get(assetID.ToString(), url, true);
-        }
-
         public bool PostAsset(string url, AssetBase asset, bool verbose = true)
         {
             if (asset == null)
@@ -207,12 +202,9 @@ namespace OpenSim.Region.CoreModules.Framework.InventoryAccess
 
             m_log.Debug($"[HG ASSET MAPPER]: Preparing to get {uuidGatherer.GatheredUuids.Count} assets");
             bool success = true;
-            foreach (UUID uuid in uuidGatherer.GatheredUuids.Keys)
-            {
-                if (FetchAsset(userAssetURL, uuid) == null)
-                    success = false;
-            }
-            if(uuidGatherer.FailedUUIDs.Count > 0)
+            if (uuidGatherer.GatheredUuids.Count > 0)
+                uuidGatherer.FetchAssetsParallel(uuidGatherer.GatheredUuids.Keys);
+            if (uuidGatherer.FailedUUIDs.Count > 0)
                 success = false;
 
             // maybe all pieces got here...
