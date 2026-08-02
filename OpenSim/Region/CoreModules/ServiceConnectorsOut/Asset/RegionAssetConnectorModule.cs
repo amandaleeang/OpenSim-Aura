@@ -73,6 +73,18 @@ namespace OpenSim.Region.CoreModules.ServiceConnectorsOut.Asset
         private ObjectJobEngine m_localRequestsQueue;
         private ObjectJobEngine m_remoteRequestsQueue;
 
+        // Foreign import → local DB: batch StoreLocal to cut MySQL write storms (compatible path).
+        // Assets are always cached immediately so Get/AssetsExist remain correct before flush.
+        private bool m_localStoreBatchEnabled = true;
+        private int m_localStoreBatchSize = 16;
+        private int m_localStoreFlushMs = 250;
+        private readonly ConcurrentDictionary<string, AssetBase> m_pendingLocalStores = new();
+        private int m_pendingLocalStoreCount;
+        private readonly object m_localStoreFlushLock = new();
+        private System.Threading.Timer m_localStoreFlushTimer;
+        private long m_localStoreFlushedCount;
+        private long m_localStoreBatchCount;
+
         public Type ReplaceableInterface
         {
             get { return null; }
@@ -135,10 +147,55 @@ namespace OpenSim.Region.CoreModules.ServiceConnectorsOut.Asset
                             m_AssetPerms = new AssetPermissions(hgConfig);
                     }
 
-                    m_localRequestsQueue = new ObjectJobEngine(AssetRequestProcessor, "GetAssetsWorkers", 2000, 2);
-                    m_remoteRequestsQueue = new ObjectJobEngine(AssetRequestProcessor, "GetRemoteAssetsWorkers", 2000, 2);
+                    // Async CAP / callback path worker pools. Gather uses sync Get with its own limiter.
+                    // Defaults raised so multi-visitor HG CAP fetches are not stuck at 2 remote workers.
+                    int localWorkers = assetConfig.GetInt("LocalAssetRequestWorkers", 4);
+                    if (localWorkers < 1)
+                        localWorkers = 1;
+                    if (localWorkers > 16)
+                        localWorkers = 16;
+
+                    int remoteWorkers = assetConfig.GetInt("RemoteAssetRequestWorkers", 8);
+                    if (remoteWorkers < 1)
+                        remoteWorkers = 1;
+                    if (remoteWorkers > 32)
+                        remoteWorkers = 32;
+
+                    m_localRequestsQueue = new ObjectJobEngine(AssetRequestProcessor, "GetAssetsWorkers", 2000, localWorkers);
+                    m_remoteRequestsQueue = new ObjectJobEngine(AssetRequestProcessor, "GetRemoteAssetsWorkers", 2000, remoteWorkers);
+
+                    m_localStoreBatchEnabled = assetConfig.GetBoolean("LocalStoreBatchEnabled", m_localStoreBatchEnabled);
+                    m_localStoreBatchSize = assetConfig.GetInt("LocalStoreBatchSize", m_localStoreBatchSize);
+                    if (m_localStoreBatchSize < 1)
+                        m_localStoreBatchSize = 1;
+                    if (m_localStoreBatchSize > 128)
+                        m_localStoreBatchSize = 128;
+                    m_localStoreFlushMs = assetConfig.GetInt("LocalStoreFlushMs", m_localStoreFlushMs);
+                    if (m_localStoreFlushMs < 50)
+                        m_localStoreFlushMs = 50;
+                    if (m_localStoreFlushMs > 5000)
+                        m_localStoreFlushMs = 5000;
+
+                    if (m_localStoreBatchEnabled)
+                    {
+                        m_localStoreFlushTimer = new System.Threading.Timer(
+                            _ =>
+                            {
+                                try { FlushPendingLocalStores(forceAll: true); }
+                                catch (Exception e)
+                                {
+                                    m_log.DebugFormat("[REGIONASSETCONNECTOR]: Local store flush timer error: {0}", e.Message);
+                                }
+                            },
+                            null,
+                            m_localStoreFlushMs,
+                            m_localStoreFlushMs);
+                    }
+
                     m_Enabled = true;
-                    m_log.Info("[REGIONASSETCONNECTOR]: enabled");
+                    m_log.InfoFormat(
+                        "[REGIONASSETCONNECTOR]: enabled (LocalAssetRequestWorkers={0}, RemoteAssetRequestWorkers={1}, LocalStoreBatch={2} size={3} flushMs={4})",
+                        localWorkers, remoteWorkers, m_localStoreBatchEnabled, m_localStoreBatchSize, m_localStoreFlushMs);
                 }
             }
         }
@@ -152,12 +209,27 @@ namespace OpenSim.Region.CoreModules.ServiceConnectorsOut.Asset
             if (!m_Enabled)
                 return;
 
+            try
+            {
+                m_localStoreFlushTimer?.Change(Timeout.Infinite, Timeout.Infinite);
+                m_localStoreFlushTimer?.Dispose();
+                m_localStoreFlushTimer = null;
+            }
+            catch { /* ignore */ }
+
+            try
+            {
+                FlushPendingLocalStores(forceAll: true);
+            }
+            catch (Exception e)
+            {
+                m_log.WarnFormat("[REGIONASSETCONNECTOR]: Final local store flush failed: {0}", e.Message);
+            }
+
             m_localRequestsQueue.Dispose();
             m_localRequestsQueue = null;
             m_remoteRequestsQueue.Dispose();
             m_remoteRequestsQueue = null;
-
-
         }
 
         public void AddRegion(Scene scene)
@@ -213,6 +285,8 @@ namespace OpenSim.Region.CoreModules.ServiceConnectorsOut.Asset
             AssetBase asset = null;
             if (m_Cache != null)
                 m_Cache.Get(id, out asset);
+            if (asset is null && m_pendingLocalStores.TryGetValue(id, out asset))
+                return asset;
             return asset;
         }
 
@@ -274,6 +348,8 @@ namespace OpenSim.Region.CoreModules.ServiceConnectorsOut.Asset
                     if (asset != null)
                         return asset;
                 }
+                if (m_pendingLocalStores.TryGetValue(id, out asset) && asset != null)
+                    return asset;
                 asset = GetFromLocal(id);
                 if(m_Cache != null)
                 {
@@ -297,6 +373,10 @@ namespace OpenSim.Region.CoreModules.ServiceConnectorsOut.Asset
                     return asset;
             }
 
+            // Pending batched local store (not yet in DB) — still visible
+            if (m_pendingLocalStores.TryGetValue(id, out asset) && asset != null)
+                return asset;
+
             asset = GetFromLocal(id);
             if (asset == null)
             {
@@ -309,10 +389,11 @@ namespace OpenSim.Region.CoreModules.ServiceConnectorsOut.Asset
                             m_Cache.CacheNegative(id);
                         return null;
                     }
-                    if(StoreOnLocalGrid)
-                        StoreLocal(asset);
+                    // Cache first so concurrent gatherers / CAP see the asset before DB flush
                     if (m_Cache != null)
                         m_Cache.Cache(asset);
+                    if (StoreOnLocalGrid)
+                        EnqueueOrStoreLocal(asset);
                 }
                 else if (m_Cache != null)
                     m_Cache.CacheNegative(id);
@@ -508,8 +589,20 @@ namespace OpenSim.Region.CoreModules.ServiceConnectorsOut.Asset
                 if (IsHG(id))
                     ++numHG;
             }
-            if(numHG == 0)
-                return m_localConnector.AssetsExist(ids);
+            if (numHG == 0)
+            {
+                bool[] exist = m_localConnector.AssetsExist(ids);
+                // Treat in-flight batched imports as present (cache + pending queue)
+                if (exist != null && exist.Length == ids.Length && !m_pendingLocalStores.IsEmpty)
+                {
+                    for (int i = 0; i < ids.Length; i++)
+                    {
+                        if (!exist[i] && m_pendingLocalStores.ContainsKey(ids[i]))
+                            exist[i] = true;
+                    }
+                }
+                return exist;
+            }
             else if (m_HGConnector != null)
                 return m_HGConnector.AssetsExist(ids);
             return [];
@@ -559,6 +652,106 @@ namespace OpenSim.Region.CoreModules.ServiceConnectorsOut.Asset
         private string StoreLocal(AssetBase asset)
         {
             return m_localConnector.Store(asset);
+        }
+
+        /// <summary>
+        /// Queue foreign-imported assets for batched local DB write, or store immediately if batching is off.
+        /// Caller must cache the asset first. Durability is eventual (size threshold + flush timer + Close).
+        /// </summary>
+        private void EnqueueOrStoreLocal(AssetBase asset)
+        {
+            if (asset is null)
+                return;
+
+            if (!m_localStoreBatchEnabled)
+            {
+                StoreLocal(asset);
+                return;
+            }
+
+            if (!m_pendingLocalStores.TryAdd(asset.ID, asset))
+                return; // already queued for this id
+
+            int pending = Interlocked.Increment(ref m_pendingLocalStoreCount);
+            if (pending >= m_localStoreBatchSize)
+                FlushPendingLocalStores(forceAll: false);
+        }
+
+        /// <summary>
+        /// Flush pending foreign-import stores to local DB.
+        /// When <paramref name="forceAll"/> is false, flushes up to one batch size; when true, drains the queue.
+        /// </summary>
+        private void FlushPendingLocalStores(bool forceAll)
+        {
+            if (m_pendingLocalStores.IsEmpty)
+                return;
+
+            // Single flusher at a time; gather threads only enqueue
+            if (forceAll)
+                Monitor.Enter(m_localStoreFlushLock);
+            else if (!Monitor.TryEnter(m_localStoreFlushLock))
+                return;
+
+            try
+            {
+                do
+                {
+                    List<AssetBase> batch = new(forceAll ? 64 : m_localStoreBatchSize);
+                    int limit = forceAll ? int.MaxValue : m_localStoreBatchSize;
+
+                    foreach (KeyValuePair<string, AssetBase> kv in m_pendingLocalStores)
+                    {
+                        if (batch.Count >= limit)
+                            break;
+                        if (m_pendingLocalStores.TryRemove(kv.Key, out AssetBase asset) && asset != null)
+                        {
+                            batch.Add(asset);
+                            Interlocked.Decrement(ref m_pendingLocalStoreCount);
+                        }
+                    }
+
+                    if (batch.Count == 0)
+                        break;
+
+                    int start = Environment.TickCount;
+                    int ok = 0;
+                    foreach (AssetBase asset in batch)
+                    {
+                        try
+                        {
+                            string id = StoreLocal(asset);
+                            if (!string.IsNullOrEmpty(id) && !id.Equals(UUID.ZeroString))
+                                ok++;
+                        }
+                        catch (Exception e)
+                        {
+                            m_log.WarnFormat(
+                                "[REGIONASSETCONNECTOR]: Batched StoreLocal failed for {0}: {1}",
+                                asset.ID, e.Message);
+                        }
+                    }
+
+                    Interlocked.Add(ref m_localStoreFlushedCount, ok);
+                    Interlocked.Increment(ref m_localStoreBatchCount);
+
+                    int ms = Environment.TickCount - start;
+                    if (ms < 0)
+                        ms = 0;
+
+                    if (batch.Count >= m_localStoreBatchSize || ms >= 100 || forceAll)
+                    {
+                        m_log.DebugFormat(
+                            "[REGIONASSETCONNECTOR]: Flushed {0}/{1} local asset store(s) in {2}ms (batches={3} totalFlushed={4} pending~{5})",
+                            ok, batch.Count, ms, m_localStoreBatchCount, m_localStoreFlushedCount, m_pendingLocalStoreCount);
+                    }
+
+                    // forceAll: keep draining if more arrived while we stored
+                } while (forceAll && !m_pendingLocalStores.IsEmpty);
+            }
+            finally
+            {
+                Monitor.Exit(m_localStoreFlushLock);
+            }
         }
 
         public bool UpdateContent(string id, byte[] data)

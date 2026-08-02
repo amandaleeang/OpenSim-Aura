@@ -115,11 +115,17 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
         /// </summary>
         private JobEngine m_incomingSceneObjectEngine;
 
-        /// <summary>ISSUE-003: max concurrent HG asset GETs (compatible single-asset protocol).</summary>
+        /// <summary>ISSUE-003: max concurrent HG asset GETs per gatherer (compatible single-asset protocol).</summary>
         private int m_hgAssetFetchConcurrency = 8;
 
         /// <summary>ISSUE-003: per-asset fetch timeout in milliseconds.</summary>
         private int m_hgAssetFetchTimeoutMs = 8000;
+
+        /// <summary>Process-wide cap on concurrent foreign asset GETs (all visitors).</summary>
+        private int m_hgAssetFetchGlobalConcurrency = 16;
+
+        /// <summary>Per home AssetServerURI concurrent foreign GET cap.</summary>
+        private int m_hgAssetFetchPerHostConcurrency = 8;
 
         #region ISharedRegionModule
 
@@ -159,12 +165,30 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
                         m_hgAssetFetchTimeoutMs = transferConfig.GetInt("HGAssetFetchTimeoutMs", m_hgAssetFetchTimeoutMs);
                         if (m_hgAssetFetchTimeoutMs < 500)
                             m_hgAssetFetchTimeoutMs = 500;
+
+                        // Compatible admission control: still stock GET /assets/{uuid}; limits multi-visitor storms
+                        m_hgAssetFetchGlobalConcurrency = transferConfig.GetInt(
+                            "HGAssetFetchGlobalConcurrency", m_hgAssetFetchGlobalConcurrency);
+                        if (m_hgAssetFetchGlobalConcurrency < 1)
+                            m_hgAssetFetchGlobalConcurrency = 1;
+                        if (m_hgAssetFetchGlobalConcurrency > 64)
+                            m_hgAssetFetchGlobalConcurrency = 64;
+
+                        m_hgAssetFetchPerHostConcurrency = transferConfig.GetInt(
+                            "HGAssetFetchPerHostConcurrency", m_hgAssetFetchPerHostConcurrency);
+                        if (m_hgAssetFetchPerHostConcurrency < 1)
+                            m_hgAssetFetchPerHostConcurrency = 1;
+                        if (m_hgAssetFetchPerHostConcurrency > 32)
+                            m_hgAssetFetchPerHostConcurrency = 32;
                     }
 
                     InitialiseCommon(source);
+                    HGUuidGatherer.ConfigureForeignFetchLimits(
+                        m_hgAssetFetchGlobalConcurrency, m_hgAssetFetchPerHostConcurrency);
                     m_log.DebugFormat(
-                        "[HG ENTITY TRANSFER MODULE]: {0} enabled (HGAssetFetchConcurrency={1}, HGAssetFetchTimeoutMs={2}).",
-                        Name, m_hgAssetFetchConcurrency, m_hgAssetFetchTimeoutMs);
+                        "[HG ENTITY TRANSFER MODULE]: {0} enabled (HGAssetFetchConcurrency={1}, HGAssetFetchTimeoutMs={2}, Global={3}, PerHost={4}).",
+                        Name, m_hgAssetFetchConcurrency, m_hgAssetFetchTimeoutMs,
+                        m_hgAssetFetchGlobalConcurrency, m_hgAssetFetchPerHostConcurrency);
                 }
             }
         }
