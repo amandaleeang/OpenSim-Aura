@@ -52,6 +52,13 @@ namespace OpenSim.Region.ClientStack.Linden
 
         private string m_URL;
 
+        /// <summary>
+        /// How long to wait for the viewer to POST the bake body after a slot is opened.
+        /// Timer starts at slot creation, not at first byte — large faces often need 20–40s+ on slow links.
+        /// Default raised from 30s (was causing TIMEOUT / viewer "service unreachable").
+        /// </summary>
+        internal static int s_uploadBodyTimeoutMs = 120000;
+
         public void Initialise(IConfigSource source)
         {
             IConfig config = source.Configs["ClientStack.LindenCaps"];
@@ -59,6 +66,20 @@ namespace OpenSim.Region.ClientStack.Linden
                 return;
 
             m_URL = config.GetString("Cap_UploadBakedTexture", string.Empty);
+
+            // Prefer ClientStack.LindenCaps; allow [Appearance] override
+            int timeoutMs = config.GetInt("BakeUploadTimeoutMs", s_uploadBodyTimeoutMs);
+            IConfig appearance = source.Configs["Appearance"];
+            if (appearance != null)
+                timeoutMs = appearance.GetInt("BakeUploadTimeoutMs", timeoutMs);
+            if (timeoutMs < 30000)
+                timeoutMs = 30000;
+            if (timeoutMs > 600000)
+                timeoutMs = 600000;
+            s_uploadBodyTimeoutMs = timeoutMs;
+            m_log.InfoFormat(
+                "[UPLOAD BAKED TEXTURE]: Bake body upload timeout {0} ms (from slot open to POST body complete)",
+                s_uploadBodyTimeoutMs);
         }
 
         public void AddRegion(Scene s)
@@ -178,15 +199,15 @@ namespace OpenSim.Region.ClientStack.Linden
             m_timeout = new Timer();
             m_timeout.Elapsed += Timeout;
             m_timeout.AutoReset = false;
-            m_timeout.Interval = 30000;
+            m_timeout.Interval = UploadBakedTextureModule.s_uploadBodyTimeoutMs;
             m_timeout.Start();
         }
 
         private void Timeout(Object source, ElapsedEventArgs e)
         {
             m_log.WarnFormat(
-                "[UPLOAD BAKED TEXTURE]: TIMEOUT (30s) waiting for body from agent {0} path {1} expectedIP {2}",
-                m_agentID, m_uploaderPath, m_remoteAddress);
+                "[UPLOAD BAKED TEXTURE]: TIMEOUT ({0}ms) waiting for body from agent {1} path {2} expectedIP {3}",
+                UploadBakedTextureModule.s_uploadBodyTimeoutMs, m_agentID, m_uploaderPath, m_remoteAddress);
             m_httpListener.RemoveSimpleStreamHandler(m_uploaderPath);
             m_timeout.Dispose();
         }

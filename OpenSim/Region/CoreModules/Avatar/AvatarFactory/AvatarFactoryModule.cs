@@ -73,7 +73,9 @@ namespace OpenSim.Region.CoreModules.Avatar.AvatarFactory
         private const int REBAKE_THROTTLE_SECONDS = 30;
         readonly ExpiringKey<string> m_rebakeThrottle = new(500 * REBAKE_THROTTLE_SECONDS);
 
-        // ISSUE-004: local-only bake store for next visit (no previous-sim / home fetch)
+        // ISSUE-004: cache bake assets by Texture UUID for this sim (login/TP reuse).
+        // Policy: trust TE UUIDs from client/transfer; hydrate bytes from disk if we have that UUID;
+        // only after checking ALL bake faces, request one coalesced client rebake for missing IDs.
         private bool m_localBakeStoreEnabled = true;
         private string m_localBakeStorePath = "avatar_bake_cache";
 
@@ -119,7 +121,7 @@ namespace OpenSim.Region.CoreModules.Avatar.AvatarFactory
 
             if (m_localBakeStoreEnabled)
                 m_log.InfoFormat(
-                    "[AVFACTORY]: Local bake store enabled (path={0}) — restore on enter, save after rebake",
+                    "[AVFACTORY]: Bake texture cache enabled (path={0}) — UUID lookup on enter; one rebake wave only after full face check",
                     m_localBakeStorePath);
 
             if (m_rebakeDeferEnabled)
@@ -414,10 +416,9 @@ namespace OpenSim.Region.CoreModules.Avatar.AvatarFactory
             // uploaded baked textures will be in assets local cache
             IAssetCache cache = m_scene.RequestModuleInterface<IAssetCache>();
 
-            // ISSUE-004: if TE bake UUIDs are not in Flotsam, try last visit's stored set
-            // for this agent (rewrites TE to those UUIDs + reloads asset bytes).
-            if (m_localBakeStoreEnabled && cache != null && !AppearanceBakesPresentInCache(sp, cache))
-                TryRestoreLocalAgentBakes(sp, cache);
+            // Hydrate disk bake cache into Flotsam by UUID (does not change TE).
+            if (m_localBakeStoreEnabled && cache != null)
+                HydrateLocalBakeStoreIntoCache(sp.UUID, cache);
 
             int validDirtyBakes = 0;
             int hits = 0;
@@ -509,9 +510,14 @@ namespace OpenSim.Region.CoreModules.Avatar.AvatarFactory
  
             sp.Appearance.WearableCacheItems = wearableCache;
 
-            // ISSUE-005: queue/coalesce rebake (defer while HG gather in progress)
+            // After ALL faces checked: one coalesced client rebake request (not per-face during the loop).
             if (missing.Count > 0)
+            {
+                m_log.InfoFormat(
+                    "[AVFACTORY]: Bake cache miss for {0}: {1} face UUID(s) missing after full check — one rebake wave",
+                    sp.Name, missing.Count);
                 QueueOrSendRebakeWave(sp, missing);
+            }
 
             bool changed = false;
             if (validDirtyBakes > 0 && hits == cacheItems.Length)
@@ -548,196 +554,80 @@ namespace OpenSim.Region.CoreModules.Avatar.AvatarFactory
             return changed;
         }
 
-        // called when we get a new root avatar
+        // called when we get a new root avatar (login / TP complete)
         public bool ValidateBakedTextureCache(IScenePresence sp)
         {
             if (((ScenePresence)sp).IsNPC)
                 return true;
 
-            int hits = 0;
-
             IAssetCache cache = m_scene.RequestModuleInterface<IAssetCache>();
             if (cache == null)
                 return false;
 
-            // ISSUE-004: restore last local bake set for this agent if TE UUIDs are missing
-            if (m_localBakeStoreEnabled && !AppearanceBakesPresentInCache(sp, cache))
-                TryRestoreLocalAgentBakes(sp, cache);
+            // 1) Load any previously cached bake *bytes* for this agent into Flotsam (by Texture UUID).
+            //    Does NOT rewrite appearance TE — TE UUIDs from transfer/client are authoritative.
+            if (m_localBakeStoreEnabled)
+                HydrateLocalBakeStoreIntoCache(sp.UUID, cache);
 
+            // Optional external bake package (XBakes): inject assets by UUID only
             IBakedTextureModule bakedModule = m_scene.RequestModuleInterface<IBakedTextureModule>();
-
-            lock (m_setAppearanceLock)
+            if (bakedModule != null)
             {
-                WearableCacheItem[] wearableCache = sp.Appearance.WearableCacheItems;
-                var spAppearanceTextureFaceTextures = sp.Appearance.Texture.FaceTextures;
-
-                /*
-                // big debug
-                m_log.DebugFormat("[AVFACTORY]: ValidateBakedTextureCache start for {0} {1}", sp.Name, sp.UUID);
-                for (int iter = 0; iter < AvatarAppearance.BAKE_INDICES.Length; iter++)
+                try
                 {
-                    int j = AvatarAppearance.BAKE_INDICES[iter];
-                    Primitive.TextureEntryFace face = spAppearanceTextureFaceTextures[j];
-                    if (wearableCache == null)
-                    {
-                        if (face != null)
-                            m_log.Debug("[ValidateBakedCache] {" + iter + "/" + j + " t- " + face.TextureID);
-                        else
-                            m_log.Debug("[ValidateBakedCache] {" + iter + "/" + j + " t- No texture");
-                    }
-                    else
-                    {
-                        if (face != null)
-                            m_log.Debug("[ValidateBakedCache] {" + iter + "/" + j + " ft- " + face.TextureID +
-                                   "}: cc-" +
-                                    wearableCache[j].CacheId + ", ct-" +
-                                    wearableCache[j].TextureID
-                                );
-                        else
-                            m_log.Debug("[ValidateBakedCache] {" + iter + "/" + j + " t - No texture" +
-                                    "}: cc-" +
-                                    wearableCache[j].CacheId + ", ct-" +
-                                    wearableCache[j].TextureID
-                                );
-                    }
-                }
-                */
-
-                bool wearableCacheValid = false;
-                if (wearableCache == null)
-                {
-                    wearableCache = WearableCacheItem.GetDefaultCacheItem();
-                }
-                else
-                {
-                    wearableCacheValid = true;
-                    Primitive.TextureEntryFace face;
-                    for (int i = 0; i < AvatarAppearance.BAKE_INDICES.Length; i++)
-                    {
-                        int idx = AvatarAppearance.BAKE_INDICES[i];
-
-                        face = spAppearanceTextureFaceTextures[idx];
-                        var wcacheidx = wearableCache[idx];
-
-                        if (face == null || face.TextureID.Equals(AppearanceManager.DEFAULT_AVATAR_TEXTURE))
-                        {
-                            wcacheidx.CacheId = UUID.Zero;
-                            wcacheidx.TextureID = AppearanceManager.DEFAULT_AVATAR_TEXTURE;
-                            hits++;
-                            continue;
-                        }
-
-                        if(face.TextureID.IsNotZero())
-                        {
-                            // fs junk
-                            if (i >= AvatarAppearance.BAKES_COUNT_PV7 && wcacheidx.CacheId.IsZero())
-                            {
-                                spAppearanceTextureFaceTextures[idx] = null;
-                                wcacheidx.CacheId = UUID.Zero;
-                                wcacheidx.TextureID = AppearanceManager.DEFAULT_AVATAR_TEXTURE;
-                                hits++;
-                                continue;
-                            }
-                            if (face.TextureID.Equals(wcacheidx.TextureID))
-                            {
-                                if (cache.Check(wcacheidx.TextureID.ToString()))
-                                {
-                                    hits++;
-                                    continue;
-                                }
-                            }
-                        }
-                        wcacheidx.CacheId = UUID.Zero;
-                        wcacheidx.TextureID = AppearanceManager.DEFAULT_AVATAR_TEXTURE;
-                        wearableCacheValid = false;
-                    }
-                }
-
-                bool checkExternal = false;
-                if (!wearableCacheValid)
-                    checkExternal = bakedModule != null;
-
-                if (checkExternal)
-                {
-                    WearableCacheItem[] bakedModuleCache = null;
-                    hits = 0;
-
-                    // m_log.Debug("[ValidateBakedCache] local cache invalid, checking bakedModule");
-                    try
-                    {
-                        bakedModuleCache = bakedModule.Get(sp.UUID);
-                    }
-                    catch (Exception e)
-                    {
-                        m_log.ErrorFormat(e.ToString());
-                        bakedModuleCache = null;
-                    }
-
+                    WearableCacheItem[] bakedModuleCache = bakedModule.Get(sp.UUID);
                     if (bakedModuleCache != null)
                     {
-                        m_log.Debug("[ValidateBakedCache] got bakedModule " + bakedModuleCache.Length + " cached textures");
-
-                        for (int i = 0; i < bakedModuleCache.Length; i++)
+                        foreach (WearableCacheItem item in bakedModuleCache)
                         {
-                            var bacachei = bakedModuleCache[i];
-                            int j = (int)bacachei.TextureIndex;
-                            if (j < AvatarAppearance.TEXTURE_COUNT && bacachei.TextureAsset != null)
-                            {
-                                var wcachej = wearableCache[j];
-                                wcachej.TextureID = bacachei.TextureID;
-                                wcachej.CacheId = bacachei.CacheId;
-                                wcachej.TextureAsset = bacachei.TextureAsset;
-                                bacachei.TextureAsset.Temporary = true;
-                                bacachei.TextureAsset.Local = true;
-                                //bakedModuleCache[i].TextureAsset.Flags = AssetFlags.AvatarBake;
-                                cache.Cache(bacachei.TextureAsset);
-                            }
-                        }
-
-                        // force the ones we got
-                        for (int i = 0; i < AvatarAppearance.BAKE_INDICES.Length; i++)
-                        {
-                            int idx = AvatarAppearance.BAKE_INDICES[i];
-                            var wcacheidx = wearableCache[idx];
-                            var faceTextureidx = spAppearanceTextureFaceTextures[idx];
-                            if (wcacheidx.TextureAsset == null)
-                            {
-                                if(idx == 19)
-                                {
-                                    faceTextureidx = null;
-                                    hits++;
-                                }
-                                else if(faceTextureidx == null || faceTextureidx.TextureID.Equals(AppearanceManager.DEFAULT_AVATAR_TEXTURE))
-                                    hits++;
-                                wcacheidx.TextureID = AppearanceManager.DEFAULT_AVATAR_TEXTURE;
-                                wcacheidx.CacheId = UUID.Zero;
+                            if (item?.TextureAsset == null || item.TextureID.IsZero())
                                 continue;
-                            }
-
-                            Primitive.TextureEntryFace face = sp.Appearance.Texture.GetFace((uint)idx);
-                            face.TextureID = wcacheidx.TextureID;
-                            hits++;
-                            wcacheidx.TextureAsset = null;
+                            item.TextureAsset.Temporary = true;
+                            item.TextureAsset.Local = true;
+                            cache.Cache(item.TextureAsset);
                         }
                     }
                 }
+                catch (Exception e)
+                {
+                    m_log.DebugFormat("[AVFACTORY]: bakedModule Get failed for {0}: {1}", sp.Name, e.Message);
+                }
+            }
 
+            // 2) Check EVERY bake face UUID in TE against cache (full pass, no rebake mid-loop).
+            List<UUID> missing = CollectMissingBakeTextureIds(sp, cache, out int present, out int listed);
+
+            m_log.InfoFormat(
+                "[AVFACTORY]: Bake UUID check on enter for {0}: listed={1} present={2} missing={3}",
+                sp.Name, listed, present, missing.Count);
+
+            // 3) Only after full check: one coalesced request to the client if anything missing.
+            if (missing.Count > 0)
+                QueueOrSendRebakeWave(sp, missing);
+
+            // Sync WearableCacheItems TextureIDs from TE for faces we have
+            WearableCacheItem[] wearableCache = sp.Appearance.WearableCacheItems
+                ?? WearableCacheItem.GetDefaultCacheItem();
+            if (sp.Appearance?.Texture?.FaceTextures != null)
+            {
+                for (int i = 0; i < AvatarAppearance.BAKE_INDICES.Length; i++)
+                {
+                    int idx = AvatarAppearance.BAKE_INDICES[i];
+                    Primitive.TextureEntryFace face = sp.Appearance.Texture.FaceTextures[idx];
+                    if (face == null || face.TextureID.IsZero() ||
+                            face.TextureID.Equals(AppearanceManager.DEFAULT_AVATAR_TEXTURE))
+                        continue;
+                    if (!cache.Check(face.TextureID.ToString()))
+                        continue;
+                    wearableCache[idx].TextureIndex = (uint)idx;
+                    wearableCache[idx].TextureID = face.TextureID;
+                    if (wearableCache[idx].CacheId.IsZero())
+                        wearableCache[idx].CacheId = face.TextureID;
+                }
                 sp.Appearance.WearableCacheItems = wearableCache;
             }
 
-            // debug
-            // m_log.DebugFormat("[ValidateBakedCache]: Completed texture check for {0} {1} with {2} hits", sp.Name, sp.UUID, hits);
-            /*
-            for (int iter = 0; iter < AvatarAppearance.BAKE_INDICES.Length; iter++)
-            {
-                int j = AvatarAppearance.BAKE_INDICES[iter];
-                m_log.Debug("[ValidateBakedCache] {" + iter + "/" +
-                                    sp.Appearance.WearableCacheItems[j].TextureIndex + "}: c-" +
-                                    sp.Appearance.WearableCacheItems[j].CacheId + ", t-" +
-                                    sp.Appearance.WearableCacheItems[j].TextureID);
-            }
-            */
-            return (hits >= AvatarAppearance.BAKE_INDICES.Length); // skirt is optional
+            return missing.Count == 0;
         }
 
         public int RequestRebake(IScenePresence sp, bool missingTexturesOnly)
@@ -746,33 +636,31 @@ namespace OpenSim.Region.CoreModules.Avatar.AvatarFactory
                 return 0;
 
             IAssetCache cache = m_scene.RequestModuleInterface<IAssetCache>();
+            if (cache != null && m_localBakeStoreEnabled)
+                HydrateLocalBakeStoreIntoCache(sp.UUID, cache);
 
-            // ISSUE-004: try local agent bake store before mass rebake
-            if (missingTexturesOnly && m_localBakeStoreEnabled && cache != null &&
-                    !AppearanceBakesPresentInCache(sp, cache))
-                TryRestoreLocalAgentBakes(sp, cache);
-
-            List<UUID> missing = new List<UUID>();
-            for (int i = 0; i < AvatarAppearance.BAKE_INDICES.Length; i++)
+            List<UUID> missing;
+            if (missingTexturesOnly)
             {
-                int idx = AvatarAppearance.BAKE_INDICES[i];
-                Primitive.TextureEntryFace face = sp.Appearance.Texture.FaceTextures[idx];
-
-                if (face == null)
-                    continue;
-
-                if (face.TextureID.IsZero() || face.TextureID.Equals(AppearanceManager.DEFAULT_AVATAR_TEXTURE))
-                    continue;
-
-                if (missingTexturesOnly)
+                missing = CollectMissingBakeTextureIds(sp, cache, out _, out _);
+            }
+            else
+            {
+                // Full rebake: all non-default bake face UUIDs
+                missing = new List<UUID>();
+                HashSet<UUID> seen = new HashSet<UUID>();
+                if (sp.Appearance?.Texture?.FaceTextures != null)
                 {
-                    if (cache != null && cache.Check(face.TextureID.ToString()))
-                        continue;
-                    missing.Add(face.TextureID);
-                }
-                else
-                {
-                    missing.Add(face.TextureID);
+                    for (int i = 0; i < AvatarAppearance.BAKE_INDICES.Length; i++)
+                    {
+                        int idx = AvatarAppearance.BAKE_INDICES[i];
+                        Primitive.TextureEntryFace face = sp.Appearance.Texture.FaceTextures[idx];
+                        if (face == null || face.TextureID.IsZero() ||
+                                face.TextureID.Equals(AppearanceManager.DEFAULT_AVATAR_TEXTURE))
+                            continue;
+                        if (seen.Add(face.TextureID))
+                            missing.Add(face.TextureID);
+                    }
                 }
             }
 
@@ -807,7 +695,7 @@ namespace OpenSim.Region.CoreModules.Avatar.AvatarFactory
         }
 
         /// <summary>
-        /// ISSUE-005: gather finished or timed out — send one coalesced rebake wave if needed.
+        /// ISSUE-005: gather finished — flush any pending coalesced rebake (after full face checks already queued).
         /// </summary>
         public void NotifyAppearanceGatherComplete(UUID agentId)
         {
@@ -817,10 +705,6 @@ namespace OpenSim.Region.CoreModules.Avatar.AvatarFactory
             m_gatherInProgress.TryRemove(agentId, out _);
             CancelRebakeDeferTimeout(agentId);
 
-            if (!m_pendingRebakeFaces.TryGetValue(agentId, out ConcurrentDictionary<UUID, byte> pending) ||
-                    pending.IsEmpty)
-                return;
-
             ScenePresence sp = m_scene.GetScenePresence(agentId);
             if (sp == null || sp.IsDeleted || sp.IsChildAgent)
             {
@@ -828,8 +712,26 @@ namespace OpenSim.Region.CoreModules.Avatar.AvatarFactory
                 return;
             }
 
-            List<UUID> faces = new List<UUID>(pending.Keys);
-            FlushRebakeWave(sp, faces, "gather-complete");
+            // Re-check all bake UUIDs once after gather (assets may have been pulled); one wave only if still missing.
+            IAssetCache cache = m_scene.RequestModuleInterface<IAssetCache>();
+            if (cache != null && m_localBakeStoreEnabled)
+                HydrateLocalBakeStoreIntoCache(sp.UUID, cache);
+
+            List<UUID> missingNow = CollectMissingBakeTextureIds(sp, cache, out int present, out int listed);
+            if (missingNow.Count > 0)
+            {
+                m_log.InfoFormat(
+                    "[AVFACTORY]: Post-gather bake UUID check for {0}: listed={1} present={2} missing={3} — one rebake wave",
+                    sp.Name, listed, present, missingNow.Count);
+                FlushRebakeWave(sp, missingNow, "gather-complete");
+                return;
+            }
+
+            // Clear any stale pending faces
+            m_pendingRebakeFaces.TryRemove(agentId, out _);
+            m_log.DebugFormat(
+                "[AVFACTORY]: Post-gather bake UUID check for {0}: all {1} present — no rebake",
+                sp.Name, listed);
         }
 
         #endregion
@@ -873,48 +775,29 @@ namespace OpenSim.Region.CoreModules.Avatar.AvatarFactory
             CancelRebakeDeferTimeout(sp.UUID);
 
             IAssetCache cache = m_scene.RequestModuleInterface<IAssetCache>();
+            if (cache != null && m_localBakeStoreEnabled)
+                HydrateLocalBakeStoreIntoCache(sp.UUID, cache);
 
-            // Last chance local restore (ISSUE-004)
-            if (m_localBakeStoreEnabled && cache != null && !AppearanceBakesPresentInCache(sp, cache))
-                TryRestoreLocalAgentBakes(sp, cache);
-
-            List<UUID> still = new List<UUID>();
-            HashSet<UUID> seen = new HashSet<UUID>();
+            // Full re-check of TE (and any queued ids) — only then send one wave to client.
+            List<UUID> still = CollectMissingBakeTextureIds(sp, cache, out _, out _);
+            HashSet<UUID> seen = new HashSet<UUID>(still);
             if (faceIds != null)
             {
                 foreach (UUID id in faceIds)
                 {
-                    if (id.IsZero() || !seen.Add(id))
-                        continue;
-                    if (id.Equals(AppearanceManager.DEFAULT_AVATAR_TEXTURE))
+                    if (id.IsZero() || id.Equals(AppearanceManager.DEFAULT_AVATAR_TEXTURE))
                         continue;
                     if (cache != null && cache.Check(id.ToString()))
                         continue;
-                    still.Add(id);
-                }
-            }
-
-            // Also re-scan TE after possible restore
-            if (sp.Appearance?.Texture?.FaceTextures != null)
-            {
-                for (int i = 0; i < AvatarAppearance.BAKE_INDICES.Length; i++)
-                {
-                    int idx = AvatarAppearance.BAKE_INDICES[i];
-                    Primitive.TextureEntryFace face = sp.Appearance.Texture.FaceTextures[idx];
-                    if (face == null || face.TextureID.IsZero() ||
-                            face.TextureID.Equals(AppearanceManager.DEFAULT_AVATAR_TEXTURE))
-                        continue;
-                    if (cache != null && cache.Check(face.TextureID.ToString()))
-                        continue;
-                    if (seen.Add(face.TextureID))
-                        still.Add(face.TextureID);
+                    if (seen.Add(id))
+                        still.Add(id);
                 }
             }
 
             if (still.Count == 0)
             {
                 m_log.InfoFormat(
-                    "[AVFACTORY]: Rebake wave skipped for {0} reason={1} (bakes present after restore/check)",
+                    "[AVFACTORY]: Rebake wave skipped for {0} reason={1} (all bake UUIDs present after full check)",
                     sp.Name, reason);
                 return;
             }
@@ -1012,39 +895,94 @@ namespace OpenSim.Region.CoreModules.Avatar.AvatarFactory
         }
 
 
-        /// <summary>
-        /// True when every non-default bake face UUID in the appearance TE is already in IAssetCache.
-        /// </summary>
-        private static bool AppearanceBakesPresentInCache(IScenePresence sp, IAssetCache cache)
+        private string GetAgentBakeStoreFile(UUID agentId)
         {
-            if (sp?.Appearance?.Texture?.FaceTextures == null || cache == null)
-                return false;
+            return Path.Combine(m_localBakeStorePath, agentId.ToString() + ".osd");
+        }
 
+        /// <summary>
+        /// Load bake asset bytes from disk store into IAssetCache keyed by their Texture UUIDs.
+        /// Does not modify appearance TE — TE remains whatever login/TP provided.
+        /// </summary>
+        private void HydrateLocalBakeStoreIntoCache(UUID agentId, IAssetCache cache)
+        {
+            if (!m_localBakeStoreEnabled || cache == null || agentId.IsZero())
+                return;
+
+            string path = GetAgentBakeStoreFile(agentId);
+            if (!File.Exists(path))
+                return;
+
+            try
+            {
+                byte[] raw = File.ReadAllBytes(path);
+                if (raw == null || raw.Length == 0)
+                    return;
+
+                OSD osd = OSDParser.DeserializeLLSDXml(raw);
+                // FromOSD injects assetdata into cache under each item's TextureID
+                WearableCacheItem[] loaded = WearableCacheItem.FromOSD(osd, cache);
+                if (loaded == null || loaded.Length == 0)
+                    return;
+
+                int n = 0;
+                foreach (WearableCacheItem item in loaded)
+                {
+                    if (item != null && item.TextureID.IsNotZero() && cache.Check(item.TextureID.ToString()))
+                        n++;
+                }
+                m_log.DebugFormat(
+                    "[AVFACTORY]: Hydrated {0} bake asset(s) from local store into cache for {1}",
+                    n, agentId);
+            }
+            catch (Exception e)
+            {
+                m_log.DebugFormat(
+                    "[AVFACTORY]: Hydrate local bake store failed for {0}: {1}",
+                    agentId, e.Message);
+            }
+        }
+
+        /// <summary>
+        /// Scan all bake faces on the appearance TE. Returns UUIDs not present in cache.
+        /// Call only after HydrateLocalBakeStoreIntoCache so disk hits count as present.
+        /// </summary>
+        private static List<UUID> CollectMissingBakeTextureIds(
+            IScenePresence sp, IAssetCache cache, out int present, out int listed)
+        {
+            List<UUID> missing = new List<UUID>();
+            present = 0;
+            listed = 0;
+            if (sp?.Appearance?.Texture?.FaceTextures == null)
+                return missing;
+
+            HashSet<UUID> seen = new HashSet<UUID>();
             Primitive.TextureEntryFace[] faces = sp.Appearance.Texture.FaceTextures;
-            int needed = 0;
-            int present = 0;
+
             for (int i = 0; i < AvatarAppearance.BAKE_INDICES.Length; i++)
             {
                 int idx = AvatarAppearance.BAKE_INDICES[i];
                 if (idx >= faces.Length)
                     continue;
+
                 Primitive.TextureEntryFace face = faces[idx];
                 if (face == null || face.TextureID.IsZero() ||
                         face.TextureID.Equals(AppearanceManager.DEFAULT_AVATAR_TEXTURE))
                     continue;
-                // skirt optional
-                if (idx == 19)
-                    continue;
-                needed++;
-                if (cache.Check(face.TextureID.ToString()))
-                    present++;
-            }
-            return needed > 0 && present >= needed;
-        }
 
-        private string GetAgentBakeStoreFile(UUID agentId)
-        {
-            return Path.Combine(m_localBakeStorePath, agentId.ToString() + ".osd");
+                if (!seen.Add(face.TextureID))
+                    continue;
+
+                listed++;
+                if (cache != null && cache.Check(face.TextureID.ToString()))
+                {
+                    present++;
+                    continue;
+                }
+                missing.Add(face.TextureID);
+            }
+
+            return missing;
         }
 
         /// <summary>
@@ -1111,82 +1049,6 @@ namespace OpenSim.Region.CoreModules.Avatar.AvatarFactory
             catch (Exception e)
             {
                 m_log.WarnFormat("[AVFACTORY]: Failed to store local bakes for {0}: {1}", sp.Name, e.Message);
-            }
-        }
-
-        /// <summary>
-        /// Load last stored bake set for this agent into Flotsam and rewrite appearance TE
-        /// to those UUIDs so the next visit does not need a viewer rebake.
-        /// </summary>
-        private bool TryRestoreLocalAgentBakes(IScenePresence sp, IAssetCache cache)
-        {
-            if (!m_localBakeStoreEnabled || sp == null || cache == null)
-                return false;
-
-            string path = GetAgentBakeStoreFile(sp.UUID);
-            if (!File.Exists(path))
-                return false;
-
-            try
-            {
-                byte[] raw = File.ReadAllBytes(path);
-                if (raw == null || raw.Length == 0)
-                    return false;
-
-                OSD osd = OSDParser.DeserializeLLSDXml(raw);
-                // FromOSD loads TextureIDs and injects assetdata into IAssetCache
-                WearableCacheItem[] loaded = WearableCacheItem.FromOSD(osd, cache);
-                if (loaded == null || loaded.Length == 0)
-                    return false;
-
-                WearableCacheItem[] wearable = sp.Appearance.WearableCacheItems
-                    ?? WearableCacheItem.GetDefaultCacheItem();
-
-                int restored = 0;
-                foreach (WearableCacheItem item in loaded)
-                {
-                    if (item == null || item.TextureID.IsZero())
-                        continue;
-
-                    uint idx = item.TextureIndex;
-                    if (idx >= AvatarAppearance.TEXTURE_COUNT)
-                        continue;
-
-                    if (!cache.Check(item.TextureID.ToString()))
-                    {
-                        // FromOSD should have cached; skip face if still missing bytes
-                        continue;
-                    }
-
-                    Primitive.TextureEntryFace face = sp.Appearance.Texture.CreateFace(idx);
-                    face.TextureID = item.TextureID;
-
-                    wearable[idx].TextureIndex = idx;
-                    wearable[idx].TextureID = item.TextureID;
-                    wearable[idx].CacheId = item.CacheId.IsNotZero() ? item.CacheId : item.TextureID;
-                    wearable[idx].TextureAsset = null;
-                    restored++;
-                }
-
-                if (restored < 5)
-                {
-                    m_log.DebugFormat(
-                        "[AVFACTORY]: Local bake restore incomplete for {0}: only {1} face(s) from {2}",
-                        sp.Name, restored, path);
-                    return false;
-                }
-
-                sp.Appearance.WearableCacheItems = wearable;
-
-                m_log.InfoFormat(
-                    "[AVFACTORY]: Restored local bakes for {0}: {1} face(s) from {2}",
-                    sp.Name, restored, path);
-                return true;
-            }
-            catch (Exception e)
-            {
-                m_log.WarnFormat("[AVFACTORY]: Failed to restore local bakes for {0}: {1}", sp.Name, e.Message);
-                return false;
             }
         }
 

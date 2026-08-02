@@ -119,12 +119,14 @@ namespace OpenSim.Region.OptionalModules.Avatar.Appearance
 
             scene.AddCommand(
                 "Users", this, "appearance rebake",
-                "appearance rebake <first-name> <last-name>",
+                "appearance rebake <first-name> <last-name>|uuid",
                 "Send a request to the user's viewer for it to rebake and reupload its appearance textures.",
                 "This is currently done for all baked texture references previously received, whether the simulator can find the asset or not."
                     + "\nThis will only work for texture ids that the viewer has already uploaded."
                     + "\nIf the viewer has not yet sent the server any texture ids then nothing will happen"
-                    + "\nsince requests can only be made for ids that the client has already sent us",
+                    + "\nsince requests can only be made for ids that the client has already sent us."
+                    + "\nHG visitors: use first/last as stored on presence (e.g. Amanda.Lee @hg.osgrid.org)"
+                    + "\nor prefer: appearance rebake <agent-uuid>",
                 HandleRebakeAppearanceCommand);
 
             scene.AddCommand(
@@ -248,35 +250,122 @@ namespace OpenSim.Region.OptionalModules.Avatar.Appearance
 
         private void HandleRebakeAppearanceCommand(string module, string[] cmd)
         {
-            if (cmd.Length != 4)
+            // appearance rebake <uuid>
+            // appearance rebake <first> <last>   (HG: Firstname often "Name.Name" Lastname "@grid")
+            if (cmd.Length != 3 && cmd.Length != 4)
             {
-                MainConsole.Instance.Output("Usage: appearance rebake <first-name> <last-name>");
+                MainConsole.Instance.Output(
+                    "Usage: appearance rebake <first-name> <last-name>\n"
+                    + "   or: appearance rebake <agent-uuid>\n"
+                    + "HG tip: presence name is like 'Amanda.Lee @hg.osgrid.org' so use:\n"
+                    + "        appearance rebake Amanda.Lee @hg.osgrid.org\n"
+                    + "   or:  appearance rebake 9327d9e5-dbfe-4485-b2b9-c677a995f521");
                 return;
             }
 
-            string firstname = cmd[2];
-            string lastname = cmd[3];
+            bool found = false;
 
             lock (m_scenes)
             {
                 foreach (Scene scene in m_scenes)
                 {
-                    ScenePresence sp = scene.GetScenePresence(firstname, lastname);
-                    if (sp != null && !sp.IsChildAgent)
-                    {
-                        int rebakesRequested = scene.AvatarFactory.RequestRebake(sp, false);
+                    ScenePresence sp = ResolveRootPresence(scene, cmd);
+                    if (sp == null)
+                        continue;
 
-                        if (rebakesRequested > 0)
+                    found = true;
+                    int rebakesRequested = scene.AvatarFactory.RequestRebake(sp, false);
+
+                    if (rebakesRequested > 0)
+                        MainConsole.Instance.Output(
+                            "Requesting rebake of {0} uploaded textures for {1} ({2}) in {3}",
+                            rebakesRequested, sp.Name, sp.UUID, scene.RegionInfo.RegionName);
+                    else
+                        MainConsole.Instance.Output(
+                            "No texture IDs available for rebake request for {0} ({1}) in {2}",
+                            sp.Name, sp.UUID, scene.RegionInfo.RegionName);
+                }
+            }
+
+            if (!found)
+            {
+                MainConsole.Instance.Output("No matching root avatar found. Online root agents:");
+                lock (m_scenes)
+                {
+                    foreach (Scene scene in m_scenes)
+                    {
+                        scene.ForEachRootScenePresence(sp =>
+                        {
                             MainConsole.Instance.Output(
-                                "Requesting rebake of {0} uploaded textures for {1} in {2}",
-                                rebakesRequested, sp.Name, scene.RegionInfo.RegionName);
-                        else
-                            MainConsole.Instance.Output(
-                                "No texture IDs available for rebake request for {0} in {1}",
-                                sp.Name, scene.RegionInfo.RegionName);
+                                "  {0}  uuid={1}  first='{2}' last='{3}'  region={4}",
+                                sp.Name, sp.UUID, sp.Firstname, sp.Lastname, scene.RegionInfo.RegionName);
+                        });
                     }
                 }
             }
+        }
+
+        /// <summary>
+        /// Resolve a root ScenePresence from console args.
+        /// Supports agent UUID, first+last (including HG Firstname/Lastname split),
+        /// or a single token that matches Name (case-insensitive contains for HG).
+        /// </summary>
+        private static ScenePresence ResolveRootPresence(Scene scene, string[] cmd)
+        {
+            if (cmd.Length == 3)
+            {
+                // appearance rebake <uuid-or-name-fragment>
+                string token = cmd[2];
+                if (UUID.TryParse(token, out UUID id))
+                {
+                    ScenePresence byId = scene.GetScenePresence(id);
+                    if (byId != null && !byId.IsChildAgent)
+                        return byId;
+                    return null;
+                }
+
+                // Match full Name
+                ScenePresence match = null;
+                scene.ForEachRootScenePresence(sp =>
+                {
+                    if (match != null)
+                        return;
+                    if (string.Equals(sp.Name, token, StringComparison.OrdinalIgnoreCase)
+                        || sp.Name.IndexOf(token, StringComparison.OrdinalIgnoreCase) >= 0)
+                        match = sp;
+                });
+                return match;
+            }
+
+            // appearance rebake <first> <last>
+            string first = cmd[2];
+            string last = cmd[3];
+            ScenePresence sp2 = scene.GetScenePresence(first, last);
+            if (sp2 != null && !sp2.IsChildAgent)
+                return sp2;
+
+            // HG: sometimes people type "Amanda Lee" but presence is Firstname=Amanda.Lee Lastname=@hg.osgrid.org
+            ScenePresence fuzzy = null;
+            scene.ForEachRootScenePresence(sp =>
+            {
+                if (fuzzy != null)
+                    return;
+                if (sp.IsChildAgent)
+                    return;
+                // "Amanda Lee" matches "Amanda.Lee @hg.osgrid.org"
+                string compact = (sp.Firstname + " " + sp.Lastname).Replace(".", " ");
+                string want = (first + " " + last).Replace(".", " ");
+                if (string.Equals(sp.Firstname, first, StringComparison.OrdinalIgnoreCase)
+                    && string.Equals(sp.Lastname, last, StringComparison.OrdinalIgnoreCase))
+                {
+                    fuzzy = sp;
+                    return;
+                }
+                if (compact.IndexOf(want, StringComparison.OrdinalIgnoreCase) >= 0
+                    || sp.Name.IndexOf(first, StringComparison.OrdinalIgnoreCase) >= 0)
+                    fuzzy = sp;
+            });
+            return fuzzy;
         }
 
         private void HandleFindAppearanceCommand(string module, string[] cmd)
