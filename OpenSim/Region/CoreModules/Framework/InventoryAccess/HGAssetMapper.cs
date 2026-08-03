@@ -51,6 +51,10 @@ namespace OpenSim.Region.CoreModules.Framework.InventoryAccess
         private Scene m_scene;
         private string m_HomeURI;
 
+        /// <summary>Configured HG fetch concurrency / timeout (ISSUE-009), mirrors [EntityTransfer] HGAssetFetchConcurrency / HGAssetFetchTimeoutMs.</summary>
+        private static int s_FetchConcurrency = 8;
+        private static int s_FetchTimeoutMs = 8000;
+
         #endregion
 
         #region Constructor
@@ -59,6 +63,23 @@ namespace OpenSim.Region.CoreModules.Framework.InventoryAccess
         {
             m_scene = scene;
             m_HomeURI = homeURL;
+        }
+
+        /// <summary>
+        /// Process-wide defaults for the asset mapper's gatherer (ISSUE-009).
+        /// Set from the same [EntityTransfer] keys the appearance gather uses.
+        /// </summary>
+        public static void ConfigureFetch(int concurrency, int timeoutMs)
+        {
+            if (concurrency < 1)
+                concurrency = 1;
+            if (concurrency > 32)
+                concurrency = 32;
+            if (timeoutMs < 500)
+                timeoutMs = 500;
+
+            s_FetchConcurrency = concurrency;
+            s_FetchTimeoutMs = timeoutMs;
         }
 
         #endregion
@@ -197,13 +218,15 @@ namespace OpenSim.Region.CoreModules.Framework.InventoryAccess
             }
 
             HGUuidGatherer uuidGatherer = new(m_scene.AssetService, userAssetURL);
+            uuidGatherer.FetchConcurrency = s_FetchConcurrency;
+            uuidGatherer.FetchTimeoutMs = s_FetchTimeoutMs;
             uuidGatherer.AddForInspection(assetID);
-            uuidGatherer.GatherAll();
+            // ISSUE-009: wave-parallel gather (nested UUIDs fetched concurrently, same as the
+            // avatar-login appearance gather) instead of the old serial one-GET-at-a-time GatherAll.
+            uuidGatherer.GatherAllParallel();
 
             m_log.Debug($"[HG ASSET MAPPER]: Preparing to get {uuidGatherer.GatheredUuids.Count} assets");
             bool success = true;
-            if (uuidGatherer.GatheredUuids.Count > 0)
-                uuidGatherer.FetchAssetsParallel(uuidGatherer.GatheredUuids.Keys);
             if (uuidGatherer.FailedUUIDs.Count > 0)
                 success = false;
 
@@ -266,40 +289,52 @@ namespace OpenSim.Region.CoreModules.Framework.InventoryAccess
             var notFound = new List<string>();
             var posted = new List<string>();
 
+            List<UUID> toPost = new(uuidGatherer.GatheredUuids.Count);
             foreach (UUID uuid in uuidGatherer.GatheredUuids.Keys)
             {
-                string idstr = uuid.ToString();
-                if (existSet.Contains(idstr))
-                    continue;
+                if (!existSet.Contains(uuid.ToString()))
+                    toPost.Add(uuid);
+            }
 
-                asset = m_scene.AssetService.Get(idstr);
-                if (asset == null)
-                {
-                    notFound.Add(idstr);
-                    continue;
-                }
+            if (toPost.Count > 0)
+            {
+                // ISSUE-009: bounded-parallel push to the foreign asset server (was one POST at a time).
+                // A single bad asset no longer aborts the whole push (logs instead).
+                int concurrency = Math.Min(8, Math.Max(1, toPost.Count));
+                System.Threading.Tasks.Parallel.ForEach(toPost,
+                    new System.Threading.Tasks.ParallelOptions { MaxDegreeOfParallelism = concurrency },
+                    uuid =>
+                    {
+                        string idstr = uuid.ToString();
+                        AssetBase localAsset = m_scene.AssetService.Get(idstr);
+                        if (localAsset == null)
+                        {
+                            lock (notFound)
+                                notFound.Add(idstr);
+                            return;
+                        }
 
-                try
-                {
-                    bool b = PostAsset(userAssetURL, asset, false);
-                    if(b)
-                        posted.Add(idstr);
-                    success &= b;
-                }
-                catch (Exception e)
-                {
-                    m_log.Error(
-                        string.Format(
-                            "[HG ASSET MAPPER POST]: Failed to post asset {0} (type {1}, length {2}) referenced from {3} to {4} with exception  ",
-                            asset.ID, asset.Type, asset.Data.Length, assetID, userAssetURL),
-                        e);
-
-                    // For debugging purposes for now we will continue to throw the exception up the stack as was already happening.  However, after
-                    // debugging we may want to simply report the failure if we can tell this is due to a failure
-                    // with a particular asset and not a destination network failure where all asset posts will fail (and
-                    // generate large amounts of log spam).
-                    throw;
-                }
+                        try
+                        {
+                            bool b = PostAsset(userAssetURL, localAsset, false);
+                            if (b)
+                            {
+                                lock (posted)
+                                    posted.Add(idstr);
+                            }
+                            else
+                                success = false;
+                        }
+                        catch (Exception e)
+                        {
+                            m_log.Error(
+                                string.Format(
+                                    "[HG ASSET MAPPER POST]: Failed to post asset {0} (type {1}, length {2}) referenced from {3} to {4} with exception  ",
+                                    localAsset.ID, localAsset.Type, localAsset.Data.Length, assetID, userAssetURL),
+                                e);
+                            success = false;
+                        }
+                    });
             }
             StringBuilder sb = null;
             if (notFound.Count > 0)
