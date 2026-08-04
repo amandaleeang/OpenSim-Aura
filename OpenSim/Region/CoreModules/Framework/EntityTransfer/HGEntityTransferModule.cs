@@ -764,8 +764,8 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
                 {
                     if (aCircuit.ServiceURLs != null && aCircuit.ServiceURLs.ContainsKey("AssetServerURI"))
                     {
-                        // Object is already AddSceneObject'd. Fetch script assets first and start scripts;
-                        // pull remaining appearance assets afterward (ISSUE-001 script-first).
+                        // Object is already AddSceneObject'd. Fetch script+notecard assets first and
+                        // start scripts; pull remaining appearance assets afterward (ISSUE-001 script-first).
                         SceneObjectGroup defso = so;
                         AgentCircuitData defCircuit = aCircuit;
                         m_incomingSceneObjectEngine.QueueJob(
@@ -779,12 +779,12 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
                                 HGUuidGatherer assetFetcher = new HGUuidGatherer(m_scene.AssetService, url);
                                 ConfigureHgGatherer(assetFetcher);
 
-                                List<UUID> scriptAssetIds = CollectAttachmentScriptAssetIds(defso);
+                                List<UUID> startupAssetIds = CollectAttachmentStartupAssetIds(defso);
                                 m_log.DebugFormat(
-                                    "[HG ENTITY TRANSFER]: Single attachment {0} for {1}: fetching {2} script asset(s) then starting scripts",
-                                    defso.Name, defCircuit.Name, scriptAssetIds.Count);
+                                    "[HG ENTITY TRANSFER]: Single attachment {0} for {1}: fetching {2} script/notecard asset(s) then starting scripts",
+                                    defso.Name, defCircuit.Name, startupAssetIds.Count);
 
-                                assetFetcher.FetchAssetsParallel(scriptAssetIds, () => defso.IsDeleted);
+                                assetFetcher.FetchAssetsParallel(startupAssetIds, () => defso.IsDeleted);
 
                                 if (!defso.IsDeleted)
                                     TryStartScriptsOnIncomingAttachment(defso);
@@ -896,31 +896,31 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
 
                         List<SceneObjectGroup> attached = new List<SceneObjectGroup>(deftatt.Count);
 
-                        // ISSUE-009: fetch script assets for ALL attachments in ONE parallel batch instead
-                        // of one blocking per-attachment foreign fetch. The old loop serialised a
+                        // ISSUE-009: fetch script+notecard assets for ALL attachments in ONE parallel batch
+                        // instead of one blocking per-attachment foreign fetch. The old loop serialised a
                         // ~0.3-1.5s HTTP round-trip per attachment (observed ~40s for 30 attachments);
                         // fetching them together collapses the round-trips into a few parallel waves.
-                        List<UUID> allScriptAssetIds = new List<UUID>();
-                        HashSet<UUID> scriptSeen = new HashSet<UUID>();
+                        List<UUID> allStartupAssetIds = new List<UUID>();
+                        HashSet<UUID> startupSeen = new HashSet<UUID>();
                         foreach (SceneObjectGroup defso in deftatt)
                         {
                             if (defso.OwnerID.NotEqual(defsp.UUID))
                                 continue;
 
-                            foreach (UUID scriptId in CollectAttachmentScriptAssetIds(defso))
+                            foreach (UUID assetId in CollectAttachmentStartupAssetIds(defso))
                             {
-                                if (!scriptId.IsZero() && scriptSeen.Add(scriptId))
-                                    allScriptAssetIds.Add(scriptId);
+                                if (!assetId.IsZero() && startupSeen.Add(assetId))
+                                    allStartupAssetIds.Add(assetId);
                             }
                         }
 
                         int scriptTickStart = Util.EnvironmentTickCount();
 
                         m_log.DebugFormat(
-                            "[HG ENTITY TRANSFER]: Fetching {0} script asset(s) for {1} attachment(s) of {2} in one parallel batch (concurrency={3})",
-                            allScriptAssetIds.Count, deftatt.Count, defsp.Name, m_hgAssetFetchConcurrency);
+                            "[HG ENTITY TRANSFER]: Fetching {0} script/notecard asset(s) for {1} attachment(s) of {2} in one parallel batch (concurrency={3})",
+                            allStartupAssetIds.Count, deftatt.Count, defsp.Name, m_hgAssetFetchConcurrency);
 
-                        assetFetcher.FetchAssetsParallel(allScriptAssetIds, () => defsp.IsDeleted);
+                        assetFetcher.FetchAssetsParallel(allStartupAssetIds, () => defsp.IsDeleted);
 
                         if (defsp.IsDeleted)
                             return;
@@ -984,7 +984,7 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
                             attached.Add(defso);
 
                             m_log.DebugFormat(
-                                "[HG ENTITY TRANSFER]: Attached {0} for {1} after {2} ms parallel script fetch; starting scripts now",
+                                "[HG ENTITY TRANSFER]: Attached {0} for {1} after {2} ms parallel script/notecard fetch; starting scripts now",
                                 defso.Name, defsp.Name, scriptFetchMs);
 
                             // Start scripts as soon as this attachment is on the avatar (ISSUE-001).
@@ -1064,18 +1064,22 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
         }
 
         /// <summary>
-        /// Collect asset UUIDs for LSL scripts in an attachment's task inventories.
-        /// Does not include textures, mesh, sounds, or other non-script assets.
+        /// Collect asset UUIDs an attachment's scripts need CONTENT for at startup: LSL scripts
+        /// themselves plus notecards. Notecard bytes are consumed synchronously by scripts at init
+        /// (e.g. an AO reading its config), so they must be local before scripts start; animation
+        /// and sound assets are NOT collected here because scripts only need the item metadata
+        /// (name/UUID, already in the task inventory) to look them up, and their bytes are pulled
+        /// by the background appearance gather (ISSUE-001 script/notecard-first).
         /// </summary>
-        private static List<UUID> CollectAttachmentScriptAssetIds(SceneObjectGroup sog)
+        private static List<UUID> CollectAttachmentStartupAssetIds(SceneObjectGroup sog)
         {
-            List<UUID> scriptIds = new List<UUID>();
+            List<UUID> startupIds = new List<UUID>();
             if (sog is null || sog.IsDeleted)
-                return scriptIds;
+                return startupIds;
 
             SceneObjectPart[] parts = sog.Parts;
             if (parts is null)
-                return scriptIds;
+                return startupIds;
 
             HashSet<UUID> seen = new HashSet<UUID>();
             for (int i = 0; i < parts.Length; i++)
@@ -1085,6 +1089,11 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
                     continue;
 
                 List<TaskInventoryItem> items = part.TaskInventory.GetItems();
+
+                // Only collect notecards for parts that actually run scripts: LSL can only read a
+                // notecard (llGetNotecard / llGetInventoryKey) from its own prim's inventory, so a
+                // scriptless part's notecards are never consumed and need no early fetch.
+                bool hasScript = false;
                 for (int j = 0; j < items.Count; j++)
                 {
                     TaskInventoryItem item = items[j];
@@ -1097,12 +1106,30 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
                         && item.Type != (int)AssetType.LSLBytecode)
                         continue;
 
+                    hasScript = true;
                     if (seen.Add(item.AssetID))
-                        scriptIds.Add(item.AssetID);
+                        startupIds.Add(item.AssetID);
+                }
+
+                if (!hasScript)
+                    continue;
+
+                for (int j = 0; j < items.Count; j++)
+                {
+                    TaskInventoryItem item = items[j];
+                    if (item is null || item.AssetID.IsZero())
+                        continue;
+
+                    if (item.InvType != (int)InventoryType.Notecard
+                        && item.Type != (int)AssetType.Notecard)
+                        continue;
+
+                    if (seen.Add(item.AssetID))
+                        startupIds.Add(item.AssetID);
                 }
             }
 
-            return scriptIds;
+            return startupIds;
         }
 
         #endregion
