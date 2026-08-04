@@ -389,6 +389,24 @@
     ;; Comma-separated list of account names
     AccountForAppearance = "Test User, Astronaut Smith"
 
+    ;; ISSUE-003/009: HG asset pull from the visitor's home grid (compatible: still stock
+    ;; GET /assets/{uuid}, parallelised). All commented = code defaults.
+    ;; HGAssetFetchConcurrency = parallel GETs per gatherer (1-32, default 8)
+    ;; HGAssetFetchTimeoutMs = per-asset timeout in ms (default 8000)
+    ;; HGAssetFetchGlobalConcurrency = process-wide cap across all gatherers/visitors (1-64, default 16)
+    ;; HGAssetFetchPerHostConcurrency = cap per home AssetServerURI (1-32, default 8)
+    ;HGAssetFetchConcurrency = 8
+    ;HGAssetFetchTimeoutMs = 8000
+    ;HGAssetFetchGlobalConcurrency = 16
+    ;HGAssetFetchPerHostConcurrency = 8
+
+    ;; ISSUE-011: persist assets fetched for HG login attachments to the local asset database?
+    ;; true  = permanent (stock behaviour; assets survive cache expiry)
+    ;; false = cache-only / transient (re-fetched from home on each visit; smaller asset DB).
+    ;;        Rezzed/dropped HG objects are always persisted regardless of this setting.
+    ;; Default false (code default). Set true to restore the stock permanent behaviour.
+    ;HGAssetStoreLoginAttachments = false
+
 [UserProfilesService]
     ;; To use, set Enabled to true then configure for your site...
     Enabled = false
