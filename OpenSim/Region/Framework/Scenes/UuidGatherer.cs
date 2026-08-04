@@ -1372,6 +1372,11 @@ namespace OpenSim.Region.Framework.Scenes
         /// <summary>Per-asset wait timeout in ms (ISSUE-003). Default 8000.</summary>
         public int FetchTimeoutMs { get; set; } = 8000;
 
+        /// <summary>When true (default) assets fetched from a foreign grid are also persisted to the local
+        /// asset database. Set false for transient gathers (e.g. HG login attachments) so the local DB is
+        /// not written; the asset stays in the local cache only and is re-fetched on a later visit.</summary>
+        public bool StoreLocalToDatabase { get; set; } = true;
+
         public HGUuidGatherer(IAssetService assetService, string assetServerURL)
             : this(assetService, assetServerURL, new Dictionary<UUID, sbyte>()) {}
 
@@ -1471,9 +1476,10 @@ namespace OpenSim.Region.Framework.Scenes
             {
                 string serverUrl = m_assetServerURL;
                 IAssetService assetService = m_assetService;
+                bool storeLocal = StoreLocalToDatabase;
                 Task<AssetBase> task = s_InflightFetches.GetOrAdd(inflightKey, key =>
                 {
-                    Task<AssetBase> t = Task.Run(() => FetchForeignAdmitted(assetService, IDstr, serverUrl));
+                    Task<AssetBase> t = Task.Run(() => FetchForeignAdmitted(assetService, IDstr, serverUrl, storeLocal));
                     // Always clear in-flight slot when done so timeouts do not pin the entry forever
                     _ = t.ContinueWith(_ => s_InflightFetches.TryRemove(key, out _),
                         TaskContinuationOptions.ExecuteSynchronously);
@@ -1502,7 +1508,7 @@ namespace OpenSim.Region.Framework.Scenes
         /// <summary>
         /// Stock-compatible foreign GET (single /assets/{uuid}) under global + per-host admission.
         /// </summary>
-        private static AssetBase FetchForeignAdmitted(IAssetService assetService, string IDstr, string assetServerURL)
+        private static AssetBase FetchForeignAdmitted(IAssetService assetService, string IDstr, string assetServerURL, bool storeLocal)
         {
             SemaphoreSlim globalSlots = s_GlobalForeignSlots;
             SemaphoreSlim hostSlots = GetPerHostSlots(assetServerURL);
@@ -1512,7 +1518,7 @@ namespace OpenSim.Region.Framework.Scenes
                 hostSlots.Wait();
                 try
                 {
-                    AssetBase a = assetService.Get(IDstr, assetServerURL, true);
+                    AssetBase a = assetService.Get(IDstr, assetServerURL, storeLocal);
                     if (a is null)
                         m_log.Debug($"[HGUUIDGatherer]: Failed to fetch asset {IDstr} from {assetServerURL}");
                     else

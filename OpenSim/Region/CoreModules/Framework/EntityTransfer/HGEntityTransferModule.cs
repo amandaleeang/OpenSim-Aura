@@ -128,6 +128,10 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
         /// <summary>Per home AssetServerURI concurrent foreign GET cap.</summary>
         private int m_hgAssetFetchPerHostConcurrency = 8;
 
+        /// <summary>When true, assets fetched for HG login attachments are persisted to the local asset
+        /// database. When false (default) they are cache-only: transient, re-fetched on a later visit.</summary>
+        private bool m_hgAssetStoreLoginAttachments = false;
+
         #region ISharedRegionModule
 
         public override string Name
@@ -181,15 +185,19 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
                             m_hgAssetFetchPerHostConcurrency = 1;
                         if (m_hgAssetFetchPerHostConcurrency > 32)
                             m_hgAssetFetchPerHostConcurrency = 32;
+
+                        m_hgAssetStoreLoginAttachments = transferConfig.GetBoolean(
+                            "HGAssetStoreLoginAttachments", m_hgAssetStoreLoginAttachments);
                     }
 
                     InitialiseCommon(source);
                     HGUuidGatherer.ConfigureForeignFetchLimits(
                         m_hgAssetFetchGlobalConcurrency, m_hgAssetFetchPerHostConcurrency);
                     m_log.DebugFormat(
-                        "[HG ENTITY TRANSFER MODULE]: {0} enabled (HGAssetFetchConcurrency={1}, HGAssetFetchTimeoutMs={2}, Global={3}, PerHost={4}).",
+                        "[HG ENTITY TRANSFER MODULE]: {0} enabled (HGAssetFetchConcurrency={1}, HGAssetFetchTimeoutMs={2}, Global={3}, PerHost={4}, StoreLoginAttachments={5}).",
                         Name, m_hgAssetFetchConcurrency, m_hgAssetFetchTimeoutMs,
-                        m_hgAssetFetchGlobalConcurrency, m_hgAssetFetchPerHostConcurrency);
+                        m_hgAssetFetchGlobalConcurrency, m_hgAssetFetchPerHostConcurrency,
+                        m_hgAssetStoreLoginAttachments);
                 }
             }
         }
@@ -200,6 +208,7 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
                 return;
             gatherer.FetchConcurrency = m_hgAssetFetchConcurrency;
             gatherer.FetchTimeoutMs = m_hgAssetFetchTimeoutMs;
+            gatherer.StoreLocalToDatabase = m_hgAssetStoreLoginAttachments;
         }
 
         public override void AddRegion(Scene scene)

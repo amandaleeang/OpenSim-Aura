@@ -225,6 +225,12 @@ namespace OpenSim.Region.CoreModules.Framework.InventoryAccess
             // avatar-login appearance gather) instead of the old serial one-GET-at-a-time GatherAll.
             uuidGatherer.GatherAllParallel();
 
+            // ISSUE-011: this object is becoming a persistent scene object (rez / drop-in), so any
+            // asset that previously arrived only as a transient HG login-attachment fetch (cache-only,
+            // never written to the local DB) must be promoted to the local asset database now.
+            // Otherwise it would live only in the file cache and grey out after the cache expires.
+            PromoteCacheOnlyAssetsToDatabase(assetID, uuidGatherer);
+
             m_log.Debug($"[HG ASSET MAPPER]: Preparing to get {uuidGatherer.GatheredUuids.Count} assets");
             bool success = true;
             if (uuidGatherer.FailedUUIDs.Count > 0)
@@ -235,6 +241,68 @@ namespace OpenSim.Region.CoreModules.Framework.InventoryAccess
                 m_log.Debug($"[HG ASSET MAPPER]: Problems getting item asset {assetID} from asset server {userAssetURL}");
             else
                 m_log.Debug($"[HG ASSET MAPPER]: Successfully got item asset {assetID} from asset server {userAssetURL}");
+        }
+
+        /// <summary>
+        /// Writes cache-only assets referenced by a now-persistent scene object to the local asset
+        /// database (ISSUE-011). Assets fetched transiently for HG login attachments live only in the
+        /// file cache; promote them so a rezzed/dropped object survives cache expiry.
+        /// </summary>
+        private void PromoteCacheOnlyAssetsToDatabase(UUID rootAssetID, HGUuidGatherer uuidGatherer)
+        {
+            if (uuidGatherer.GatheredUuids.Count == 0)
+                return;
+
+            string[] ids = new string[uuidGatherer.GatheredUuids.Count];
+            int idx = 0;
+            foreach (UUID id in uuidGatherer.GatheredUuids.Keys)
+                ids[idx++] = id.ToString();
+
+            bool[] exist;
+            try
+            {
+                exist = m_scene.AssetService.AssetsExist(ids);
+            }
+            catch (Exception e)
+            {
+                m_log.Debug($"[HG ASSET MAPPER]: Asset existence check failed for {rootAssetID}: {e.Message}");
+                return;
+            }
+
+            if (exist is null)
+                return;
+
+            int promoted = 0;
+            idx = 0;
+            foreach (UUID id in uuidGatherer.GatheredUuids.Keys)
+            {
+                if (exist[idx])
+                {
+                    idx++;
+                    continue;
+                }
+
+                try
+                {
+                    AssetBase cached = m_scene.AssetService.GetCached(id.ToString());
+                    if (cached != null)
+                    {
+                        string stored = m_scene.AssetService.Store(cached);
+                        if (!string.IsNullOrEmpty(stored))
+                            promoted++;
+                    }
+                }
+                catch (Exception e)
+                {
+                    m_log.Debug($"[HG ASSET MAPPER]: Promote failed for {id}: {e.Message}");
+                }
+                idx++;
+            }
+
+            if (promoted > 0)
+                m_log.DebugFormat(
+                    "[HG ASSET MAPPER]: Promoted {0} cache-only asset(s) to persistent local store for item {1}",
+                    promoted, rootAssetID);
         }
 
         public void Post(UUID assetID, UUID ownerID, string userAssetURL)
