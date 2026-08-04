@@ -578,6 +578,12 @@ namespace OpenSim.Region.CoreModules.Avatar.Attachments
             List<SceneObjectGroup> attachments = sp.GetAttachments();
             foreach(SceneObjectGroup sog in attachments)
             {
+                // Preserve a local copy of the script state when the attachments
+                // are removed because their avatar is leaving (crossing, teleport,
+                // logout) so the scripts can be restored on return if no transfer
+                // state comes back.  Transferred state, if any, overwrites it.
+                sog.PreserveScriptStateOnRemove = true;
+
                 sog.Scene.DeleteSceneObject(sog, silent);
             }
 
@@ -1249,6 +1255,11 @@ namespace OpenSim.Region.CoreModules.Avatar.Attachments
 
                 UpdateKnownItem(sp, so, scriptedState);
             }
+
+            // Keep a local copy of script state when the scripts are removed so
+            // that a HG visitor (or returning attachment) can restore it if no
+            // transfer state is sent back by the previous region.
+            so.PreserveScriptStateOnRemove = true;
 
             // Now, remove the scripts
             so.RemoveScriptInstances(true);

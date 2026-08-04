@@ -1124,6 +1124,13 @@ namespace OpenSim.Region.ScriptEngine.Yengine
             if(instance == null)
                 return string.Empty;
 
+            return GetXMLState(instance, itemID);
+        }
+
+        // Build the state XML for an already-looked-up instance.  Used by
+        // GetXMLState() and when preserving state on script removal.
+        private string GetXMLState(XMRInstance instance, UUID itemID)
+        {
             TraceCalls("[YEngine]: YEngine.GetXMLState({0})", itemID.ToString());
 
             if(!instance.m_HasRun)
@@ -1490,6 +1497,7 @@ namespace OpenSim.Region.ScriptEngine.Yengine
             // After this, no more events can queue because we won't be
             // able to translate the itemID to an XMRInstance pointer.
             XMRInstance instance = null;
+            bool preserveState = false;
             lock(m_InstancesDict)
             {
                 m_LockedDict = "OnRemoveScript:" + itemID.ToString();
@@ -1520,14 +1528,40 @@ namespace OpenSim.Region.ScriptEngine.Yengine
                         m_ObjectInstArray[instance.m_PartUUID] = null;
                 }
 
-                // Delete the .state file as any needed contents were fetched with GetXMLState()
-                // and stored on the database server.
-                string stateFileName = XMRInstance.GetStateFileName(m_ScriptBasePath, itemID);
-                File.Delete(stateFileName);
+                // Keep a local copy of the script state when the object is an
+                // attachment being detached (see AttachmentsModule.UpdateDetachedObject).
+                // The transferred or inventory copy of the state may not be kept
+                // (e.g. for HG visitors), so snapshot it to the .state file as a
+                // fallback.  Any transferred state overwrites it before the instance
+                // is next created.
+                preserveState = instance.m_Part?.ParentGroup?.PreserveScriptStateOnRemove ?? false;
+                if(!preserveState)
+                {
+                    // Delete the .state file as any needed contents were fetched with GetXMLState()
+                    // and stored on the database server.
+                    string stateFileName = XMRInstance.GetStateFileName(m_ScriptBasePath, itemID);
+                    File.Delete(stateFileName);
+                }
 
                 OnScriptRemoved?.Invoke(itemID);
 
                 m_LockedDict = "~~OnRemoveScript";
+            }
+
+            if(preserveState)
+            {
+                // Take the snapshot outside the m_InstancesDict lock since
+                // GetExecutionState may have to suspend the script first.
+                try
+                {
+                    SetXMLState(itemID, GetXMLState(instance, itemID));
+                }
+                catch(Exception e)
+                {
+                    m_log.WarnFormat(
+                        "[YEngine]: Failed to preserve state for script {0} on removal: {1}",
+                        itemID, e.Message);
+                }
             }
 
             // Free off its stack and fun things like that.
