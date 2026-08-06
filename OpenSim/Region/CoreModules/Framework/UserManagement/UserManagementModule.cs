@@ -831,11 +831,23 @@ namespace OpenSim.Region.CoreModules.Framework.UserManagement
                 if(userdata.ServerURLs.TryGetValue(serverType, out object ourl) && ourl != null)
                 {
                     string turl = ourl as string;
-                    OSHHTPHost otmp = new OSHHTPHost(turl);
-                    if (otmp.IsValidHost)
-                        return otmp.URI;
+                    if (!string.IsNullOrWhiteSpace(turl))
+                    {
+                        OSHHTPHost otmp = new OSHHTPHost(turl);
+                        if (otmp.IsValidHost)
+                            return otmp.URI;
+                    }
                 }
-                return string.Empty;
+                // HomeURI is often already known from HG login even when ServiceURLs cache omits it
+                if (serverType == "HomeURI" && !string.IsNullOrEmpty(userdata.HomeURL))
+                {
+                    OSHHTPHost homeHost = new OSHHTPHost(userdata.HomeURL);
+                    if (homeHost.IsValidHost)
+                        return homeHost.URI;
+                }
+                // Missing key (e.g. ProfileServerURI) — fall through to (re)query home if we have HomeURL
+                if (string.IsNullOrEmpty(userdata.HomeURL))
+                    return string.Empty;
             }
 
             if (!string.IsNullOrEmpty(userdata.HomeURL))
@@ -864,9 +876,18 @@ namespace OpenSim.Region.CoreModules.Framework.UserManagement
                     if (userdata.ServerURLs != null && userdata.ServerURLs.TryGetValue(serverType, out object ourl) && ourl != null)
                     {
                         string turl = ourl as string;
-                        OSHHTPHost otmp = new OSHHTPHost(turl);
-                        if (otmp.IsValidHost)
-                            return otmp.URI;
+                        if (!string.IsNullOrWhiteSpace(turl))
+                        {
+                            OSHHTPHost otmp = new OSHHTPHost(turl);
+                            if (otmp.IsValidHost)
+                                return otmp.URI;
+                        }
+                    }
+                    if (serverType == "HomeURI")
+                    {
+                        OSHHTPHost homeHost = new OSHHTPHost(userdata.HomeURL);
+                        if (homeHost.IsValidHost)
+                            return homeHost.URI;
                     }
                 }
             }
@@ -901,11 +922,21 @@ namespace OpenSim.Region.CoreModules.Framework.UserManagement
                 if (userdata.ServerURLs.TryGetValue(serverType, out object ourl) && ourl != null)
                 {
                     string turl = ourl as string;
-                    OSHHTPHost otmp = new OSHHTPHost(turl);
-                    if (otmp.IsValidHost)
-                        return otmp.URI;
+                    if (!string.IsNullOrWhiteSpace(turl))
+                    {
+                        OSHHTPHost otmp = new OSHHTPHost(turl);
+                        if (otmp.IsValidHost)
+                            return otmp.URI;
+                    }
                 }
-                return string.Empty;
+                if (serverType == "HomeURI" && !string.IsNullOrEmpty(userdata.HomeURL))
+                {
+                    OSHHTPHost homeHost = new OSHHTPHost(userdata.HomeURL);
+                    if (homeHost.IsValidHost)
+                        return homeHost.URI;
+                }
+                if (string.IsNullOrEmpty(userdata.HomeURL))
+                    return string.Empty;
             }
 
             if (!recentFail && !string.IsNullOrEmpty(userdata.HomeURL))
@@ -938,9 +969,18 @@ namespace OpenSim.Region.CoreModules.Framework.UserManagement
                     if (userdata.ServerURLs != null && userdata.ServerURLs.TryGetValue(serverType, out object ourl) && ourl != null)
                     {
                         string turl = ourl as string;
-                        OSHHTPHost otmp = new OSHHTPHost(turl);
-                        if (otmp.IsValidHost)
-                            return otmp.URI;
+                        if (!string.IsNullOrWhiteSpace(turl))
+                        {
+                            OSHHTPHost otmp = new OSHHTPHost(turl);
+                            if (otmp.IsValidHost)
+                                return otmp.URI;
+                        }
+                    }
+                    if (serverType == "HomeURI")
+                    {
+                        OSHHTPHost homeHost = new OSHHTPHost(userdata.HomeURL);
+                        if (homeHost.IsValidHost)
+                            return homeHost.URI;
                     }
                 }
             }

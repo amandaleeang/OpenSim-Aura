@@ -125,12 +125,42 @@ namespace OpenSim.Region.CoreModules.Avatar.UserProfiles
                     ScenePresence p = req.presence;
 
                     bool foreign = GetUserProfileServerURI(req.agent, out string serverURI);
-                    bool ok  = serverURI.Length > 0;
+
+                    // Self-profile for HG visitor: circuit ServiceURLs is authoritative
+                    // (UserManagement can mis-classify or lack ProfileServerURI for the visitor).
+                    if (client is not null && req.agent.Equals(client.AgentId))
+                    {
+                        string circuitProfile = GetCircuitProfileServerURI(client);
+                        if (!string.IsNullOrEmpty(circuitProfile))
+                        {
+                            serverURI = circuitProfile;
+                            foreign = true;
+                            m_log.DebugFormat(
+                                "[PROFILES]: Self-profile for HG visitor {0} via circuit ProfileServerURI {1}",
+                                client.Name, serverURI);
+                        }
+                    }
+
+                    // HG visitor looking at friends never seen on this grid: no HomeURL for target.
+                    // Fall back to requester's home ProfileServerURI / get_server_urls(target).
+                    if (string.IsNullOrEmpty(serverURI) && client is not null)
+                    {
+                        serverURI = ResolveProfileURIViaRequester(client, req.agent);
+                        if (!string.IsNullOrEmpty(serverURI))
+                            foreign = true;
+                    }
+                    bool ok  = !string.IsNullOrEmpty(serverURI);
+                    if (!ok)
+                        m_log.DebugFormat(
+                            "[PROFILES]: No ProfileServerURI for {0} (foreign={1})", req.agent, foreign);
 
                     byte[] membershipType = new byte[1];
                     string born = string.Empty;
                     uint flags = 0x00;
 
+                    // Account metadata (born date, title, flags) is best-effort only.
+                    // Do not fail the whole profile when get_user_info / local account lookup
+                    // fails — ProfileServerURI may still return the profile body (HG visitors).
                     if (ok && GetUserAccountData(req.agent, out UserAccount acc))
                     {
                         flags = (uint)(acc.UserFlags & 0xff);
@@ -144,13 +174,21 @@ namespace OpenSim.Region.CoreModules.Avatar.UserProfiles
                         if (val_born != 0)
                             born = Util.ToDateTime(val_born).ToString("M/d/yyyy", CultureInfo.InvariantCulture);
                     }
-                    else
-                        ok = false;
 
                     UserProfileProperties props = new() { UserId = req.agent };
 
                     if (ok)
+                    {
                         ok = GetProfileData(ref props, foreign, serverURI, out string result);
+                        if (!ok)
+                            m_log.DebugFormat(
+                                "[PROFILES]: GetProfileData failed for {0} foreign={1} uri={2}: {3}",
+                                req.agent, foreign, serverURI, result);
+                        else
+                            m_log.DebugFormat(
+                                "[PROFILES]: GetProfileData ok for {0} foreign={1} uri={2}",
+                                req.agent, foreign, serverURI);
+                    }
 
                     if (!ok)
                         props.AboutText = "Profile not available at this time. User may still be unknown to this grid";
@@ -167,14 +205,22 @@ namespace OpenSim.Region.CoreModules.Avatar.UserProfiles
                     {
                         if (!m_profilesCache.TryGetValue(props.UserId, out UserProfileCacheEntry uce) || uce is null)
                             uce = new UserProfileCacheEntry();
-                        uce.props = props;
-                        uce.born = born;
-                        uce.membershipType = membershipType;
-                        uce.flags = flags;
                         clients = uce.ClientsWaitingProps;
                         uce.ClientsWaitingProps = null;
-                        uce.avatarGroups = agentGroups;
-                        m_profilesCache.AddOrUpdate(props.UserId, uce, PROFILECACHEEXPIRE);
+                        // Only cache successful fetches. Caching failures made "unknown" stick until expiry.
+                        if (ok)
+                        {
+                            uce.props = props;
+                            uce.born = born;
+                            uce.membershipType = membershipType;
+                            uce.flags = flags;
+                            uce.avatarGroups = agentGroups;
+                            m_profilesCache.AddOrUpdate(props.UserId, uce, PROFILECACHEEXPIRE);
+                        }
+                        else
+                        {
+                            m_profilesCache.Remove(props.UserId);
+                        }
                     }
 
                     if (IsFriendOnline(req.client, req.agent))
@@ -1839,8 +1885,12 @@ namespace OpenSim.Region.CoreModules.Avatar.UserProfiles
             }
             else
             {
-                // Is Foreign
+                // Is Foreign — prefer ServiceURLs HomeURI, fall back to UserManagement HomeURL
+                // (get_server_urls cache may omit HomeURI even when we already know the home from HG login).
                 string home_url = m_userManagementModule.GetUserServerURL(userID, "HomeURI", out bool recentFailedWeb);
+                if (string.IsNullOrEmpty(home_url))
+                    home_url = m_userManagementModule.GetUserHomeURL(userID, out recentFailedWeb);
+
                 if (recentFailedWeb || string.IsNullOrEmpty(home_url))
                     return false;
 
@@ -1868,7 +1918,11 @@ namespace OpenSim.Region.CoreModules.Avatar.UserProfiles
                 if (info.ContainsKey("user_created"))
                     account.Created = (int)info["user_created"];
 
-                account.UserTitle = "HG Visitor";
+                if (info.ContainsKey("user_title") && info["user_title"] != null
+                        && !string.IsNullOrEmpty(info["user_title"].ToString()))
+                    account.UserTitle = info["user_title"].ToString();
+                else
+                    account.UserTitle = "HG Visitor";
                 return true;
             }
         }
@@ -1890,7 +1944,27 @@ namespace OpenSim.Region.CoreModules.Avatar.UserProfiles
             if (!m_userManagementModule.IsLocalGridUser(userID))
             {
                 serverURI = m_userManagementModule.GetUserServerURL(userID, "ProfileServerURI", out bool failed);
-                if(failed)
+                if (failed || string.IsNullOrEmpty(serverURI))
+                {
+                    // HomeURI from cache / UserManagement, then ProfileServerURI via get_server_urls on home
+                    string home = m_userManagementModule.GetUserHomeURL(userID, out bool homeFail);
+                    if (!homeFail && !string.IsNullOrEmpty(home))
+                    {
+                        // Force a fresh ServiceURLs pull when ProfileServerURI was missing from a partial cache
+                        try
+                        {
+                            UserAgentServiceConnector uConn = new(home);
+                            Dictionary<string, object> urls = uConn.GetServerURLs(userID);
+                            if (urls != null && urls.TryGetValue("ProfileServerURI", out object purl) && purl != null)
+                                serverURI = purl.ToString();
+                        }
+                        catch (Exception e)
+                        {
+                            m_log.Debug($"[PROFILES]: GetServerURLs for profile URI failed for {userID}: {e.Message}");
+                        }
+                    }
+                }
+                if (string.IsNullOrWhiteSpace(serverURI))
                     serverURI = string.Empty;
                 // Is Foreign
                 return true;
@@ -1901,6 +1975,119 @@ namespace OpenSim.Region.CoreModules.Avatar.UserProfiles
                 // Is local
                 return false;
             }
+        }
+
+        /// <summary>
+        /// ProfileServerURI from the client's agent circuit (HG visitor ServiceURLs).
+        /// </summary>
+        string GetCircuitProfileServerURI(IClientAPI client)
+        {
+            if (client is null)
+                return string.Empty;
+            try
+            {
+                AgentCircuitData circuit = Scene?.AuthenticateHandler?.GetAgentCircuitData(client.CircuitCode);
+                if (circuit?.ServiceURLs is null)
+                    return string.Empty;
+                if (circuit.ServiceURLs.TryGetValue("ProfileServerURI", out object pobj) && pobj != null
+                        && !string.IsNullOrWhiteSpace(pobj.ToString()))
+                    return pobj.ToString();
+            }
+            catch (Exception e)
+            {
+                m_log.Debug($"[PROFILES]: GetCircuitProfileServerURI failed: {e.Message}");
+            }
+            return string.Empty;
+        }
+
+        /// <summary>
+        /// When the target is unknown to this grid (typical: HG visitor opens a same-home friend
+        /// who never visited here), ask the requester's home for the target's ProfileServerURI,
+        /// or use the requester's own ProfileServerURI (same-grid friends).
+        /// </summary>
+        string ResolveProfileURIViaRequester(IClientAPI requester, UUID targetID)
+        {
+            if (requester is null || targetID.IsZero())
+                return string.Empty;
+
+            // Same person
+            if (requester.AgentId.Equals(targetID))
+            {
+                GetUserProfileServerURI(targetID, out string selfUri);
+                return selfUri ?? string.Empty;
+            }
+
+            try
+            {
+                AgentCircuitData circuit = Scene?.AuthenticateHandler?.GetAgentCircuitData(requester.CircuitCode);
+                if (circuit?.ServiceURLs is null)
+                    return string.Empty;
+
+                string homeUri = null;
+                if (circuit.ServiceURLs.TryGetValue("HomeURI", out object hobj) && hobj != null)
+                    homeUri = hobj.ToString();
+                if (string.IsNullOrWhiteSpace(homeUri))
+                    homeUri = m_userManagementModule.GetUserHomeURL(requester.AgentId);
+
+                // Prefer explicit profile URL from requester's ServiceURLs (same home grid profile host)
+                if (circuit.ServiceURLs.TryGetValue("ProfileServerURI", out object pobj) && pobj != null)
+                {
+                    string puri = pobj.ToString();
+                    if (!string.IsNullOrWhiteSpace(puri))
+                    {
+                        // Ask home get_server_urls(target) first so Holoneon friends of OSGrid users
+                        // still resolve if home knows them; fall back to requester's ProfileServerURI
+                        // for same-grid friends never registered on home's UAS as separate SRV set.
+                        if (!string.IsNullOrWhiteSpace(homeUri))
+                        {
+                            try
+                            {
+                                UserAgentServiceConnector uConn = new(homeUri);
+                                Dictionary<string, object> urls = uConn.GetServerURLs(targetID);
+                                if (urls != null && urls.TryGetValue("ProfileServerURI", out object tprof) && tprof != null
+                                        && !string.IsNullOrWhiteSpace(tprof.ToString()))
+                                {
+                                    m_log.DebugFormat(
+                                        "[PROFILES]: Resolved profile URI for {0} via requester home get_server_urls → {1}",
+                                        targetID, tprof);
+                                    return tprof.ToString();
+                                }
+                            }
+                            catch (Exception e)
+                            {
+                                m_log.Debug($"[PROFILES]: requester-home get_server_urls({targetID}) failed: {e.Message}");
+                            }
+                        }
+
+                        m_log.DebugFormat(
+                            "[PROFILES]: Using requester ProfileServerURI {0} for unknown target {1}",
+                            puri, targetID);
+                        return puri;
+                    }
+                }
+
+                if (!string.IsNullOrWhiteSpace(homeUri))
+                {
+                    try
+                    {
+                        UserAgentServiceConnector uConn = new(homeUri);
+                        Dictionary<string, object> urls = uConn.GetServerURLs(targetID);
+                        if (urls != null && urls.TryGetValue("ProfileServerURI", out object tprof) && tprof != null
+                                && !string.IsNullOrWhiteSpace(tprof.ToString()))
+                            return tprof.ToString();
+                    }
+                    catch (Exception e)
+                    {
+                        m_log.Debug($"[PROFILES]: requester-home get_server_urls({targetID}) failed: {e.Message}");
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                m_log.Debug($"[PROFILES]: ResolveProfileURIViaRequester failed: {e.Message}");
+            }
+
+            return string.Empty;
         }
 
         void cacheForeignImage(UUID agent, UUID imageID)
