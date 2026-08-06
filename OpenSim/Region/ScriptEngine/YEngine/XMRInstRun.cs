@@ -318,6 +318,7 @@ namespace OpenSim.Region.ScriptEngine.Yengine
                     m_LastRanAt = now;
                     m_InstEHSlice++;
                     callMode = CallMode_NORMAL;
+                    m_HasRun = true;
                     e = ResumeEx();
                 }
 
@@ -393,6 +394,7 @@ namespace OpenSim.Region.ScriptEngine.Yengine
                     m_DetectParams = evt.DetectParams;
                     m_LastRanAt = now;
                     m_InstEHEvent++;
+                    m_HasRun = true;
                     e = StartEventHandler(evc, evt.Params);
                 }
 
