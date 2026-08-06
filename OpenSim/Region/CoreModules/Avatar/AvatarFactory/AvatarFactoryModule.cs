@@ -91,6 +91,11 @@ namespace OpenSim.Region.CoreModules.Avatar.AvatarFactory
         private readonly ConcurrentDictionary<UUID, byte> m_awaitingClientAppearance = new();
         private readonly ConcurrentDictionary<UUID, ConcurrentDictionary<UUID, byte>> m_pendingRebakeFaces = new();
         private readonly ConcurrentDictionary<UUID, System.Timers.Timer> m_rebakeDeferTimers = new();
+        // n017: while the appearance gather is running the defer timeout only re-arms (bounded) instead
+        // of flushing a wave mid-gather; this counts the re-arms so a genuinely stuck gather still gets
+        // a safety flush after REBAKE_DEFER_MAX_RE_ARMS extra windows.
+        private const int REBAKE_DEFER_MAX_RE_ARMS = 4;
+        private readonly ConcurrentDictionary<UUID, int> m_rebakeDeferReArms = new();
         
         #region Region Module interface
 
@@ -719,6 +724,7 @@ namespace OpenSim.Region.CoreModules.Avatar.AvatarFactory
                 return;
 
             m_gatherInProgress[agentId] = 0;
+            m_rebakeDeferReArms[agentId] = 0;
             ScheduleRebakeDeferTimeout(agentId);
 
             m_log.DebugFormat(
@@ -947,6 +953,7 @@ namespace OpenSim.Region.CoreModules.Avatar.AvatarFactory
             };
             timer.Elapsed += (sender, args) =>
             {
+                bool reArmed = false;
                 try
                 {
                     bool heldGather = m_gatherInProgress.ContainsKey(agentId);
@@ -954,6 +961,23 @@ namespace OpenSim.Region.CoreModules.Avatar.AvatarFactory
                     bool hadPending = m_pendingRebakeFaces.ContainsKey(agentId);
                     if (!heldGather && !heldClient && !hadPending)
                         return;
+
+                    // n017: if the appearance gather is still running, keep deferring — the timeout is
+                    // only a safety net for a stuck gather. Re-arm the window (bounded) instead of
+                    // flushing a rebake wave mid-gather.
+                    if (heldGather
+                        && m_rebakeDeferReArms.TryGetValue(agentId, out int reArms)
+                        && reArms < REBAKE_DEFER_MAX_RE_ARMS)
+                    {
+                        CancelRebakeDeferTimeout(agentId);
+                        m_rebakeDeferReArms[agentId] = reArms + 1;
+                        ScheduleRebakeDeferTimeout(agentId);
+                        reArmed = true;
+                        m_log.DebugFormat(
+                            "[AVFACTORY]: Rebake defer timeout for {0} — gather still in progress, holding (re-arm {1}/{2})",
+                            agentId, reArms + 1, REBAKE_DEFER_MAX_RE_ARMS);
+                        return;
+                    }
 
                     m_log.InfoFormat(
                         "[AVFACTORY]: Rebake defer timeout ({0} ms) for {1} — flushing (gather={2} clientWait={3} pending={4})",
@@ -981,7 +1005,9 @@ namespace OpenSim.Region.CoreModules.Avatar.AvatarFactory
                 }
                 finally
                 {
-                    CancelRebakeDeferTimeout(agentId);
+                    // Only cancel when we are not re-arming; a fresh timer was just registered.
+                    if (!reArmed)
+                        CancelRebakeDeferTimeout(agentId);
                 }
             };
 
@@ -995,6 +1021,7 @@ namespace OpenSim.Region.CoreModules.Avatar.AvatarFactory
 
         private void CancelRebakeDeferTimeout(UUID agentId)
         {
+            m_rebakeDeferReArms.TryRemove(agentId, out _);
             if (m_rebakeDeferTimers.TryRemove(agentId, out System.Timers.Timer timer))
             {
                 try
