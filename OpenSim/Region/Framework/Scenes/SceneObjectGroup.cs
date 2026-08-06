@@ -317,19 +317,6 @@ namespace OpenSim.Region.Framework.Scenes
         }
 
         /// <summary>
-        /// Set by the attachments module before scripts are removed on detach.
-        /// The script engine keeps a local copy of the script state when this is
-        /// true so that state can be restored if no transfer state comes back.
-        /// </summary>
-        public bool PreserveScriptStateOnRemove
-        {
-            [MethodImpl(MethodImplOptions.AggressiveInlining)]
-            get;
-            [MethodImpl(MethodImplOptions.AggressiveInlining)]
-            set;
-        }
-
-        /// <summary>
         /// The avatar to which this scene object is attached.
         /// </summary>
         /// <remarks>
