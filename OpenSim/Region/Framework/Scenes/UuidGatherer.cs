@@ -1518,7 +1518,14 @@ namespace OpenSim.Region.Framework.Scenes
                 hostSlots.Wait();
                 try
                 {
-                    AssetBase a = assetService.Get(IDstr, assetServerURL, storeLocal);
+                    // ISSUE-012: callers have already established local absence (FetchAsset checks
+                    // cache+local Get, FetchAssetsParallel runs the batched AssetsExist prefilter), so use
+                    // the foreign-only path when the asset service supports it and skip the redundant
+                    // GetFromLocal round trip. Fall back to the interface method for any other
+                    // IAssetService implementation.
+                    AssetBase a = assetService is IForeignOnlyAssetGetter foreignOnly
+                        ? foreignOnly.GetForeignOnly(IDstr, assetServerURL, storeLocal)
+                        : assetService.Get(IDstr, assetServerURL, storeLocal);
                     if (a is null)
                         m_log.Debug($"[HGUUIDGatherer]: Failed to fetch asset {IDstr} from {assetServerURL}");
                     else

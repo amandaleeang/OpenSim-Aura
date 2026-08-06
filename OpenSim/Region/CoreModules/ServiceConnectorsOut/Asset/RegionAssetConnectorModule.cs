@@ -47,7 +47,7 @@ using OpenSim.Services.Interfaces;
 namespace OpenSim.Region.CoreModules.ServiceConnectorsOut.Asset
 {
     [Extension(Path = "/OpenSim/RegionModules", NodeName = "RegionModule", Id = "RegionAssetConnector")]
-    public class RegionAssetConnector : ISharedRegionModule, IAssetService
+    public class RegionAssetConnector : ISharedRegionModule, IAssetService, IForeignOnlyAssetGetter
     {
         private static readonly ILog m_log = LogManager.GetLogger( MethodBase.GetCurrentMethod().DeclaringType);
 
@@ -400,6 +400,47 @@ namespace OpenSim.Region.CoreModules.ServiceConnectorsOut.Asset
             }
             else if (m_Cache != null)
                 m_Cache.Cache(asset);
+
+            return asset;
+        }
+
+        /// <summary>
+        /// ISSUE-012: foreign-only fetch for callers that have already established the asset is absent
+        /// locally (e.g. HGUuidGatherer after its batched AssetsExist prefilter). Same as Get(id, url, bool)
+        /// but skips the guaranteed-miss GetFromLocal round trip. Cache and pending-store checks are
+        /// kept so assets that became available in the meantime still hit.
+        /// </summary>
+        public AssetBase GetForeignOnly(string id, string ForeignAssetService, bool StoreOnLocalGrid)
+        {
+            AssetBase asset = null;
+            if (m_Cache != null)
+            {
+                asset = m_Cache.GetCached(id);
+                if (asset != null)
+                    return asset;
+            }
+
+            // Pending batched local store (not yet in DB) — still visible
+            if (m_pendingLocalStores.TryGetValue(id, out asset) && asset != null)
+                return asset;
+
+            asset = GetFromForeign(id, ForeignAssetService);
+            if (asset != null)
+            {
+                if (m_AssetPerms != null && !m_AssetPerms.AllowedImport(asset.Type))
+                {
+                    if (m_Cache != null)
+                        m_Cache.CacheNegative(id);
+                    return null;
+                }
+                // Cache first so concurrent gatherers / CAP see the asset before DB flush
+                if (m_Cache != null)
+                    m_Cache.Cache(asset);
+                if (StoreOnLocalGrid)
+                    EnqueueOrStoreLocal(asset);
+            }
+            else if (m_Cache != null)
+                m_Cache.CacheNegative(id);
 
             return asset;
         }
