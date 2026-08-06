@@ -63,6 +63,10 @@ bin/UserAssets
 bin/assetcache
 bin/maptiles
 bin/bakes
+# Local bake Texture UUID store (runtime; per-agent .osd blobs)
+bin/avatar_bake_cache
+AGENTS.md
+compile.sh
 bin/MeshCache
 bin/estate_settings.xml
 bin/config-include/CenomeCache.ini
