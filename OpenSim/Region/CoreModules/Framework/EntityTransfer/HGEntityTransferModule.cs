@@ -28,6 +28,7 @@
 using System;
 using System.Collections.Generic;
 using System.Reflection;
+using System.Threading.Tasks;
 
 using OpenSim.Framework;
 using OpenSim.Framework.Client;
@@ -115,6 +116,22 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
         /// </summary>
         private JobEngine m_incomingSceneObjectEngine;
 
+        /// <summary>Max concurrent HG asset GETs per gatherer (compatible single-asset protocol).</summary>
+        private int m_hgAssetFetchConcurrency = 8;
+
+        /// <summary>Per-asset fetch timeout in milliseconds.</summary>
+        private int m_hgAssetFetchTimeoutMs = 8000;
+
+        /// <summary>Process-wide cap on concurrent foreign asset GETs (all visitors).</summary>
+        private int m_hgAssetFetchGlobalConcurrency = 16;
+
+        /// <summary>Per home AssetServerURI concurrent foreign GET cap.</summary>
+        private int m_hgAssetFetchPerHostConcurrency = 8;
+
+        /// <summary>When true, assets fetched for HG login attachments are persisted to the local asset
+        /// database. When false (default) they are cache-only: transient, re-fetched on a later visit.</summary>
+        private bool m_hgAssetStoreLoginAttachments = false;
+
         #region ISharedRegionModule
 
         public override string Name
@@ -143,12 +160,55 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
                             if (m_AccountName.Length == 0)
                                 m_log.WarnFormat("[HG ENTITY TRANSFER MODULE]: RestrictAppearanceAbroad is on, but no account has been given for avatar appearance!");
                         }
+
+                        m_hgAssetFetchConcurrency = transferConfig.GetInt("HGAssetFetchConcurrency", m_hgAssetFetchConcurrency);
+                        if (m_hgAssetFetchConcurrency < 1)
+                            m_hgAssetFetchConcurrency = 1;
+                        if (m_hgAssetFetchConcurrency > 32)
+                            m_hgAssetFetchConcurrency = 32;
+
+                        m_hgAssetFetchTimeoutMs = transferConfig.GetInt("HGAssetFetchTimeoutMs", m_hgAssetFetchTimeoutMs);
+                        if (m_hgAssetFetchTimeoutMs < 500)
+                            m_hgAssetFetchTimeoutMs = 500;
+
+                        // Compatible admission control: still stock GET /assets/{uuid}; limits multi-visitor storms
+                        m_hgAssetFetchGlobalConcurrency = transferConfig.GetInt(
+                            "HGAssetFetchGlobalConcurrency", m_hgAssetFetchGlobalConcurrency);
+                        if (m_hgAssetFetchGlobalConcurrency < 1)
+                            m_hgAssetFetchGlobalConcurrency = 1;
+                        if (m_hgAssetFetchGlobalConcurrency > 64)
+                            m_hgAssetFetchGlobalConcurrency = 64;
+
+                        m_hgAssetFetchPerHostConcurrency = transferConfig.GetInt(
+                            "HGAssetFetchPerHostConcurrency", m_hgAssetFetchPerHostConcurrency);
+                        if (m_hgAssetFetchPerHostConcurrency < 1)
+                            m_hgAssetFetchPerHostConcurrency = 1;
+                        if (m_hgAssetFetchPerHostConcurrency > 32)
+                            m_hgAssetFetchPerHostConcurrency = 32;
+
+                        m_hgAssetStoreLoginAttachments = transferConfig.GetBoolean(
+                            "HGAssetStoreLoginAttachments", m_hgAssetStoreLoginAttachments);
                     }
 
                     InitialiseCommon(source);
-                    m_log.DebugFormat("[HG ENTITY TRANSFER MODULE]: {0} enabled.", Name);
+                    HGUuidGatherer.ConfigureForeignFetchLimits(
+                        m_hgAssetFetchGlobalConcurrency, m_hgAssetFetchPerHostConcurrency);
+                    m_log.DebugFormat(
+                        "[HG ENTITY TRANSFER MODULE]: {0} enabled (HGAssetFetchConcurrency={1}, HGAssetFetchTimeoutMs={2}, Global={3}, PerHost={4}, StoreLoginAttachments={5}).",
+                        Name, m_hgAssetFetchConcurrency, m_hgAssetFetchTimeoutMs,
+                        m_hgAssetFetchGlobalConcurrency, m_hgAssetFetchPerHostConcurrency,
+                        m_hgAssetStoreLoginAttachments);
                 }
             }
+        }
+
+        private void ConfigureHgGatherer(HGUuidGatherer gatherer)
+        {
+            if (gatherer is null)
+                return;
+            gatherer.FetchConcurrency = m_hgAssetFetchConcurrency;
+            gatherer.FetchTimeoutMs = m_hgAssetFetchTimeoutMs;
+            gatherer.StoreLocalToDatabase = m_hgAssetStoreLoginAttachments;
         }
 
         public override void AddRegion(Scene scene)
@@ -283,10 +343,10 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
                     else
                         connector = new UserAgentServiceConnector(userAgentDriver);
 
-                    GridRegion source = new GridRegion(m_sceneRegionInfo)
-                    {
-                        RawServerURI = m_thisGridInfo.GateKeeperURL
-                    };
+                    // Export region ServerURI when set so destination can fetch bakes
+                    GridRegion source = new GridRegion(m_sceneRegionInfo);
+                    if (string.IsNullOrEmpty(source.RawServerURI) && !string.IsNullOrEmpty(m_thisGridInfo.GateKeeperURL))
+                        source.RawServerURI = m_thisGridInfo.GateKeeperURL;
 
                     bool success = connector.LoginAgentToGrid(source, agentCircuit, reg, finalDestination, false, out reason);
                     //logout = success & !isLocal; // flag for later logout from this grid; this is an HG TP
@@ -695,83 +755,66 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
             {
                 if ((aCircuit.teleportFlags & (uint)Constants.TeleportFlags.ViaHGLogin) == 0)
                 {
-                    // We have already pulled the necessary attachments from the source grid.
-                    base.HandleIncomingSceneObject(so, newPosition);
+                    // Already AddSceneObject'd above (assets pulled by first local region).
+                    // base.HandleIncomingSceneObject would try to add again; just start scripts if root.
+                    TryStartScriptsOnIncomingAttachment(so);
                 }
                 else
                 {
                     if (aCircuit.ServiceURLs != null && aCircuit.ServiceURLs.ContainsKey("AssetServerURI"))
                     {
+                        // Object is already AddSceneObject'd. Fetch script+notecard assets first and
+                        // start scripts; pull remaining appearance assets afterward (script-first).
                         SceneObjectGroup defso = so;
+                        AgentCircuitData defCircuit = aCircuit;
                         m_incomingSceneObjectEngine.QueueJob(
-                            string.Format("HG UUID Gather for attachment {0} for {1}", defso.Name, aCircuit.Name),
+                            string.Format("HG UUID Gather for attachment {0} for {1}", defso.Name, defCircuit.Name),
                             () =>
                             {
-                                string url = aCircuit.ServiceURLs["AssetServerURI"].ToString();
-                                //m_log.DebugFormat(
-                                //    "[HG ENTITY TRANSFER MODULE]: Incoming attachment {0} for HG user {1} with asset service {2}",
-                                //    so.Name, so.AttachedAvatar, url);
+                                if (defso.IsDeleted)
+                                    return;
+
+                                string url = defCircuit.ServiceURLs["AssetServerURI"].ToString();
+                                HGUuidGatherer assetFetcher = new HGUuidGatherer(m_scene.AssetService, url);
+                                ConfigureHgGatherer(assetFetcher);
+
+                                List<UUID> startupAssetIds = CollectAttachmentStartupAssetIds(defso);
+                                m_log.DebugFormat(
+                                    "[HG ENTITY TRANSFER]: Single attachment {0} for {1}: fetching {2} script/notecard asset(s) then starting scripts",
+                                    defso.Name, defCircuit.Name, startupAssetIds.Count);
+
+                                assetFetcher.FetchAssetsParallel(startupAssetIds, () => defso.IsDeleted);
+
+                                if (!defso.IsDeleted)
+                                    TryStartScriptsOnIncomingAttachment(defso);
+
+                                // Appearance / remaining assets (textures, mesh, …)
+                                if (defso.IsDeleted)
+                                    return;
 
                                 IDictionary<UUID, sbyte> ids = new Dictionary<UUID, sbyte>();
-                                HGUuidGatherer uuidGatherer = new HGUuidGatherer(m_scene.AssetService, url, ids);
-                                uuidGatherer.AddForInspection(defso);
+                                HGUuidGatherer appearanceGatherer = new HGUuidGatherer(m_scene.AssetService, url, ids);
+                                ConfigureHgGatherer(appearanceGatherer);
+                                appearanceGatherer.AddForInspection(defso);
+                                appearanceGatherer.GatherAllParallel(() => defso.IsDeleted);
 
-                                while (!uuidGatherer.Complete)
+                                // The object may have been visible while the gather ran, so a
+                                // viewer that requested a not-yet-local texture got ImageNotFound (grey).
+                                // Re-send a full update so viewers re-request the now-local assets.
+                                if (!defso.IsDeleted)
                                 {
-                                    int tickStart = Util.EnvironmentTickCount();
-                                    uuidGatherer.GatherNext();
-
-                                    //m_log.DebugFormat(
-                                    //    "[HG ENTITY TRANSFER]: Gathered attachment asset uuid {0} for object {1} for HG user {2} took {3} ms with asset service {4}",
-                                    //    nextUuid, so.Name, so.OwnerID, Util.EnvironmentTickCountSubtract(tickStart), url);
-
-                                    int ticksElapsed = Util.EnvironmentTickCountSubtract(tickStart);
-
-                                    if (ticksElapsed > 30000)
-                                    {
-                                        m_log.WarnFormat(
-                                            "[HG ENTITY TRANSFER]: Removing incoming scene object jobs for HG user {0} as gather of {1} from {2} took {3} ms to respond (> {4} ms)",
-                                            so.OwnerID, so.Name, url, ticksElapsed, 30000);
-
-                                        RemoveIncomingSceneObjectJobs(OwnerID.ToString());
-                                        return;
-                                    }
+                                    defso.ForEachPart(part => part.SendFullUpdateToAllClients());
+                                    m_log.DebugFormat(
+                                        "[HG ENTITY TRANSFER]: Refreshed appearance of attachment {0} for {1} after asset gather",
+                                        defso.Name, defCircuit.Name);
                                 }
-
-                                //m_log.DebugFormat(
-                                //    "[HG ENTITY TRANSFER]: Fetching {0} assets for attachment {1} for HG user {2} with asset service {3}",
-                                //    ids.Count, so.Name, so.OwnerID, url);
-
-                                foreach (UUID id in ids.Keys)
-                                {
-                                    int tickStart = Util.EnvironmentTickCount();
-
-                                    uuidGatherer.FetchAsset(id);
-
-                                    int ticksElapsed = Util.EnvironmentTickCountSubtract(tickStart);
-
-                                    if (ticksElapsed > 30000)
-                                    {
-                                        m_log.WarnFormat(
-                                            "[HG ENTITY TRANSFER]: Removing incoming scene object jobs for HG user {0} as fetch of {1} from {2} took {3} ms to respond (> {4} ms)",
-                                            so.OwnerID, id, url, ticksElapsed, 30000);
-
-                                        RemoveIncomingSceneObjectJobs(OwnerID.ToString());
-                                        return;
-                                    }
-                                }
-
-                                base.HandleIncomingSceneObject(defso, newPosition);
-
-                                defso = null;
-                                aCircuit = null;
-                                uuidGatherer = null;
-
-                                //m_log.DebugFormat(
-                                //    "[HG ENTITY TRANSFER MODULE]: Completed incoming attachment {0} for HG user {1} with asset server {2}",
-                                //    so.Name, so.OwnerID, url);
                             },
                             OwnerID.ToString());
+                    }
+                    else
+                    {
+                        // No home asset URI; try scripts with whatever is already local.
+                        TryStartScriptsOnIncomingAttachment(so);
                     }
                 }
             }
@@ -794,85 +837,298 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
 
             // foreign user
             AgentCircuitData aCircuit = m_scene.AuthenticateHandler.GetAgentCircuitData(OwnerID);
-            if (aCircuit != null)
+            if (aCircuit is null)
             {
-                if ((aCircuit.teleportFlags & (uint)Constants.TeleportFlags.ViaHGLogin) == 0)
+                m_log.WarnFormat(
+                    "[HG ENTITY TRANSFER]: No agent circuit for foreign user {0}; attaching {1} object(s) without HG asset gather",
+                    sp.Name, attachments?.Count ?? 0);
+                return base.HandleIncomingAttachments(sp, attachments);
+            }
+
+            if ((aCircuit.teleportFlags & (uint)Constants.TeleportFlags.ViaHGLogin) == 0)
+            {
+                // first region in local grid did pull the necessary attachments from the source grid.
+                return base.HandleIncomingAttachments(sp, attachments);
+            }
+
+            if (attachments is null || attachments.Count == 0)
+            {
+                m_log.DebugFormat(
+                    "[HG ENTITY TRANSFER]: HG user {0} ViaHGLogin with zero attachments to gather in {1}",
+                    sp.Name, m_sceneName);
+                sp.GotAttachmentsData = true;
+                return true;
+            }
+
+            if (aCircuit.ServiceURLs is null || !aCircuit.ServiceURLs.ContainsKey("AssetServerURI"))
+            {
+                // Cannot pull from home asset server; still attach so scripts can start if assets are already local.
+                m_log.WarnFormat(
+                    "[HG ENTITY TRANSFER]: HG user {0} has no AssetServerURI; attaching {1} object(s) without remote gather",
+                    sp.Name, attachments.Count);
+                return base.HandleIncomingAttachments(sp, attachments);
+            }
+
+            ScenePresence defsp = sp;
+            List<SceneObjectGroup> deftatt = attachments;
+
+            // Mark before queue so SetAppearance during CompleteMovement defers rebake
+            IAvatarFactoryModule avFactoryEarly = m_scene.RequestModuleInterface<IAvatarFactoryModule>();
+            avFactoryEarly?.MarkAppearanceGatherInProgress(defsp.UUID);
+
+            m_incomingSceneObjectEngine.QueueJob(
+                string.Format("HG UUID Gather attachments {0}", defsp.Name), () =>
                 {
-                    // first region in local grid did pull the necessary attachments from the source grid.
-                    base.HandleIncomingAttachments(sp, attachments);
-                }
-                else
-                {
-                    if (aCircuit.ServiceURLs != null && aCircuit.ServiceURLs.ContainsKey("AssetServerURI"))
+                    IAvatarFactoryModule avFactory = m_scene.RequestModuleInterface<IAvatarFactoryModule>()
+                        ?? avFactoryEarly;
+
+                    try
                     {
-                        ScenePresence defsp = sp;
-                        List<SceneObjectGroup> deftatt = attachments;
-                        List<SceneObjectGroup> toadd = new List<SceneObjectGroup>(deftatt.Count);
-                        m_incomingSceneObjectEngine.QueueJob(
-                            string.Format("HG UUID Gather attachments {0}", defsp.Name), () =>
+                        string url = aCircuit.ServiceURLs["AssetServerURI"].ToString();
+                        HGUuidGatherer assetFetcher = new HGUuidGatherer(m_scene.AssetService, url);
+                        ConfigureHgGatherer(assetFetcher);
+
+                        // Script-first path + parallel asset GET (still stock /assets/{uuid}).
+                        m_log.DebugFormat(
+                            "[HG ENTITY TRANSFER]: HG attachment script-first path for {0} ({1} object(s)) from {2} in {3} (concurrency={4}, timeoutMs={5})",
+                            defsp.Name, deftatt.Count, url, m_sceneName, m_hgAssetFetchConcurrency, m_hgAssetFetchTimeoutMs);
+
+                        List<SceneObjectGroup> attached = new List<SceneObjectGroup>(deftatt.Count);
+
+                        // Fetch script+notecard assets for ALL attachments in ONE parallel batch
+                        // instead of one blocking per-attachment foreign fetch. The old loop serialised a
+                        // ~0.3-1.5s HTTP round-trip per attachment (observed ~40s for 30 attachments);
+                        // fetching them together collapses the round-trips into a few parallel waves.
+                        List<UUID> allStartupAssetIds = new List<UUID>();
+                        HashSet<UUID> startupSeen = new HashSet<UUID>();
+                        foreach (SceneObjectGroup defso in deftatt)
+                        {
+                            if (defso.OwnerID.NotEqual(defsp.UUID))
+                                continue;
+
+                            foreach (UUID assetId in CollectAttachmentStartupAssetIds(defso))
                             {
-                                string url = aCircuit.ServiceURLs["AssetServerURI"].ToString();
-                                IDictionary<UUID, sbyte> ids = new Dictionary<UUID, sbyte>();
-                                HGUuidGatherer uuidGatherer = new HGUuidGatherer(m_scene.AssetService, url, ids);
+                                if (!assetId.IsZero() && startupSeen.Add(assetId))
+                                    allStartupAssetIds.Add(assetId);
+                            }
+                        }
 
-                                foreach (SceneObjectGroup defso in deftatt)
-                                {
-                                    if(defso.OwnerID.NotEqual(defsp.UUID))
-                                    {
-                                        m_log.ErrorFormat(
-                                            "[HG TRANSFER MODULE] attachment {0}({1} owner {2} does not match HG avatarID {3}",
-                                                defso.Name, defso.UUID, defso.OwnerID, defsp.UUID);
-                                        continue;
-                                    }
-                                    uuidGatherer.AddForInspection(defso);
-                                    while (!uuidGatherer.Complete)
-                                    {
-                                        if (sp.IsDeleted)
-                                        {
-                                            deftatt = null;
-                                            defsp = null;
-                                            uuidGatherer = null;
-                                            toadd = null;
-                                            return;
-                                        }
-                                        uuidGatherer.GatherNext();
-                                    }
-                                    toadd.Add(defso);
-                                }
-                                deftatt = null;
+                        int scriptTickStart = Util.EnvironmentTickCount();
 
-                                foreach (UUID id in ids.Keys)
-                                {
-                                    int tickStart = Util.EnvironmentTickCount();
+                        m_log.DebugFormat(
+                            "[HG ENTITY TRANSFER]: Fetching {0} script/notecard asset(s) for {1} attachment(s) of {2} in one parallel batch (concurrency={3})",
+                            allStartupAssetIds.Count, deftatt.Count, defsp.Name, m_hgAssetFetchConcurrency);
 
-                                    uuidGatherer.FetchAsset(id);
+                        assetFetcher.FetchAssetsParallel(allStartupAssetIds, () => defsp.IsDeleted);
 
-                                    int ticksElapsed = Util.EnvironmentTickCountSubtract(tickStart);
+                        if (defsp.IsDeleted)
+                            return;
 
-                                    if (sp.IsDeleted || ticksElapsed > 30000)
-                                    {
-                                        m_log.WarnFormat(
-                                            "[HG ENTITY TRANSFER]: Aborting fetch attachments assets for HG user {0}", sp.Name);
+                        int scriptFetchMs = Util.EnvironmentTickCountSubtract(scriptTickStart);
 
-                                        defsp = null;
-                                        uuidGatherer = null;
-                                        toadd = null;
-                                        return;
-                                    }
-                                }
+                        // Collect appearance asset UUIDs BEFORE the attach loop (incoming
+                        // SOGs are fully formed and not TemporaryInstance, so inspection only reads
+                        // part data), then run the appearance gather on a background thread so it
+                        // overlaps the serial attach loop below. Previously the gather ran after the
+                        // loop, adding its full runtime (~10s) to the login path.
+                        IDictionary<UUID, sbyte> ids = new Dictionary<UUID, sbyte>();
+                        HGUuidGatherer appearanceGatherer = new HGUuidGatherer(m_scene.AssetService, url, ids);
+                        ConfigureHgGatherer(appearanceGatherer);
+                        int appearanceTickStart = Util.EnvironmentTickCount();
 
-                                base.HandleIncomingAttachments(sp, toadd);
+                        m_log.DebugFormat(
+                            "[HG ENTITY TRANSFER]: Collecting appearance asset UUIDs for {0} attachment(s) of {1} in {2} (parallel concurrency={3}, two-phase visual then audio/anim, overlapped with attach)",
+                            deftatt.Count, defsp.Name, m_sceneName, m_hgAssetFetchConcurrency);
 
-                                defsp = null;
-                                uuidGatherer = null;
-                                toadd = null;
-                            },
-                            OwnerID.ToString());
+                        foreach (SceneObjectGroup defso in deftatt)
+                        {
+                            if (defsp.IsDeleted)
+                                break;
+
+                            if (defso.OwnerID.NotEqual(defsp.UUID))
+                                continue;
+
+                            appearanceGatherer.AddForInspection(defso);
+                        }
+
+                        Task appearanceGatherTask = null;
+                        if (!defsp.IsDeleted)
+                        {
+                            appearanceTickStart = Util.EnvironmentTickCount();
+                            appearanceGatherTask = Task.Run(
+                                () => appearanceGatherer.GatherAllParallel(() => defsp.IsDeleted));
+                        }
+
+                        foreach (SceneObjectGroup defso in deftatt)
+                        {
+                            if (defsp.IsDeleted)
+                                break;
+
+                            if (defso.OwnerID.NotEqual(defsp.UUID))
+                            {
+                                m_log.ErrorFormat(
+                                    "[HG TRANSFER MODULE] attachment {0}({1}) owner {2} does not match HG avatarID {3}",
+                                    defso.Name, defso.UUID, defso.OwnerID, defsp.UUID);
+                                continue;
+                            }
+
+                            if (!m_scene.AddSceneObject(defso))
+                            {
+                                m_log.DebugFormat(
+                                    "[HG ENTITY TRANSFER]: Problem adding attachment {0} {1} for {2} into {3}",
+                                    defso.Name, defso.UUID, defsp.Name, m_sceneName);
+                                continue;
+                            }
+
+                            attached.Add(defso);
+
+                            m_log.DebugFormat(
+                                "[HG ENTITY TRANSFER]: Attached {0} for {1} after {2} ms parallel script/notecard fetch; starting scripts now",
+                                defso.Name, defsp.Name, scriptFetchMs);
+
+                            // Start scripts as soon as this attachment is on the avatar.
+                            TryStartScriptsOnIncomingAttachment(defso);
+                        }
+
+                        if (!defsp.IsDeleted)
+                            defsp.GotAttachmentsData = true;
+
+                        if (defsp.IsDeleted)
+                        {
+                            m_log.DebugFormat(
+                                "[HG ENTITY TRANSFER]: HG user {0} left after attaching {1} object(s) (script-first); skipping appearance gather",
+                                defsp.Name, attached.Count);
+                            return;
+                        }
+
+                        // Join the concurrent appearance gather started before the attach loop.
+                        // If the avatar left mid-gather, the task self-aborts via shouldAbort.
+                        try
+                        {
+                            appearanceGatherTask?.Wait();
+                        }
+                        catch (AggregateException)
+                        {
+                        }
+
+                        if (attached.Count == 0)
+                        {
+                            m_log.WarnFormat(
+                                "[HG ENTITY TRANSFER]: No attachments attached for HG user {0} in {1} (source sent {2})",
+                                defsp.Name, m_sceneName, deftatt.Count);
+                            return;
+                        }
+
+                        if (!defsp.IsDeleted)
+                        {
+                            m_log.DebugFormat(
+                                "[HG ENTITY TRANSFER]: Finished appearance asset gather for {0}: {1} uuid(s) in {2} ms (parallel, two-phase, overlapped with attach)",
+                                defsp.Name, ids.Count, appearanceGatherTask is null ? 0 : Util.EnvironmentTickCountSubtract(appearanceTickStart));
+                        }
+
+                        // The attachments were shown to viewers while the appearance gather was
+                        // still running, so a viewer that requested a not-yet-local texture got ImageNotFound
+                        // (grey) and nothing triggers a fetch. All gather assets are now in the local store,
+                        // so re-send full updates for each attachment to make every viewer re-request them.
+                        if (!defsp.IsDeleted && attached.Count > 0)
+                        {
+                            int refreshed = 0;
+                            foreach (SceneObjectGroup sog in attached)
+                            {
+                                if (sog.IsDeleted || !sog.IsAttachment)
+                                    continue;
+
+                                sog.ForEachPart(part => part.SendFullUpdateToAllClients());
+                                ++refreshed;
+                            }
+
+                            if (refreshed > 0)
+                            {
+                                m_log.DebugFormat(
+                                    "[HG ENTITY TRANSFER]: Refreshed appearance of {0} attachment(s) for {1} after asset gather in {2}",
+                                    refreshed, defsp.Name, m_sceneName);
+                            }
+                        }
                     }
+                    finally
+                    {
+                        // Flush deferred rebake (or no-op if none pending)
+                        if (!defsp.IsDeleted)
+                            avFactory?.NotifyAppearanceGatherComplete(defsp.UUID);
+                    }
+                },
+                OwnerID.ToString());
+
+            return true;
+        }
+
+        /// <summary>
+        /// Collect asset UUIDs an attachment's scripts need CONTENT for at startup: LSL scripts
+        /// themselves plus notecards. Notecard bytes are consumed synchronously by scripts at init
+        /// (e.g. an AO reading its config), so they must be local before scripts start; animation
+        /// and sound assets are NOT collected here because scripts only need the item metadata
+        /// (name/UUID, already in the task inventory) to look them up, and their bytes are pulled
+        /// by the background appearance gather (script/notecard-first).
+        /// </summary>
+        private static List<UUID> CollectAttachmentStartupAssetIds(SceneObjectGroup sog)
+        {
+            List<UUID> startupIds = new List<UUID>();
+            if (sog is null || sog.IsDeleted)
+                return startupIds;
+
+            SceneObjectPart[] parts = sog.Parts;
+            if (parts is null)
+                return startupIds;
+
+            HashSet<UUID> seen = new HashSet<UUID>();
+            for (int i = 0; i < parts.Length; i++)
+            {
+                SceneObjectPart part = parts[i];
+                if (part is null || part.TaskInventory is null)
+                    continue;
+
+                List<TaskInventoryItem> items = part.TaskInventory.GetItems();
+
+                // Only collect notecards for parts that actually run scripts: LSL can only read a
+                // notecard (llGetNotecard / llGetInventoryKey) from its own prim's inventory, so a
+                // scriptless part's notecards are never consumed and need no early fetch.
+                bool hasScript = false;
+                for (int j = 0; j < items.Count; j++)
+                {
+                    TaskInventoryItem item = items[j];
+                    if (item is null || item.AssetID.IsZero())
+                        continue;
+
+                    // InvType is the reliable script marker; Type is AssetType (LSLText / LSLBytecode).
+                    if (item.InvType != (int)InventoryType.LSL
+                        && item.Type != (int)AssetType.LSLText
+                        && item.Type != (int)AssetType.LSLBytecode)
+                        continue;
+
+                    hasScript = true;
+                    if (seen.Add(item.AssetID))
+                        startupIds.Add(item.AssetID);
+                }
+
+                if (!hasScript)
+                    continue;
+
+                for (int j = 0; j < items.Count; j++)
+                {
+                    TaskInventoryItem item = items[j];
+                    if (item is null || item.AssetID.IsZero())
+                        continue;
+
+                    if (item.InvType != (int)InventoryType.Notecard
+                        && item.Type != (int)AssetType.Notecard)
+                        continue;
+
+                    if (seen.Add(item.AssetID))
+                        startupIds.Add(item.AssetID);
                 }
             }
 
-            return true;
+            return startupIds;
         }
 
         #endregion
