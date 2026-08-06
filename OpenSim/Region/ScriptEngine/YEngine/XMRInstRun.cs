@@ -318,6 +318,9 @@ namespace OpenSim.Region.ScriptEngine.Yengine
                     m_LastRanAt = now;
                     m_InstEHSlice++;
                     callMode = CallMode_NORMAL;
+                    // The script really executes here, so it has meaningful
+                    // state to serialize — GetXMLState gates on this flag.
+                    m_HasRun = true;
                     e = ResumeEx();
                 }
 
@@ -393,6 +396,8 @@ namespace OpenSim.Region.ScriptEngine.Yengine
                     m_DetectParams = evt.DetectParams;
                     m_LastRanAt = now;
                     m_InstEHEvent++;
+                    // Ditto — starting a new event handler counts as "has run".
+                    m_HasRun = true;
                     e = StartEventHandler(evc, evt.Params);
                 }
 
