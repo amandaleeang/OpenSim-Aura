@@ -59,6 +59,12 @@ namespace OpenSim.Region.CoreModules.Avatar.Attachments
         private IInventoryAccessModule m_invAccessModule;
         private bool m_wearReplacesAllOption = true;
 
+        // n016: when a returning agent hands back non-empty attachment script
+        // state (e.g. after an HG trip), mark the attachment changed so the home
+        // side persists that state to inventory on the next detach/TP-out/logout.
+        // This supersedes the reverted preserve-on-remove `.state` file approach.
+        private bool m_preserveScriptStateOnReturn = true;
+
         /// <summary>
         /// Are attachments enabled?
         /// </summary>
@@ -79,6 +85,11 @@ namespace OpenSim.Region.CoreModules.Avatar.Attachments
             {
                 Enabled = true;
             }
+
+            // n016: home-side return-save of HG attachment script state.
+            IConfig etConfig = source.Configs["EntityTransfer"];
+            if (etConfig is not null)
+                m_preserveScriptStateOnReturn = etConfig.GetBoolean("PreserveScriptStateOnReturn", true);
         }
 
         public void AddRegion(Scene scene)
@@ -372,8 +383,18 @@ namespace OpenSim.Region.CoreModules.Avatar.Attachments
                         sog.LocalId = 0;
                         sog.RootPart.ClearUpdateSchedule();
 
-                        sog.SetState(ad.AttachmentObjectStates[i++], m_scene);
+                        string state = ad.AttachmentObjectStates[i++];
+                        sog.SetState(state, m_scene);
                         attachments.Add(sog);
+
+                        // n016: if we actually received script state (the foreign
+                        // grid ran the scripts, so this is not an empty/never-run
+                        // snapshot), flag the attachment so the next detach/TP-out/
+                        // logout persists it back to the home inventory blob instead
+                        // of overwriting with empty state. SetState leaves m_HasRun
+                        // true for a real state (n014), so this save is safe.
+                        if (m_preserveScriptStateOnReturn && !string.IsNullOrEmpty(state))
+                            sog.HasGroupChanged = true;
                     }
                 }
 
