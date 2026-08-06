@@ -52,6 +52,13 @@ namespace OpenSim.Region.ClientStack.Linden
 
         private string m_URL;
 
+        /// <summary>
+        /// How long to wait for the viewer to POST the bake body after a slot is opened.
+        /// Timer starts at slot creation, not at first byte — large faces often need 20–40s+ on slow links.
+        /// Default raised from 30s (was causing TIMEOUT / viewer "service unreachable").
+        /// </summary>
+        internal static int s_uploadBodyTimeoutMs = 120000;
+
         public void Initialise(IConfigSource source)
         {
             IConfig config = source.Configs["ClientStack.LindenCaps"];
@@ -59,6 +66,20 @@ namespace OpenSim.Region.ClientStack.Linden
                 return;
 
             m_URL = config.GetString("Cap_UploadBakedTexture", string.Empty);
+
+            // Prefer ClientStack.LindenCaps; allow [Appearance] override
+            int timeoutMs = config.GetInt("BakeUploadTimeoutMs", s_uploadBodyTimeoutMs);
+            IConfig appearance = source.Configs["Appearance"];
+            if (appearance != null)
+                timeoutMs = appearance.GetInt("BakeUploadTimeoutMs", timeoutMs);
+            if (timeoutMs < 30000)
+                timeoutMs = 30000;
+            if (timeoutMs > 600000)
+                timeoutMs = 600000;
+            s_uploadBodyTimeoutMs = timeoutMs;
+            m_log.InfoFormat(
+                "[UPLOAD BAKED TEXTURE]: Bake body upload timeout {0} ms (from slot open to POST body complete)",
+                s_uploadBodyTimeoutMs);
         }
 
         public void AddRegion(Scene s)
@@ -126,6 +147,12 @@ namespace OpenSim.Region.ClientStack.Linden
                 string protocol = caps.SSLCaps ? "https://" : "http://";
                 string uploaderURL = protocol + caps.HostName + ":" + caps.Port.ToString() + capsBase;
 
+                // Diagnostics: CAP negotiation is otherwise silent
+                m_log.InfoFormat(
+                    "[UPLOAD BAKED TEXTURE]: Agent {0} requested upload slot → {1} (from {2})",
+                    agentID, uploaderURL,
+                    httpRequest.RemoteIPEndPoint != null ? httpRequest.RemoteIPEndPoint.ToString() : "?");
+
                 LLSDAssetUploadResponse uploadResponse = new LLSDAssetUploadResponse();
                 uploadResponse.uploader = uploaderURL;
                 uploadResponse.state = "upload";
@@ -153,7 +180,7 @@ namespace OpenSim.Region.ClientStack.Linden
 
     class BakedTextureUploader
     {
-        // private static readonly ILog m_log = LogManager.GetLogger(MethodBase.GetCurrentMethod().DeclaringType);
+        private static readonly ILog m_log = LogManager.GetLogger(MethodBase.GetCurrentMethod().DeclaringType);
 
         private string m_uploaderPath = String.Empty;
         private IHttpServer m_httpListener;
@@ -172,12 +199,15 @@ namespace OpenSim.Region.ClientStack.Linden
             m_timeout = new Timer();
             m_timeout.Elapsed += Timeout;
             m_timeout.AutoReset = false;
-            m_timeout.Interval = 30000;
+            m_timeout.Interval = UploadBakedTextureModule.s_uploadBodyTimeoutMs;
             m_timeout.Start();
         }
 
         private void Timeout(Object source, ElapsedEventArgs e)
         {
+            m_log.WarnFormat(
+                "[UPLOAD BAKED TEXTURE]: TIMEOUT ({0}ms) waiting for body from agent {1} path {2} expectedIP {3}",
+                UploadBakedTextureModule.s_uploadBodyTimeoutMs, m_agentID, m_uploaderPath, m_remoteAddress);
             m_httpListener.RemoveSimpleStreamHandler(m_uploaderPath);
             m_timeout.Dispose();
         }
@@ -197,6 +227,14 @@ namespace OpenSim.Region.ClientStack.Linden
 
             if (!httpRequest.RemoteIPEndPoint.Address.Equals(m_remoteAddress))
             {
+                // Silent Unauthorized was a blind spot for stalled rebakes
+                m_log.WarnFormat(
+                    "[UPLOAD BAKED TEXTURE]: REJECT IP mismatch agent {0}: got {1} expected {2} path {3} bytes {4}",
+                    m_agentID,
+                    httpRequest.RemoteIPEndPoint != null ? httpRequest.RemoteIPEndPoint.Address.ToString() : "null",
+                    m_remoteAddress,
+                    m_uploaderPath,
+                    data != null ? data.Length : 0);
                 httpResponse.StatusCode = (int)HttpStatusCode.Unauthorized;
                 return;
             }
@@ -212,6 +250,10 @@ namespace OpenSim.Region.ClientStack.Linden
                 //asset.Flags = AssetFlags.AvatarBake;
                 m_assetCache.Cache(asset);
 
+                m_log.InfoFormat(
+                    "[UPLOAD BAKED TEXTURE]: OK agent {0} asset {1} size {2} bytes path {3}",
+                    m_agentID, newAssetID, data != null ? data.Length : 0, m_uploaderPath);
+
                 LLSDAssetUploadComplete uploadComplete = new LLSDAssetUploadComplete();
                 uploadComplete.new_asset = newAssetID.ToString();
                 uploadComplete.new_inventory_item = UUID.Zero;
@@ -221,7 +263,12 @@ namespace OpenSim.Region.ClientStack.Linden
                 httpResponse.StatusCode = (int)HttpStatusCode.OK;
                 return;
             }
-            catch { }
+            catch (Exception e)
+            {
+                m_log.ErrorFormat(
+                    "[UPLOAD BAKED TEXTURE]: FAIL agent {0} path {1}: {2}",
+                    m_agentID, m_uploaderPath, e.Message);
+            }
             httpResponse.StatusCode = (int)HttpStatusCode.BadRequest;
         }
     }

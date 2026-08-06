@@ -2283,11 +2283,22 @@ namespace OpenSim.Region.Framework.Scenes
                         ParentPart.ParentGroup.SendFullAnimUpdateToClient(ControllingClient);
                     }
 
-                    // verify baked textures and cache
-                    if (m_scene.AvatarFactory != null && !isHGTP)
+                    // Restore local bake store (disk, fast) before appearance is sent.
+                    // Must be sync so SendAppearance below uses restored TE UUIDs.
+                    // No remote previous/home GET here (that caused CompleteMovement races).
+                    if (m_scene.AvatarFactory != null)
                     {
-                        if (!m_scene.AvatarFactory.ValidateBakedTextureCache(this))
-                            m_scene.AvatarFactory.QueueAppearanceSave(UUID);
+                        try
+                        {
+                            if (!m_scene.AvatarFactory.ValidateBakedTextureCache(this))
+                                m_scene.AvatarFactory.QueueAppearanceSave(UUID);
+                        }
+                        catch (Exception e)
+                        {
+                            m_log.DebugFormat(
+                                "[CompleteMovement]: Bake validate failed for {0}: {1}",
+                                Name, e.Message);
+                        }
                     }
                 }
 
@@ -2309,7 +2320,9 @@ namespace OpenSim.Region.Framework.Scenes
                     landch?.sendClientInitialLandInfo(client, !m_gotCrossUpdate);
                 }
 
-                List<ScenePresence> allpresences = m_scene.GetScenePresences();
+                // Snapshot — GetScenePresences() can return a shared list that is rebuilt when
+                // agents arrive/leave (race with parallel HG attach).
+                List<ScenePresence> allpresences = new List<ScenePresence>(m_scene.GetScenePresences());
 
                 // send avatar object to all presences including us, so they cross it into region
                 // then hide if necessary
@@ -2370,9 +2383,11 @@ namespace OpenSim.Region.Framework.Scenes
                 }
                 else
                 {
-                    if (m_attachments.Count > 0)
+                    // Copy under lock — HG attach jobs may mutate m_attachments concurrently
+                    List<SceneObjectGroup> attachmentsCopy = GetAttachments();
+                    if (attachmentsCopy.Count > 0)
                     {
-                        foreach (SceneObjectGroup sog in m_attachments)
+                        foreach (SceneObjectGroup sog in attachmentsCopy)
                         {
                             sog.RootPart.ParentGroup.CreateScriptInstances(0, false, m_scene.DefaultScriptEngine, GetStateSource());
                             sog.ResumeScripts();
