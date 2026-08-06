@@ -254,3 +254,10 @@
     ;;        Rezzed/dropped HG objects are always persisted regardless of this setting.
     ;; Default false (code default). Set true to restore the stock permanent behaviour.
     ;HGAssetStoreLoginAttachments = false
+
+    ;; ISSUE-016: persist HG attachment script state on return to this grid?
+    ;; When an agent arrives with non-empty attachment script state (foreign grid ran
+    ;; the scripts), mark the attachment changed so the next detach/TP-out/logout
+    ;; saves that state to the home inventory blob. Empty snapshots never clobber.
+    ;; Default true (code default). Set false to restore stock no-save-on-return.
+    ;PreserveScriptStateOnReturn = true
