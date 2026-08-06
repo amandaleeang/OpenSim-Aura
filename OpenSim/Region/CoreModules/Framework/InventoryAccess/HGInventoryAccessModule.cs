@@ -101,6 +101,16 @@ namespace OpenSim.Region.CoreModules.Framework.InventoryAccess
                     else
                         m_log.Warn("[HG INVENTORY ACCESS MODULE]: HGInventoryAccessModule configs not found");
 
+                    // Reuse the appearance-gather limits for the asset mapper's
+                    // parallel fetch (rez / take / drop-in-prim / GetItem paths).
+                    IConfig transferConfig = source.Configs["EntityTransfer"];
+                    if (transferConfig != null)
+                    {
+                        int concurrency = transferConfig.GetInt("HGAssetFetchConcurrency", 8);
+                        int timeoutMs = transferConfig.GetInt("HGAssetFetchTimeoutMs", 8000);
+                        HGAssetMapper.ConfigureFetch(concurrency, timeoutMs);
+                    }
+
                     m_bypassPermissions = !Util.GetConfigVarFromSections<bool>(source, "serverside_object_permissions",
                                             new string[] { "Startup", "Permissions" }, true);
 

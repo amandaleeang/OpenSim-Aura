@@ -1636,8 +1636,23 @@ namespace OpenSim.Region.Framework.Scenes
             SceneObjectPart destPart = GetSceneObjectPart(destID);
             if (destPart is not null) // Move into a prim
             {
-                foreach(UUID itemID in items)
-                    MoveTaskInventoryItem(destID, host, itemID);
+                // Bounded-parallel prim-to-prim move. Each item is independent and all
+                // prim-inventory mutations are guarded by SceneObjectPartInventory's reader-writer
+                // lock, so items can be copied concurrently (was one MoveTaskInventoryItem at a time).
+                int concurrency = Math.Min(8, Math.Max(1, items.Count));
+                System.Threading.Tasks.Parallel.ForEach(items,
+                    new System.Threading.Tasks.ParallelOptions { MaxDegreeOfParallelism = concurrency },
+                    itemID =>
+                    {
+                        try
+                        {
+                            MoveTaskInventoryItem(destID, host, itemID);
+                        }
+                        catch (Exception e)
+                        {
+                            m_log.Error($"[PRIM INVENTORY]: Exception moving item {itemID} to prim {destID}: {e}");
+                        }
+                    });
                 return destID; // Prim folder ID == prim ID
             }
 
@@ -1659,19 +1674,41 @@ namespace OpenSim.Region.Framework.Scenes
             InventoryFolderBase newFolder = new(newFolderID, category, destID, -1, rootFolder.ID, rootFolder.Version);
             InventoryService.AddFolder(newFolder);
 
+            List<(UUID itemID, InventoryItemBase agentItem)> copies = new(items.Count);
+
             foreach (UUID itemID in items)
             {
                 InventoryItemBase agentItem = CreateAgentInventoryItemFromTask(destID, host, itemID, out string message);
                 if (agentItem is not null)
                 {
                     agentItem.Folder = newFolderID;
-                    AddInventoryItem(agentItem);
-                    RemoveNonCopyTaskItemFromPrim(host, itemID);
+                    copies.Add((itemID, agentItem));
                 }
                 else
                 {
                     remoteClient.SendAgentAlertMessage(message, false);
                 }
+            }
+
+            if (copies.Count > 0)
+            {
+                int concurrency = Math.Min(8, Math.Max(1, copies.Count));
+                System.Threading.Tasks.Parallel.ForEach(copies,
+                    new System.Threading.Tasks.ParallelOptions { MaxDegreeOfParallelism = concurrency },
+                    entry =>
+                    {
+                        try
+                        {
+                            AddInventoryItem(entry.agentItem);
+                        }
+                        catch (Exception e)
+                        {
+                            m_log.Error($"[AGENT INVENTORY]: Exception adding bought item {entry.agentItem.Name}: {e}");
+                        }
+                    });
+
+                foreach ((UUID itemID, InventoryItemBase agentItem) in copies)
+                    RemoveNonCopyTaskItemFromPrim(host, itemID);
             }
 
             if(sendUpdates)

@@ -26,10 +26,13 @@
  */
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 using log4net;
 using OpenMetaverse;
 using OpenMetaverse.StructuredData;
@@ -235,7 +238,7 @@ namespace OpenSim.Region.Framework.Scenes
         public HashSet<UUID> FailedUUIDs { get; private set; }
         public HashSet<UUID> UncertainAssetsUUIDs { get; private set; }
         public int possibleNotAssetCount { get; set; }
-        public int ErrorCount { get; private set; }
+        public int ErrorCount { get; protected set; }
         public int AssetGetCount;
         private bool verbose = true;
 
@@ -578,11 +581,25 @@ namespace OpenSim.Region.Framework.Scenes
                 return;
             }
 
+            ProcessFetchedAsset(assetUuid, assetBase);
+        }
+
+        /// <summary>
+        /// Record a fetched asset and enqueue any nested UUIDs it references.
+        /// Used by serial GatherNext and by parallel batch gather after HTTP completes.
+        /// </summary>
+        protected void ProcessFetchedAsset(UUID assetUuid, AssetBase assetBase)
+        {
+            if (assetUuid.IsZero() || assetBase is null)
+                return;
+
+            if (FailedUUIDs.Contains(assetUuid))
+                return;
+
             ++AssetGetCount;
 
             if(UncertainAssetsUUIDs.Contains(assetUuid))
                 UncertainAssetsUUIDs.Remove(assetUuid);
-
 
             if(assetBase.Data == null || assetBase.Data.Length == 0)
             {
@@ -640,6 +657,24 @@ namespace OpenSim.Region.Framework.Scenes
                 ErrorCount++;
                 FailedUUIDs.Add(assetUuid);
             }
+        }
+
+        /// <summary>
+        /// Dequeue up to <paramref name="maxCount"/> UUIDs waiting for inspection (serial-safe).
+        /// </summary>
+        protected List<UUID> DequeueInspectionBatch(int maxCount)
+        {
+            List<UUID> batch = new(Math.Max(1, maxCount));
+            while (batch.Count < maxCount && m_assetUuidsToInspect.Count > 0)
+            {
+                UUID id = m_assetUuidsToInspect.Dequeue();
+                if (id.IsZero())
+                    continue;
+                if (FailedUUIDs.Contains(id) || GatheredUuids.ContainsKey(id))
+                    continue;
+                batch.Add(id);
+            }
+            return batch;
         }
 
         private void AddForInspection(UUID assetUuid, sbyte assetType)
@@ -1314,7 +1349,33 @@ namespace OpenSim.Region.Framework.Scenes
     {
         private static readonly ILog m_log = LogManager.GetLogger(MethodBase.GetCurrentMethod().DeclaringType);
 
+        /// <summary>
+        /// In-flight foreign fetches keyed by assetServerURL|uuid — dedupe concurrent getters.
+        /// </summary>
+        private static readonly ConcurrentDictionary<string, Task<AssetBase>> s_InflightFetches = new();
+
+        /// <summary>Process-wide cap on concurrent foreign HTTP asset GETs (all gatherers / visitors).</summary>
+        private static SemaphoreSlim s_GlobalForeignSlots = new(16, 16);
+        private static int s_GlobalForeignMax = 16;
+
+        /// <summary>Per home AssetServerURI concurrent foreign GET cap.</summary>
+        private static readonly ConcurrentDictionary<string, SemaphoreSlim> s_PerHostSlots = new();
+        private static int s_PerHostMax = 8;
+
+        private const int AssetsExistBatchSize = 64;
+
         protected string m_assetServerURL;
+
+        /// <summary>Max concurrent asset work units for one gatherer. Default 8.</summary>
+        public int FetchConcurrency { get; set; } = 8;
+
+        /// <summary>Per-asset wait timeout in ms. Default 8000.</summary>
+        public int FetchTimeoutMs { get; set; } = 8000;
+
+        /// <summary>When true (default) assets fetched from a foreign grid are also persisted to the local
+        /// asset database. Set false for transient gathers (e.g. HG login attachments) so the local DB is
+        /// not written; the asset stays in the local cache only and is re-fetched on a later visit.</summary>
+        public bool StoreLocalToDatabase { get; set; } = true;
 
         public HGUuidGatherer(IAssetService assetService, string assetServerURL)
             : this(assetService, assetServerURL, new Dictionary<UUID, sbyte>()) {}
@@ -1323,6 +1384,54 @@ namespace OpenSim.Region.Framework.Scenes
             : base(assetService, collector)
         {
             m_assetServerURL = assetServerURL;
+        }
+
+        /// <summary>
+        /// Configure process-wide foreign fetch admission control. Compatible: does not change wire protocol.
+        /// Safe to call at region module init; subsequent calls resize semaphores.
+        /// </summary>
+        public static void ConfigureForeignFetchLimits(int globalMax, int perHostMax)
+        {
+            if (globalMax < 1)
+                globalMax = 1;
+            if (globalMax > 64)
+                globalMax = 64;
+            if (perHostMax < 1)
+                perHostMax = 1;
+            if (perHostMax > 32)
+                perHostMax = 32;
+
+            // Keep per-host from exceeding global
+            if (perHostMax > globalMax)
+                perHostMax = globalMax;
+
+            if (globalMax != s_GlobalForeignMax)
+            {
+                var old = s_GlobalForeignSlots;
+                s_GlobalForeignSlots = new SemaphoreSlim(globalMax, globalMax);
+                s_GlobalForeignMax = globalMax;
+                try { old.Dispose(); } catch { /* ignore */ }
+            }
+
+            if (perHostMax != s_PerHostMax)
+            {
+                s_PerHostMax = perHostMax;
+                // Drop old host semaphores; next Wait will recreate with new limit
+                foreach (var kv in s_PerHostSlots)
+                {
+                    s_PerHostSlots.TryRemove(kv.Key, out SemaphoreSlim removed);
+                    try { removed?.Dispose(); } catch { /* ignore */ }
+                }
+            }
+
+            m_log.InfoFormat(
+                "[HGUUIDGatherer]: Foreign fetch limits global={0} perHost={1}",
+                s_GlobalForeignMax, s_PerHostMax);
+        }
+
+        private static SemaphoreSlim GetPerHostSlots(string assetServerURL)
+        {
+            return s_PerHostSlots.GetOrAdd(assetServerURL, _ => new SemaphoreSlim(s_PerHostMax, s_PerHostMax));
         }
 
         protected override AssetBase GetAsset(UUID uuid)
@@ -1335,14 +1444,443 @@ namespace OpenSim.Region.Framework.Scenes
 
         public AssetBase FetchAsset(UUID assetID)
         {
-            string IDstr = assetID.ToString();
-            AssetBase asset = m_assetService.Get(IDstr, m_assetServerURL, true);
-            if (asset is null)
-                m_log.Debug($"[HGUUIDGatherer]: Failed to fetch asset {IDstr} from {m_assetServerURL}");
-            else
-                m_log.Debug($"[HGUUIDGatherer]: Copied asset {IDstr} from {m_assetServerURL} to local asset server");
+            return FetchAsset(assetID, FetchTimeoutMs);
+        }
 
-            return asset;
+        /// <summary>
+        /// Local-first asset get; on miss, pull from foreign AssetServerURI and store locally.
+        /// Concurrent callers for the same foreign id share one in-flight request.
+        /// Foreign HTTP is admitted through global + per-host semaphores (compatible single GET).
+        /// </summary>
+        public AssetBase FetchAsset(UUID assetID, int timeoutMs)
+        {
+            if (assetID.IsZero())
+                return null;
+
+            string IDstr = assetID.ToString();
+
+            // Cheap cache hit before full local Get / foreign
+            AssetBase asset = m_assetService.GetCached(IDstr);
+            if (asset is not null)
+                return asset;
+
+            asset = m_assetService.Get(IDstr);
+            if (asset is not null)
+                return asset;
+
+            if (string.IsNullOrWhiteSpace(m_assetServerURL))
+                return null;
+
+            string inflightKey = m_assetServerURL + "|" + IDstr;
+            try
+            {
+                string serverUrl = m_assetServerURL;
+                IAssetService assetService = m_assetService;
+                bool storeLocal = StoreLocalToDatabase;
+                Task<AssetBase> task = s_InflightFetches.GetOrAdd(inflightKey, key =>
+                {
+                    Task<AssetBase> t = Task.Run(() => FetchForeignAdmitted(assetService, IDstr, serverUrl, storeLocal));
+                    // Always clear in-flight slot when done so timeouts do not pin the entry forever
+                    _ = t.ContinueWith(_ => s_InflightFetches.TryRemove(key, out _),
+                        TaskContinuationOptions.ExecuteSynchronously);
+                    return t;
+                });
+
+                if (timeoutMs <= 0)
+                    return task.GetAwaiter().GetResult();
+
+                if (task.Wait(timeoutMs))
+                    return task.Result;
+
+                m_log.WarnFormat(
+                    "[HGUUIDGatherer]: Fetch timeout {0}ms for asset {1} from {2}",
+                    timeoutMs, IDstr, m_assetServerURL);
+                // Task may still complete and StoreLocal; ReconcileFailedAgainstLocal recovers later.
+                return null;
+            }
+            catch (Exception e)
+            {
+                m_log.Debug($"[HGUUIDGatherer]: Fetch exception for {IDstr}: {e.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Stock-compatible foreign GET (single /assets/{uuid}) under global + per-host admission.
+        /// </summary>
+        private static AssetBase FetchForeignAdmitted(IAssetService assetService, string IDstr, string assetServerURL, bool storeLocal)
+        {
+            SemaphoreSlim globalSlots = s_GlobalForeignSlots;
+            SemaphoreSlim hostSlots = GetPerHostSlots(assetServerURL);
+            globalSlots.Wait();
+            try
+            {
+                hostSlots.Wait();
+                try
+                {
+                    // Callers have already established local absence (FetchAsset checks
+                    // cache+local Get, FetchAssetsParallel runs the batched AssetsExist prefilter), so use
+                    // the foreign-only path when the asset service supports it and skip the redundant
+                    // GetFromLocal round trip. Fall back to the interface method for any other
+                    // IAssetService implementation.
+                    AssetBase a = assetService is IForeignOnlyAssetGetter foreignOnly
+                        ? foreignOnly.GetForeignOnly(IDstr, assetServerURL, storeLocal)
+                        : assetService.Get(IDstr, assetServerURL, storeLocal);
+                    if (a is null)
+                        m_log.Debug($"[HGUUIDGatherer]: Failed to fetch asset {IDstr} from {assetServerURL}");
+                    else
+                        m_log.Debug($"[HGUUIDGatherer]: Copied asset {IDstr} from {assetServerURL} to local asset server");
+                    return a;
+                }
+                finally
+                {
+                    hostSlots.Release();
+                }
+            }
+            finally
+            {
+                globalSlots.Release();
+            }
+        }
+
+        /// <summary>
+        /// Using AssetsExist (+ cache) in batches, return only ids not present locally.
+        /// Avoids O(N) full blob GETs when checking presence (ensure / script-first prefilter).
+        /// </summary>
+        public List<UUID> FilterMissingLocal(IList<UUID> ids)
+        {
+            List<UUID> missing = new();
+            if (ids is null || ids.Count == 0)
+                return missing;
+
+            List<UUID> needExistCheck = new();
+            foreach (UUID id in ids)
+            {
+                if (id.IsZero())
+                    continue;
+                // Cache-only presence (cheap)
+                if (m_assetService.GetCached(id.ToString()) is not null)
+                    continue;
+                needExistCheck.Add(id);
+            }
+
+            if (needExistCheck.Count == 0)
+                return missing;
+
+            for (int offset = 0; offset < needExistCheck.Count; offset += AssetsExistBatchSize)
+            {
+                int count = Math.Min(AssetsExistBatchSize, needExistCheck.Count - offset);
+                string[] batch = new string[count];
+                for (int i = 0; i < count; i++)
+                    batch[i] = needExistCheck[offset + i].ToString();
+
+                bool[] exist;
+                try
+                {
+                    exist = m_assetService.AssetsExist(batch);
+                }
+                catch (Exception e)
+                {
+                    m_log.Debug($"[HGUUIDGatherer]: AssetsExist batch failed ({e.Message}); treating batch as missing");
+                    for (int i = 0; i < count; i++)
+                        missing.Add(needExistCheck[offset + i]);
+                    continue;
+                }
+
+                if (exist is null || exist.Length != count)
+                {
+                    for (int i = 0; i < count; i++)
+                        missing.Add(needExistCheck[offset + i]);
+                    continue;
+                }
+
+                for (int i = 0; i < count; i++)
+                {
+                    if (!exist[i])
+                        missing.Add(needExistCheck[offset + i]);
+                }
+            }
+
+            return missing;
+        }
+
+        /// <summary>
+        /// If a prior timeout marked a UUID failed but a late foreign GET stored it, clear the failure.
+        /// Uses batched AssetsExist — no wire protocol change.
+        /// </summary>
+        public int ReconcileFailedAgainstLocal()
+        {
+            if (FailedUUIDs.Count == 0)
+                return 0;
+
+            List<UUID> candidates = new(FailedUUIDs);
+            List<UUID> stillMissing = FilterMissingLocal(candidates);
+            HashSet<UUID> stillMissingSet = new(stillMissing);
+
+            int recovered = 0;
+            foreach (UUID id in candidates)
+            {
+                if (stillMissingSet.Contains(id))
+                    continue;
+                FailedUUIDs.Remove(id);
+                recovered++;
+            }
+
+            if (recovered > 0)
+            {
+                m_log.DebugFormat(
+                    "[HGUUIDGatherer]: Reconciled {0} timed-out/failed asset(s) now present locally",
+                    recovered);
+            }
+
+            return recovered;
+        }
+
+        /// <summary>
+        /// Fetch many assets with bounded parallelism (local-first, foreign on miss).
+        /// Prefers bulk local AssetsExist to skip work already on this grid.
+        /// </summary>
+        public void FetchAssetsParallel(IEnumerable<UUID> assetIds, Func<bool> shouldAbort = null)
+        {
+            if (assetIds is null)
+                return;
+
+            List<UUID> list = new();
+            HashSet<UUID> seen = new();
+            foreach (UUID id in assetIds)
+            {
+                if (id.IsZero() || !seen.Add(id))
+                    continue;
+                if (FailedUUIDs.Contains(id))
+                    continue;
+                list.Add(id);
+            }
+
+            if (list.Count == 0)
+                return;
+
+            // Skip assets already local (metadata-only check, not full blob load)
+            List<UUID> missing = FilterMissingLocal(list);
+            int skipped = list.Count - missing.Count;
+            if (skipped > 0)
+            {
+                m_log.DebugFormat(
+                    "[HGUUIDGatherer]: Local AssetsExist skipped {0}/{1} already-present asset(s)",
+                    skipped, list.Count);
+            }
+
+            if (missing.Count == 0)
+                return;
+
+            int concurrency = Math.Max(1, FetchConcurrency);
+            int timeoutMs = Math.Max(500, FetchTimeoutMs);
+
+            System.Threading.Tasks.Parallel.ForEach(missing,
+                new ParallelOptions { MaxDegreeOfParallelism = concurrency },
+                (UUID id, ParallelLoopState state) =>
+                {
+                    if (shouldAbort != null && shouldAbort())
+                    {
+                        state.Stop();
+                        return;
+                    }
+                    try
+                    {
+                        FetchAsset(id, timeoutMs);
+                    }
+                    catch (Exception e)
+                    {
+                        m_log.Debug($"[HGUUIDGatherer]: Parallel fetch failed for {id}: {e.Message}");
+                    }
+                });
+        }
+
+        /// <summary>
+        /// Visual-critical asset types for two-phase HG appearance (phase 2).
+        /// Textures, mesh, materials, wearables, and object definitions first;
+        /// sounds/animations/etc. deferred so the avatar looks right sooner.
+        /// </summary>
+        public static bool IsVisualAppearanceAssetType(sbyte assetType)
+        {
+            switch ((AssetType)assetType)
+            {
+                case AssetType.Texture:
+                case AssetType.TextureTGA:
+                case AssetType.ImageJPEG:
+                case AssetType.ImageTGA:
+                case AssetType.Mesh:
+                case AssetType.Material:
+                case AssetType.Clothing:
+                case AssetType.Bodypart:
+                case AssetType.Object:
+                    return true;
+                default:
+                    // OSMaterial is outside some AssetType enums; UuidGatherer casts it explicitly
+                    if (assetType == (sbyte)AssetType.OSMaterial)
+                        return true;
+                    return false;
+            }
+        }
+
+        /// <summary>
+        /// Wave-parallel gather: dequeue a batch, fetch in parallel, then inspect nested UUIDs serially.
+        /// Then two-phase ensure: visual assets first, sounds/anims second.
+        /// Compatible with stock GET /assets/{uuid}.
+        /// </summary>
+        public void GatherAllParallel(Func<bool> shouldAbort = null)
+        {
+            int concurrency = Math.Max(1, FetchConcurrency);
+            int timeoutMs = Math.Max(500, FetchTimeoutMs);
+            int waves = 0;
+            int waveTickStart = Util.EnvironmentTickCount();
+
+            while (!Complete)
+            {
+                if (shouldAbort != null && shouldAbort())
+                    return;
+
+                List<UUID> batch = DequeueInspectionBatch(concurrency);
+                if (batch.Count == 0)
+                {
+                    if (Complete)
+                        break;
+                    // Only duplicates left that were skipped — drain carefully
+                    if (m_assetUuidsToInspect.Count > 0)
+                    {
+                        UUID id = m_assetUuidsToInspect.Dequeue();
+                        if (!id.IsZero() && !FailedUUIDs.Contains(id) && !GatheredUuids.ContainsKey(id))
+                            batch.Add(id);
+                        else
+                            continue;
+                    }
+                    else
+                        break;
+                }
+
+                waves++;
+                ConcurrentDictionary<UUID, AssetBase> fetched = new();
+
+                System.Threading.Tasks.Parallel.ForEach(batch,
+                    new ParallelOptions { MaxDegreeOfParallelism = concurrency },
+                    uuid =>
+                    {
+                        if (shouldAbort != null && shouldAbort())
+                            return;
+                        try
+                        {
+                            AssetBase a = FetchAsset(uuid, timeoutMs);
+                            if (a != null)
+                                fetched[uuid] = a;
+                        }
+                        catch (Exception e)
+                        {
+                            m_log.Debug($"[HGUUIDGatherer]: Parallel gather fetch failed for {uuid}: {e.Message}");
+                        }
+                    });
+
+                if (shouldAbort != null && shouldAbort())
+                    return;
+
+                foreach (UUID uuid in batch)
+                {
+                    if (fetched.TryGetValue(uuid, out AssetBase asset))
+                        ProcessFetchedAsset(uuid, asset);
+                    else
+                    {
+                        if (!FailedUUIDs.Contains(uuid))
+                        {
+                            FailedUUIDs.Add(uuid);
+                            ErrorCount++;
+                        }
+                    }
+                }
+            }
+
+            int inspectMs = Util.EnvironmentTickCountSubtract(waveTickStart);
+
+            // Late foreign GETs may have stored assets after per-asset wait timed out
+            ReconcileFailedAgainstLocal();
+
+            // Phase 1 — visual (textures, mesh, materials, wearables, objects)
+            int p1Start = Util.EnvironmentTickCount();
+            int p1Count = EnsureGatheredAssetsPresent(shouldAbort, visualOnly: true);
+            int p1Ms = Util.EnvironmentTickCountSubtract(p1Start);
+            m_log.DebugFormat(
+                "[HGUUIDGatherer]: Appearance phase1 (visual) ensured {0} missing asset(s) in {1} ms",
+                p1Count, p1Ms);
+
+            if (shouldAbort != null && shouldAbort())
+                return;
+
+            // Phase 2 — deferred (sounds, animations, gestures, notecards, …)
+            int p2Start = Util.EnvironmentTickCount();
+            int p2Count = EnsureGatheredAssetsPresent(shouldAbort, visualOnly: false);
+            int p2Ms = Util.EnvironmentTickCountSubtract(p2Start);
+            m_log.DebugFormat(
+                "[HGUUIDGatherer]: Appearance phase2 (audio/anim/other) ensured {0} missing asset(s) in {1} ms",
+                p2Count, p2Ms);
+
+            ReconcileFailedAgainstLocal();
+
+            m_log.DebugFormat(
+                "[HGUUIDGatherer]: Parallel gather done waves={0} concurrency={1} timeoutMs={2} gathered={3} failed={4} globalSlots={5} perHost={6} inspectMs={7} phase1Ms={8} phase2Ms={9}",
+                waves, concurrency, timeoutMs, GatheredUuids.Count, FailedUUIDs.Count,
+                s_GlobalForeignMax, s_PerHostMax, inspectMs, p1Ms, p2Ms);
+        }
+
+        /// <summary>
+        /// Ensure UUIDs listed in GatheredUuids exist locally (fetch foreign if needed).
+        /// When <paramref name="visualOnly"/> is true, only visual-critical types.
+        /// When false, only non-visual (deferred) types.
+        /// Returns how many assets were missing locally (candidates for foreign fetch).
+        /// Uses bulk AssetsExist instead of per-UUID full Get.
+        /// </summary>
+        public int EnsureGatheredAssetsPresent(Func<bool> shouldAbort, bool visualOnly)
+        {
+            List<UUID> candidates = new();
+            foreach (KeyValuePair<UUID, sbyte> kv in GatheredUuids)
+            {
+                UUID id = kv.Key;
+                if (id.IsZero() || FailedUUIDs.Contains(id))
+                    continue;
+
+                bool isVisual = IsVisualAppearanceAssetType(kv.Value);
+                if (visualOnly && !isVisual)
+                    continue;
+                if (!visualOnly && isVisual)
+                    continue;
+
+                candidates.Add(id);
+            }
+
+            if (candidates.Count == 0)
+                return 0;
+
+            List<UUID> need = FilterMissingLocal(candidates);
+            if (need.Count == 0)
+            {
+                m_log.DebugFormat(
+                    "[HGUUIDGatherer]: Ensure {0}: all {1} candidate(s) already local (AssetsExist)",
+                    visualOnly ? "visual" : "deferred", candidates.Count);
+                return 0;
+            }
+
+            m_log.DebugFormat(
+                "[HGUUIDGatherer]: Ensuring {0}/{1} {2} asset(s) missing locally (parallel foreign GET)",
+                need.Count, candidates.Count, visualOnly ? "visual" : "deferred");
+            FetchAssetsParallel(need, shouldAbort);
+            return need.Count;
+        }
+
+        /// <summary>
+        /// Ensure every UUID already listed in GatheredUuids exists locally (fetch foreign if needed).
+        /// </summary>
+        public void EnsureGatheredAssetsPresent(Func<bool> shouldAbort = null)
+        {
+            EnsureGatheredAssetsPresent(shouldAbort, visualOnly: true);
+            if (shouldAbort != null && shouldAbort())
+                return;
+            EnsureGatheredAssetsPresent(shouldAbort, visualOnly: false);
         }
     }
 }
