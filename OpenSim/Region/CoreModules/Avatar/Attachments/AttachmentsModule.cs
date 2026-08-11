@@ -416,7 +416,9 @@ namespace OpenSim.Region.CoreModules.Avatar.Attachments
             if (attServ is not null)
             {
                 // old avination service that was never donated
-                m_log.Debug("[ATTACHMENT]: Loading attachment data from attachment service");
+                if (DebugLevel > 0)
+                    m_log.Debug("[ATTACHMENT]: Loading attachment data from attachment service");
+
                 string stateData = attServ.Get(sp.UUID.ToString());
                 if (!string.IsNullOrEmpty(stateData))
                 {
@@ -1032,14 +1034,17 @@ namespace OpenSim.Region.CoreModules.Avatar.Attachments
                 return;
             }
 
-            m_log.Debug($"[ATTACHMENTS MODULE]: Updating asset for attachment {grp.UUID}, attachpoint {grp.AttachmentPoint}");
+            if (DebugLevel > 0)
+                m_log.Debug($"[ATTACHMENTS MODULE]: Updating asset for attachment {grp.UUID}, attachpoint {grp.AttachmentPoint}");
 
             InventoryItemBase item = m_scene.InventoryService.GetItem(sp.UUID, grp.FromItemID);
             if (item is not null)
             {
                 if (item.Owner.NotEqual(sp.UUID))
                 {
-                    m_log.Debug($"[ATTACHMENTS MODULE]: Updating asset for attachment owner mismach: agent {sp.UUID}, owner{item.Owner}");
+                    if (DebugLevel > 0)
+                        m_log.Debug($"[ATTACHMENTS MODULE]: Updating asset for attachment owner mismach: agent {sp.UUID}, owner{item.Owner}");
+                    
                     return;
                 }
 
