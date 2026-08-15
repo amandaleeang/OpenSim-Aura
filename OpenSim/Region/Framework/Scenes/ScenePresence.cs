@@ -2284,9 +2284,10 @@ namespace OpenSim.Region.Framework.Scenes
                     }
 
                     // verify baked textures and cache
-                    if (m_scene.AvatarFactory != null && !isHGTP)
+                    // including HG login / coming back to home grid
+                    if (m_scene.AvatarFactory != null)
                     {
-                        if (!m_scene.AvatarFactory.ValidateBakedTextureCache(this))
+                        if (!m_scene.AvatarFactory.ValidateBakedTextureCache(this) && !isHGTP)
                             m_scene.AvatarFactory.QueueAppearanceSave(UUID);
                     }
                 }
