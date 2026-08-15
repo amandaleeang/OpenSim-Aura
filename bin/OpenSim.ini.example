@@ -1212,8 +1212,12 @@
 [XBakes]
   ;# {URL} {} {Set URL for Baked texture service} {}
   ;; Sets the URL for the baked texture ROBUST service.
-  ;; Disabled when unset.
+  ;; If URL is set, the region talks to that Robust BakedTextureService (grid).
+  ;; If URL is unset, set BaseDirectory to use an in-process file store
+  ;; (standalone). Same hashed layout as Robust XBakes. Disabled if both are unset.
   ;; URL = ${Const|PrivURL}:${Const|PrivatePort}
+  ;# {BaseDirectory} {} {Local bake store directory when URL is unset} {}
+  ;; BaseDirectory = "bakes"
 
 ;;
 ;; Optional module to highlight God names in the viewer.
