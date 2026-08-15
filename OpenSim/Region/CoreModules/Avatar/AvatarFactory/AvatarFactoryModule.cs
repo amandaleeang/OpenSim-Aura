@@ -600,8 +600,8 @@ namespace OpenSim.Region.CoreModules.Avatar.AvatarFactory
                                 }
                             }
                         }
-                        wcacheidx.CacheId = UUID.Zero;
-                        wcacheidx.TextureID = AppearanceManager.DEFAULT_AVATAR_TEXTURE;
+                        // Keep packed CacheId + TextureID. Bake UUIDs are not canonical;
+                        // XBakes will attach bytes to the incoming TextureID if CacheId matches.
                         wearableCacheValid = false;
                     }
                 }
@@ -618,7 +618,7 @@ namespace OpenSim.Region.CoreModules.Avatar.AvatarFactory
                     // m_log.Debug("[ValidateBakedCache] local cache invalid, checking bakedModule");
                     try
                     {
-                        bakedModuleCache = bakedModule.Get(sp.UUID);
+                        bakedModuleCache = bakedModule.Get(sp.UUID, wearableCache);
                     }
                     catch (Exception e)
                     {
@@ -642,7 +642,6 @@ namespace OpenSim.Region.CoreModules.Avatar.AvatarFactory
                                 wcachej.TextureAsset = bacachei.TextureAsset;
                                 bacachei.TextureAsset.Temporary = true;
                                 bacachei.TextureAsset.Local = true;
-                                //bakedModuleCache[i].TextureAsset.Flags = AssetFlags.AvatarBake;
                                 cache.Cache(bacachei.TextureAsset);
                             }
                         }
