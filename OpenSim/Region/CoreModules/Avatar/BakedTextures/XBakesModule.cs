@@ -110,6 +110,20 @@ namespace OpenSim.Region.CoreModules.Avatar.BakedTextures
 
         public WearableCacheItem[] Get(UUID id)
         {
+            return Get(id, null);
+        }
+
+        public WearableCacheItem[] Get(UUID id, WearableCacheItem[] incoming)
+        {
+            WearableCacheItem[] stored = ReadBakes(id);
+            if (stored == null)
+                return null;
+            BindToIncomingTextureIds(stored, incoming);
+            return stored;
+        }
+
+        private WearableCacheItem[] ReadBakes(UUID id)
+        {
             if (m_URL.Length > 0)
             {
                 using (RestClient rc = new RestClient(m_URL))
@@ -148,6 +162,40 @@ namespace OpenSim.Region.CoreModules.Avatar.BakedTextures
             {
                 m_log.WarnFormat("[XBakes]: Failed to read local bakes for {0}: {1}", id, e.Message);
                 return null;
+            }
+        }
+
+        /// <summary>
+        /// Bake TextureIDs are not canonical. CacheId is. Re-key stored bytes
+        /// to the TextureID from the transfer so dest Flotsam hits that UUID.
+        /// </summary>
+        private void BindToIncomingTextureIds(WearableCacheItem[] stored, WearableCacheItem[] incoming)
+        {
+            if (stored == null || incoming == null)
+                return;
+
+            IAssetCache cache = m_Scene?.RequestModuleInterface<IAssetCache>();
+
+            foreach (WearableCacheItem item in stored)
+            {
+                if (item?.TextureAsset == null)
+                    continue;
+                int idx = (int)item.TextureIndex;
+                if (idx < 0 || idx >= incoming.Length)
+                    continue;
+
+                WearableCacheItem packed = incoming[idx];
+                if (packed == null)
+                    continue;
+                if (packed.CacheId.IsNotZero() && packed.CacheId.NotEqual(item.CacheId))
+                    continue;
+                if (packed.TextureID.IsZero() || packed.TextureID.Equals(item.TextureID))
+                    continue;
+
+                item.TextureAsset.FullID = packed.TextureID;
+                item.TextureAsset.ID = packed.TextureID.ToString();
+                item.TextureID = packed.TextureID;
+                cache?.Cache(item.TextureAsset);
             }
         }
 

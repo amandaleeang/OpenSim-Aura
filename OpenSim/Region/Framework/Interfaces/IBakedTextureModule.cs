@@ -33,6 +33,7 @@ namespace OpenSim.Services.Interfaces
     public interface IBakedTextureModule
     {
         WearableCacheItem[] Get(UUID id);
+        WearableCacheItem[] Get(UUID id, WearableCacheItem[] incoming);
 
         void Store(UUID id);
         void Store(UUID id, WearableCacheItem[] WearableCache);
