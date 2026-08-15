@@ -30,6 +30,7 @@ using System.Collections.Generic;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Text;
+using System.Threading;
 using log4net;
 using OpenMetaverse;
 using OpenMetaverse.StructuredData;
@@ -237,6 +238,7 @@ namespace OpenSim.Region.Framework.Scenes
         public int possibleNotAssetCount { get; set; }
         public int ErrorCount { get; private set; }
         public int AssetGetCount;
+        public int FetchTimeouts { get; private set; }
         private bool verbose = true;
 
         /// <summary>
@@ -289,6 +291,7 @@ namespace OpenSim.Region.Framework.Scenes
             ErrorCount = 0;
             possibleNotAssetCount = 0;
             AssetGetCount = 0;
+            FetchTimeouts = 0;
         }
 
         public bool AddGathered(UUID uuid, sbyte type)
@@ -525,6 +528,113 @@ namespace OpenSim.Region.Framework.Scenes
         }
 
         /// <summary>
+        /// Concurrent gather+download for HG-style use: drain the inspect queue in waves (FireAndForget),
+        /// inspect on the calling thread (which discovers nested UUIDs), then download any remaining
+        /// gathered leaf assets (textures/sounds/etc. that were only listed, not opened).
+        /// One method covers the full "all assets local" work; serial GatherAll is unchanged for other callers.
+        /// </summary>
+        public bool GatherAllConcurrent(int waveSize = 8, int fetchTimeoutMs = 30000)
+        {
+            if (m_assetUuidsToInspect.Count == 0 && GatheredUuids.Count == 0)
+                return false;
+            if (waveSize < 1)
+                waveSize = 1;
+            if (fetchTimeoutMs < 1)
+                fetchTimeoutMs = 1;
+
+            // UUIDs successfully retrieved during inspect waves (skip re-download later).
+            HashSet<UUID> fetched = new HashSet<UUID>();
+
+            while (m_assetUuidsToInspect.Count > 0)
+            {
+                FetchAssetWave(m_assetUuidsToInspect, waveSize, fetchTimeoutMs, fetched, inspect: true);
+            }
+
+            // Leaf assets (and any other gathered IDs) that were recorded without a GET.
+            List<UUID> leaves = new List<UUID>();
+            foreach (UUID id in GatheredUuids.Keys)
+            {
+                if (!fetched.Contains(id) && !FailedUUIDs.Contains(id))
+                    leaves.Add(id);
+            }
+            if (leaves.Count > 0)
+            {
+                Queue<UUID> leafQueue = new Queue<UUID>(leaves);
+                while (leafQueue.Count > 0)
+                    FetchAssetWave(leafQueue, waveSize, fetchTimeoutMs, fetched, inspect: false);
+            }
+
+            return true;
+        }
+
+        /// <summary>
+        /// One concurrent wave: dequeue up to waveSize IDs, FireAndForget GetAsset, wait with timeout.
+        /// On success, optionally InspectAsset (inspect waves) and record in <paramref name="fetched"/>.
+        /// </summary>
+        private void FetchAssetWave(Queue<UUID> queue, int waveSize, int fetchTimeoutMs, HashSet<UUID> fetched, bool inspect)
+        {
+            int n = Math.Min(waveSize, queue.Count);
+            if (n < 1)
+                return;
+
+            UUID[] ids = new UUID[n];
+            AssetBase[] assets = new AssetBase[n];
+            Exception[] errors = new Exception[n];
+            ManualResetEventSlim[] done = new ManualResetEventSlim[n];
+
+            for (int i = 0; i < n; i++)
+            {
+                ids[i] = queue.Dequeue();
+                done[i] = new ManualResetEventSlim(false);
+                int idx = i;
+                Util.FireAndForget(_ =>
+                {
+                    try { assets[idx] = GetAsset(ids[idx]); }
+                    catch (Exception e) { errors[idx] = e; }
+                    finally { try { done[idx].Set(); } catch (ObjectDisposedException) { } }
+                }, null, "UuidGatherer.GetAsset");
+            }
+
+            WaitHandle[] handles = new WaitHandle[n];
+            for (int i = 0; i < n; i++)
+                handles[i] = done[i].WaitHandle;
+            WaitHandle.WaitAll(handles, fetchTimeoutMs);
+
+            for (int i = 0; i < n; i++)
+            {
+                if (!done[i].IsSet)
+                {
+                    if (verbose)
+                        m_log.Debug($"[UUID GATHERER]: Fetch of asset {ids[i]} timed out after {fetchTimeoutMs} ms");
+                    FetchTimeouts++;
+                    ErrorCount++;
+                    FailedUUIDs.Add(ids[i]);
+                }
+                else if (errors[i] != null)
+                {
+                    if (verbose)
+                        m_log.Error($"[UUID GATHERER]: Failed to get asset {ids[i]} : {errors[i].Message}");
+                    ErrorCount++;
+                    FailedUUIDs.Add(ids[i]);
+                }
+                else
+                {
+                    fetched.Add(ids[i]);
+                    if (inspect)
+                        InspectAsset(assets[i], ids[i]);
+                    else if (assets[i] != null)
+                        ++AssetGetCount;
+                    else
+                    {
+                        FailedUUIDs.Add(ids[i]);
+                        ErrorCount++;
+                    }
+                }
+                done[i].Dispose();
+            }
+        }
+
+        /// <summary>
         /// Gather all the asset uuids associated with the asset referenced by a given uuid
         /// </summary>
         /// <remarks>
@@ -567,6 +677,11 @@ namespace OpenSim.Region.Framework.Scenes
                 return;
             }
 
+            InspectAsset(assetBase, assetUuid);
+        }
+
+        private void InspectAsset(AssetBase assetBase, UUID assetUuid)
+        {
             if(assetBase == null)
             {
 //                m_log.ErrorFormat("[UUID GATHERER]: asset {0} not found", assetUuid);
