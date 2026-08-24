@@ -112,6 +112,15 @@ namespace OpenSim.Services.Connectors.InstantMessage
             if (!string.IsNullOrEmpty(messageKey))
                 gim["message_key"] = messageKey;
 
+            // Extra keys are ignored by stock OpenSim. Required fields above stay unchanged.
+            if (!string.IsNullOrWhiteSpace(msg.fromAgentHomeURI))
+            {
+                gim["from_agent_home_uri"] = msg.fromAgentHomeURI;
+                string uui = msg.BuildFromAgentUUI();
+                if (!string.IsNullOrEmpty(uui))
+                    gim["from_agent_uui"] = uui;
+            }
+
             return gim;
         }
 

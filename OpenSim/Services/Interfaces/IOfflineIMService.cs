@@ -95,6 +95,11 @@ namespace OpenSim.Services.Interfaces
             if (dict.TryGetValue("ToAgentID", out otmp) && otmp is string tid)
                 im.toAgentID = new Guid(tid);
 
+            if (dict.TryGetValue("FromAgentHomeURI", out otmp) && otmp is string home)
+                im.fromAgentHomeURI = home;
+            else
+                im.fromAgentHomeURI = string.Empty;
+
             return im;
         }
 
@@ -115,6 +120,8 @@ namespace OpenSim.Services.Interfaces
             dict["RegionID"] = im.RegionID.ToString();
             dict["Timestamp"] = im.timestamp.ToString();
             dict["ToAgentID"] = im.toAgentID.ToString();
+            if (!string.IsNullOrWhiteSpace(im.fromAgentHomeURI))
+                dict["FromAgentHomeURI"] = im.fromAgentHomeURI;
 
             return dict;
         }
