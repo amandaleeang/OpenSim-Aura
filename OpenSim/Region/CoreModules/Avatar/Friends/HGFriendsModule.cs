@@ -175,14 +175,12 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
                     // of foreign friends, just like we do with SOPs' creators
                     foreach (FriendInfo finfo in FriendData.Friends)
                     {
-                        if (finfo.TheirFlags != -1)
-                        {
-                            if (Util.ParseFullUniversalUserIdentifier(finfo.Friend, out UUID id, out string url, out string first, out string last))
-                            {
-                                //m_log.DebugFormat("[HGFRIENDS MODULE]: caching {0}", finfo.Friend);
-                                uMan.AddUser(id,first,last, url);
-                            }
-                        }
+                        if (finfo?.Friend is null)
+                            continue;
+                        // Seed HomeURL for HG friends so profile lookup can call their grid
+                        // without asking the visitor's home again.
+                        if (Util.ParseFullUniversalUserIdentifier(finfo.Friend, out UUID id, out string url, out string first, out string last))
+                            uMan.AddUser(id, first, last, url);
                     }
 
                     //m_log.DebugFormat("[HGFRIENDS MODULE]: Exiting CacheFriends for {0} since detected root agent", client.Name);
