@@ -1247,7 +1247,7 @@ namespace OpenSim.Region.CoreModules.Asset
                 StampRegionStatusFile(s.RegionInfo.RegionID);
             }
 
-            gatherer.GatherAll();
+            gatherer.GatherAllConcurrent();
 
             gatherer.FailedUUIDs.Clear();
             gatherer.UncertainAssetsUUIDs.Clear();

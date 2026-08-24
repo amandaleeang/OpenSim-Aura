@@ -234,7 +234,7 @@ namespace OpenSim.Region.CoreModules.Avatar.Inventory.Archiver
                 int curErrorCntr = m_assetGatherer.ErrorCount;
                 int possible = m_assetGatherer.possibleNotAssetCount;
                 m_assetGatherer.AddForInspection(inventoryItem.AssetID);
-                m_assetGatherer.GatherAll();
+                m_assetGatherer.GatherAllConcurrent();
                 curErrorCntr =  m_assetGatherer.ErrorCount - curErrorCntr;
                 possible = m_assetGatherer.possibleNotAssetCount - possible;
 
@@ -473,7 +473,7 @@ namespace OpenSim.Region.CoreModules.Avatar.Inventory.Archiver
 
                 if (SaveAssets)
                 {
-                    m_assetGatherer.GatherAll();
+                    m_assetGatherer.GatherAllConcurrent();
 
                     int errors = m_assetGatherer.FailedUUIDs.Count;
 

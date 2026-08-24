@@ -271,7 +271,7 @@ namespace OpenSim.Region.CoreModules.World.Archiver
                     int curErrorCntr = assetGatherer.ErrorCount;
                     int possible = assetGatherer.possibleNotAssetCount;
                     assetGatherer.AddForInspection(sceneObject);
-                    assetGatherer.GatherAll();
+                    assetGatherer.GatherAllConcurrent();
                     curErrorCntr =  assetGatherer.ErrorCount - curErrorCntr;
                     possible = assetGatherer.possibleNotAssetCount - possible;
                     if(curErrorCntr > 0)
@@ -288,7 +288,7 @@ namespace OpenSim.Region.CoreModules.World.Archiver
                     }
                 }
 
-                assetGatherer.GatherAll();
+                assetGatherer.GatherAllConcurrent();
 
                 GC.Collect();
 
@@ -334,7 +334,7 @@ namespace OpenSim.Region.CoreModules.World.Archiver
             if (regionSettings.TerrainPBR4 != RegionSettings.DEFAULT_TERRAIN_PBR_4)
                 assetGatherer.AddForInspection(regionSettings.TerrainPBR4);
 
-            assetGatherer.GatherAll();
+            assetGatherer.GatherAllConcurrent();
 
             if (scene.RegionEnvironment != null)
                 scene.RegionEnvironment.GatherAssets(assetUuids);
