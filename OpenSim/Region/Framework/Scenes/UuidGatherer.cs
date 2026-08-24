@@ -528,10 +528,11 @@ namespace OpenSim.Region.Framework.Scenes
         }
 
         /// <summary>
-        /// Concurrent gather+download for HG-style use: drain the inspect queue in waves (FireAndForget),
+        /// Concurrent gather+download: drain the inspect queue in waves (FireAndForget),
         /// inspect on the calling thread (which discovers nested UUIDs), then download any remaining
         /// gathered leaf assets (textures/sounds/etc. that were only listed, not opened).
-        /// One method covers the full "all assets local" work; serial GatherAll is unchanged for other callers.
+        /// Used for HG home fetches and for grid-mode Robust HTTP Gets (same IAssetService.Get path).
+        /// Serial GatherAll remains for callers that opt out.
         /// </summary>
         public bool GatherAllConcurrent(int waveSize = 8, int fetchTimeoutMs = 30000)
         {
