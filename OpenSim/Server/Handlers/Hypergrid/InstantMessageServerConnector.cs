@@ -218,6 +218,10 @@ namespace OpenSim.Server.Handlers.Hypergrid
                     gim.ParentEstateID = ParentEstateID;
                     gim.Position = Position;
                     gim.binaryBucket = binaryBucket;
+                    gim.fromAgentHomeURI = GridInstantMessage.ResolveSenderHomeURI(
+                        requestData.ContainsKey("from_agent_home_uri") ? requestData["from_agent_home_uri"] as string : null,
+                        requestData.ContainsKey("from_agent_uui") ? requestData["from_agent_uui"] as string : null,
+                        fromAgentName);
 
                     successful = m_IMService.IncomingInstantMessage(gim);
 

@@ -654,6 +654,23 @@ namespace OpenSim.Services.HypergridService
                         }
                 }
             }
+
+            // IM / visit contacts stored as GridUser UUI (uuid;home;name). Needed so
+            // a visitor's home can resolve someone who IMed them but is not a friend.
+            if (m_GridUserService is not null)
+            {
+                GridUserInfo gu = m_GridUserService.GetGridUserInfo(targetUserID.ToString());
+                if (gu is not null && !string.IsNullOrEmpty(gu.UserID) && gu.UserID.Length > 36
+                        && Util.ParseFullUniversalUserIdentifier(gu.UserID, out _, out string home, out _, out _)
+                        && !string.IsNullOrEmpty(home))
+                {
+                    if (Util.ParseUniversalUserIdentifier(gu.UserID, out _, out _, out _, out _, out string secret)
+                            && !string.IsNullOrEmpty(secret))
+                        return gu.UserID.Replace(secret, "0");
+                    return gu.UserID;
+                }
+            }
+
             return string.Empty;
         }
 
