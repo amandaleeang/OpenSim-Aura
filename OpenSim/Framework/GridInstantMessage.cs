@@ -48,9 +48,17 @@ namespace OpenSim.Framework
         public Guid RegionID;
         public uint timestamp;
 
+        /// <summary>
+        /// Optional home grid URI of the sender (HG). Carried over XML-RPC as
+        /// from_agent_home_uri so the receiving grid can resolve profile/IM replies
+        /// for senders who are not friends and have never visited.
+        /// </summary>
+        public string fromAgentHomeURI;
+
         public GridInstantMessage()
         {
             binaryBucket = Array.Empty<byte>();
+            fromAgentHomeURI = string.Empty;
         }
 
         public GridInstantMessage(GridInstantMessage im, bool addTimestamp)
@@ -67,6 +75,7 @@ namespace OpenSim.Framework
             binaryBucket = im.binaryBucket;
             RegionID = im.RegionID;
             ParentEstateID = im.ParentEstateID;
+            fromAgentHomeURI = im.fromAgentHomeURI ?? string.Empty;
 
             if (addTimestamp)
                 timestamp = (uint)Util.UnixTimeSinceEpoch();
@@ -99,6 +108,8 @@ namespace OpenSim.Framework
                 RegionID = scene.RegionInfo.RegionSettings.RegionUUID.Guid;
             }
 
+            fromAgentHomeURI = string.Empty;
+
             if (addTimestamp)
                 timestamp = (uint)Util.UnixTimeSinceEpoch();
         }
@@ -110,6 +121,76 @@ namespace OpenSim.Framework
                 _toAgentID, _dialog, false, _message,
                 _fromAgentID ^ _toAgentID, _offline, _position, Array.Empty<byte>(), true)
         {
+        }
+
+        /// <summary>
+        /// Universal user identifier for an IM participant: uuid;homeURI;First Last.
+        /// Same form as friends, creator data, and get_uui.
+        /// </summary>
+        public static string BuildUUI(UUID id, string displayName, string homeURI)
+        {
+            if (id.IsZero() || string.IsNullOrWhiteSpace(homeURI))
+                return string.Empty;
+
+            OSHHTPHost host = new(homeURI);
+            if (!host.IsValidHost)
+                return string.Empty;
+
+            SplitDisplayName(displayName, out string first, out string last);
+            return id.ToString() + ";" + host.URIwEndSlash + ";" + first + " " + last;
+        }
+
+        public string BuildFromAgentUUI()
+        {
+            return BuildUUI(new UUID(fromAgentID), fromAgentName, fromAgentHomeURI);
+        }
+
+        public static void SplitDisplayName(string displayName, out string first, out string last)
+        {
+            first = "Unknown";
+            last = "User";
+            if (string.IsNullOrWhiteSpace(displayName))
+                return;
+
+            int parsed = Util.ParseAvatarName(displayName, out string f, out string l, out _);
+            if (parsed >= 1 && !string.IsNullOrWhiteSpace(f))
+                first = f;
+            if (parsed >= 2 && !string.IsNullOrWhiteSpace(l) && !l.StartsWith('@'))
+                last = l;
+        }
+
+        /// <summary>
+        /// Resolve a sender HomeURI from optional HG IM XML-RPC fields and/or an
+        /// HG-style from-name ("First.Last @host:port").
+        /// </summary>
+        public static string ResolveSenderHomeURI(string homeUriField, string uuiField, string fromAgentName)
+        {
+            if (!string.IsNullOrWhiteSpace(uuiField)
+                    && Util.ParseFullUniversalUserIdentifier(uuiField, out _, out string uuiHome, out _, out _)
+                    && !string.IsNullOrWhiteSpace(uuiHome))
+            {
+                OSHHTPHost uuiHost = new(uuiHome);
+                if (uuiHost.IsValidHost)
+                    return uuiHost.URI;
+            }
+
+            if (!string.IsNullOrWhiteSpace(homeUriField))
+            {
+                OSHHTPHost homeHost = new(homeUriField);
+                if (homeHost.IsValidHost)
+                    return homeHost.URI;
+            }
+
+            if (!string.IsNullOrWhiteSpace(fromAgentName)
+                    && Util.ParseAvatarName(fromAgentName, out _, out _, out string nameHome) == 3
+                    && !string.IsNullOrWhiteSpace(nameHome))
+            {
+                OSHHTPHost nameHost = new(nameHome);
+                if (nameHost.IsValidHost)
+                    return nameHost.URI;
+            }
+
+            return string.Empty;
         }
     }
 }
