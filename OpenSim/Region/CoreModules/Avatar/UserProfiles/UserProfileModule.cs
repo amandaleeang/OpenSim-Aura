@@ -124,7 +124,8 @@ namespace OpenSim.Region.CoreModules.Avatar.UserProfiles
                 {
                     ScenePresence p = req.presence;
 
-                    bool foreign = GetUserProfileServerURI(req.agent, out string serverURI);
+                    bool foreign;
+                    string serverURI;
 
                     // Self-profile for HG visitor: circuit ServiceURLs is authoritative
                     // (UserManagement can mis-classify or lack ProfileServerURI for the visitor).
@@ -139,15 +140,12 @@ namespace OpenSim.Region.CoreModules.Avatar.UserProfiles
                                 "[PROFILES]: Self-profile for HG visitor {0} via circuit ProfileServerURI {1}",
                                 client.Name, serverURI);
                         }
+                        else
+                            foreign = GetUserProfileServerURI(req.agent, out serverURI);
                     }
-
-                    // HG visitor looking at friends never seen on this grid: no HomeURL for target.
-                    // Fall back to requester's home ProfileServerURI / get_server_urls(target).
-                    if (string.IsNullOrEmpty(serverURI) && client is not null)
+                    else
                     {
-                        serverURI = ResolveProfileURIViaRequester(client, req.agent);
-                        if (!string.IsNullOrEmpty(serverURI))
-                            foreign = true;
+                        ResolveTargetProfileURI(client, req.agent, out serverURI, out foreign);
                     }
                     bool ok  = !string.IsNullOrEmpty(serverURI);
                     if (!ok)
@@ -599,8 +597,7 @@ namespace OpenSim.Region.CoreModules.Avatar.UserProfiles
                 }
             }
 
-            GetUserProfileServerURI(targetID, out string serverURI);
-            if(string.IsNullOrWhiteSpace(serverURI))
+            if (!ResolveTargetProfileURI(remoteClient, targetID, out string serverURI, out _))
             {
                 remoteClient.SendAvatarClassifiedReply(targetID, classifieds);
                 return;
@@ -699,8 +696,7 @@ namespace OpenSim.Region.CoreModules.Avatar.UserProfiles
                 }
             }
 
-            bool foreign = GetUserProfileServerURI(target, out string serverURI);
-            if(string.IsNullOrWhiteSpace(serverURI))
+            if (!ResolveTargetProfileURI(remoteClient, target, out string serverURI, out bool foreign))
             {
                 return;
             }
@@ -961,8 +957,7 @@ namespace OpenSim.Region.CoreModules.Avatar.UserProfiles
                 }
             }
 
-            GetUserProfileServerURI(targetId, out string serverURI);
-            if(string.IsNullOrWhiteSpace(serverURI))
+            if (!ResolveTargetProfileURI(remoteClient, targetId, out string serverURI, out _))
             {
                 remoteClient.SendAvatarPicksReply(targetId, picks);
                 return;
@@ -1098,8 +1093,7 @@ namespace OpenSim.Region.CoreModules.Avatar.UserProfiles
                 }
             }
 
-            bool foreign =  GetUserProfileServerURI (targetID, out string serverURI);
-            if(string.IsNullOrWhiteSpace(serverURI))
+            if (!ResolveTargetProfileURI(remoteClient, targetID, out string serverURI, out bool foreign))
                 return;
 
             UserProfilePick pick = new()
@@ -1944,23 +1938,39 @@ namespace OpenSim.Region.CoreModules.Avatar.UserProfiles
             if (!m_userManagementModule.IsLocalGridUser(userID))
             {
                 serverURI = m_userManagementModule.GetUserServerURL(userID, "ProfileServerURI", out bool failed);
-                if (failed || string.IsNullOrEmpty(serverURI))
+                if ((failed || !IsUsableJsonRpcProfileHost(serverURI)))
                 {
-                    // HomeURI from cache / UserManagement, then ProfileServerURI via get_server_urls on home
-                    string home = m_userManagementModule.GetUserHomeURL(userID, out bool homeFail);
-                    if (!homeFail && !string.IsNullOrEmpty(home))
+                    // HomeURL is already known from HG login / CreatorData even when get_server_urls
+                    // failed or omitted ProfileServerURI. Standalone grids serve profiles on HomeURI.
+                    string home = m_userManagementModule.GetUserHomeURL(userID);
+                    if (!string.IsNullOrEmpty(home))
                     {
-                        // Force a fresh ServiceURLs pull when ProfileServerURI was missing from a partial cache
-                        try
+                        if (!failed)
                         {
-                            UserAgentServiceConnector uConn = new(home);
-                            Dictionary<string, object> urls = uConn.GetServerURLs(userID);
-                            if (urls != null && urls.TryGetValue("ProfileServerURI", out object purl) && purl != null)
-                                serverURI = purl.ToString();
+                            try
+                            {
+                                UserAgentServiceConnector uConn = new(home);
+                                Dictionary<string, object> urls = uConn.GetServerURLs(userID);
+                                if (urls != null && urls.TryGetValue("ProfileServerURI", out object purl) && purl != null
+                                        && IsUsableJsonRpcProfileHost(purl.ToString()))
+                                    serverURI = purl.ToString();
+                            }
+                            catch (Exception e)
+                            {
+                                m_log.Debug($"[PROFILES]: GetServerURLs for profile URI failed for {userID}: {e.Message}");
+                            }
                         }
-                        catch (Exception e)
+
+                        if (!IsUsableJsonRpcProfileHost(serverURI))
                         {
-                            m_log.Debug($"[PROFILES]: GetServerURLs for profile URI failed for {userID}: {e.Message}");
+                            OSHHTPHost homeHost = new(home);
+                            if (homeHost.IsValidHost)
+                            {
+                                serverURI = homeHost.URIwEndSlash;
+                                m_log.DebugFormat(
+                                    "[PROFILES]: Using HomeURL {0} as profile host for {1}",
+                                    serverURI, userID);
+                            }
                         }
                     }
                 }
@@ -2001,16 +2011,41 @@ namespace OpenSim.Region.CoreModules.Avatar.UserProfiles
         }
 
         /// <summary>
-        /// When the target is unknown to this grid (typical: HG visitor opens a same-home friend
-        /// who never visited here), ask the requester's home for the target's ProfileServerURI,
-        /// or use the requester's own ProfileServerURI (same-grid friends).
+        /// Profile host for target. Uses local/UserManagement knowledge first; if the target
+        /// is unknown here, ask the requester's home for their UUI (home URL) and fetch from
+        /// that home. Never uses the requester's profile host unless get_uui shows the target
+        /// lives on the same grid.
+        /// </summary>
+        bool ResolveTargetProfileURI(IClientAPI requester, UUID targetID, out string serverURI, out bool foreign)
+        {
+            foreign = GetUserProfileServerURI(targetID, out serverURI);
+            if (!string.IsNullOrWhiteSpace(serverURI))
+                return true;
+
+            if (requester is not null)
+            {
+                serverURI = ResolveProfileURIViaRequester(requester, targetID);
+                if (!string.IsNullOrWhiteSpace(serverURI))
+                {
+                    foreign = true;
+                    return true;
+                }
+            }
+
+            serverURI = string.Empty;
+            return false;
+        }
+
+        /// <summary>
+        /// When the target is unknown to this grid (typical: HG visitor opens a friend who
+        /// never visited here), ask the requester's home get_uui for the target's home URL,
+        /// seed UserManagement, then take ProfileServerURI from the target's home.
         /// </summary>
         string ResolveProfileURIViaRequester(IClientAPI requester, UUID targetID)
         {
             if (requester is null || targetID.IsZero())
                 return string.Empty;
 
-            // Same person
             if (requester.AgentId.Equals(targetID))
             {
                 GetUserProfileServerURI(targetID, out string selfUri);
@@ -2020,67 +2055,97 @@ namespace OpenSim.Region.CoreModules.Avatar.UserProfiles
             try
             {
                 AgentCircuitData circuit = Scene?.AuthenticateHandler?.GetAgentCircuitData(requester.CircuitCode);
-                if (circuit?.ServiceURLs is null)
-                    return string.Empty;
 
                 string homeUri = null;
-                if (circuit.ServiceURLs.TryGetValue("HomeURI", out object hobj) && hobj != null)
-                    homeUri = hobj.ToString();
+                string requesterProfileUri = null;
+                if (circuit?.ServiceURLs is not null)
+                {
+                    if (circuit.ServiceURLs.TryGetValue("HomeURI", out object hobj) && hobj != null)
+                        homeUri = hobj.ToString();
+                    if (circuit.ServiceURLs.TryGetValue("ProfileServerURI", out object pobj) && pobj != null)
+                        requesterProfileUri = pobj.ToString();
+                }
                 if (string.IsNullOrWhiteSpace(homeUri))
                     homeUri = m_userManagementModule.GetUserHomeURL(requester.AgentId);
 
-                // Prefer explicit profile URL from requester's ServiceURLs (same home grid profile host)
-                if (circuit.ServiceURLs.TryGetValue("ProfileServerURI", out object pobj) && pobj != null)
+                if (string.IsNullOrWhiteSpace(homeUri))
                 {
-                    string puri = pobj.ToString();
-                    if (!string.IsNullOrWhiteSpace(puri))
-                    {
-                        // Ask home get_server_urls(target) first so Holoneon friends of OSGrid users
-                        // still resolve if home knows them; fall back to requester's ProfileServerURI
-                        // for same-grid friends never registered on home's UAS as separate SRV set.
-                        if (!string.IsNullOrWhiteSpace(homeUri))
-                        {
-                            try
-                            {
-                                UserAgentServiceConnector uConn = new(homeUri);
-                                Dictionary<string, object> urls = uConn.GetServerURLs(targetID);
-                                if (urls != null && urls.TryGetValue("ProfileServerURI", out object tprof) && tprof != null
-                                        && !string.IsNullOrWhiteSpace(tprof.ToString()))
-                                {
-                                    m_log.DebugFormat(
-                                        "[PROFILES]: Resolved profile URI for {0} via requester home get_server_urls → {1}",
-                                        targetID, tprof);
-                                    return tprof.ToString();
-                                }
-                            }
-                            catch (Exception e)
-                            {
-                                m_log.Debug($"[PROFILES]: requester-home get_server_urls({targetID}) failed: {e.Message}");
-                            }
-                        }
-
-                        m_log.DebugFormat(
-                            "[PROFILES]: Using requester ProfileServerURI {0} for unknown target {1}",
-                            puri, targetID);
-                        return puri;
-                    }
+                    m_log.DebugFormat(
+                        "[PROFILES]: No HomeURI for requester {0}; cannot resolve unknown target {1}",
+                        requester.AgentId, targetID);
+                    return string.Empty;
                 }
 
-                if (!string.IsNullOrWhiteSpace(homeUri))
+                string uui;
+                try
                 {
-                    try
-                    {
-                        UserAgentServiceConnector uConn = new(homeUri);
-                        Dictionary<string, object> urls = uConn.GetServerURLs(targetID);
-                        if (urls != null && urls.TryGetValue("ProfileServerURI", out object tprof) && tprof != null
-                                && !string.IsNullOrWhiteSpace(tprof.ToString()))
-                            return tprof.ToString();
-                    }
-                    catch (Exception e)
-                    {
-                        m_log.Debug($"[PROFILES]: requester-home get_server_urls({targetID}) failed: {e.Message}");
-                    }
+                    UserAgentServiceConnector uConn = new(homeUri);
+                    uui = uConn.GetUUI(requester.AgentId, targetID);
                 }
+                catch (Exception e)
+                {
+                    m_log.Debug($"[PROFILES]: requester-home get_uui({requester.AgentId},{targetID}) failed: {e.Message}");
+                    return string.Empty;
+                }
+
+                if (string.IsNullOrWhiteSpace(uui))
+                {
+                    m_log.DebugFormat(
+                        "[PROFILES]: Requester home {0} does not know target {1} (not a friend / not local)",
+                        homeUri, targetID);
+                    return string.Empty;
+                }
+
+                if (!Util.ParseUniversalUserIdentifier(uui, out UUID uid, out string friendHome, out string first, out string last)
+                        || uid.IsZero())
+                {
+                    m_log.DebugFormat("[PROFILES]: Could not parse UUI from requester home for {0}: {1}", targetID, uui);
+                    return string.Empty;
+                }
+
+                if (string.IsNullOrWhiteSpace(friendHome))
+                {
+                    m_log.DebugFormat("[PROFILES]: UUI for {0} has no home URL: {1}", targetID, uui);
+                    return string.Empty;
+                }
+
+                OSHHTPHost friendHost = new(friendHome);
+                if (!friendHost.IsValidHost)
+                {
+                    m_log.DebugFormat("[PROFILES]: UUI home for {0} is not a valid host: {1}", targetID, friendHome);
+                    return string.Empty;
+                }
+
+                if (string.IsNullOrWhiteSpace(first))
+                    first = "Unknown";
+                if (string.IsNullOrWhiteSpace(last))
+                    last = "User";
+
+                m_userManagementModule.AddUser(targetID, first, last, friendHost.URI);
+
+                GetUserProfileServerURI(targetID, out string serverURI);
+                if (IsUsableJsonRpcProfileHost(serverURI))
+                {
+                    m_log.DebugFormat(
+                        "[PROFILES]: Resolved profile URI for {0} via requester home get_uui home={1} → {2}",
+                        targetID, friendHost.URI, serverURI);
+                    return serverURI;
+                }
+
+                bool sameHome = SameHomeHost(friendHome, homeUri);
+                if (sameHome && IsUsableJsonRpcProfileHost(requesterProfileUri))
+                {
+                    m_log.DebugFormat(
+                        "[PROFILES]: Same-home friend {0}; using requester ProfileServerURI {1}",
+                        targetID, requesterProfileUri);
+                    return requesterProfileUri;
+                }
+
+                // Standalone grids often serve JSON-RPC profiles on HomeURI
+                m_log.DebugFormat(
+                    "[PROFILES]: No JSON-RPC ProfileServerURI advertised for {0}; using home {1} as profile host",
+                    targetID, friendHost.URIwEndSlash);
+                return friendHost.URIwEndSlash;
             }
             catch (Exception e)
             {
@@ -2088,6 +2153,24 @@ namespace OpenSim.Region.CoreModules.Avatar.UserProfiles
             }
 
             return string.Empty;
+        }
+
+        static bool SameHomeHost(string a, string b)
+        {
+            if (string.IsNullOrWhiteSpace(a) || string.IsNullOrWhiteSpace(b))
+                return false;
+            OSHHTPHost ha = new(a);
+            OSHHTPHost hb = new(b);
+            return ha.IsValidHost && hb.IsValidHost && ha.Equals(hb);
+        }
+
+        static bool IsUsableJsonRpcProfileHost(string uri)
+        {
+            if (string.IsNullOrWhiteSpace(uri))
+                return false;
+            if (uri.Contains("profile.php", StringComparison.OrdinalIgnoreCase))
+                return false;
+            return true;
         }
 
         void cacheForeignImage(UUID agent, UUID imageID)
