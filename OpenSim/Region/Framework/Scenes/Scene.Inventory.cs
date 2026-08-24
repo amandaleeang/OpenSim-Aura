@@ -884,7 +884,7 @@ namespace OpenSim.Region.Framework.Scenes
         /// The inventory folder copy given, null if the copy was unsuccessful
         /// </returns>
         public virtual InventoryFolderBase GiveInventoryFolder(IClientAPI client,
-            UUID recipientId, UUID senderId, UUID folderId, UUID recipientParentFolderId)
+            UUID recipientId, UUID senderId, UUID folderId, UUID recipientParentFolderId, bool prefetchAssets = true)
         {
             //// Retrieve the folder from the sender
             InventoryFolderBase folder = InventoryService.GetFolder(senderId, folderId);
@@ -912,6 +912,9 @@ namespace OpenSim.Region.Framework.Scenes
                 }
             }
 
+            if (prefetchAssets)
+                PrefetchGiveFolderAssets(senderId, recipientId, folderId);
+
             UUID newFolderId = UUID.Random();
             InventoryFolderBase newFolder = new(
                     newFolderId, folder.Name, recipientId, folder.Type, recipientParentFolderId, folder.Version);
@@ -932,7 +935,7 @@ namespace OpenSim.Region.Framework.Scenes
 
             foreach (InventoryFolderBase childFolder in contents.Folders)
             {
-                GiveInventoryFolder(client, recipientId, senderId, childFolder.ID, newFolder.ID);
+                GiveInventoryFolder(client, recipientId, senderId, childFolder.ID, newFolder.ID, prefetchAssets: false);
             }
 
             return newFolder;
@@ -970,6 +973,8 @@ namespace OpenSim.Region.Framework.Scenes
                 }
             }
 
+            PrefetchGiveFolderAssets(senderId, recipientId, folderId);
+
             UUID newFolderId = UUID.Random();
             InventoryFolderBase newFolder = new(
                     newFolderId, folder.Name, recipientId, folder.Type, recipientParentFolderId, folder.Version);
@@ -999,10 +1004,49 @@ namespace OpenSim.Region.Framework.Scenes
 
             foreach (InventoryFolderBase childFolder in contents.Folders)
             {
-                GiveInventoryFolder(client, recipientId, senderId, childFolder.ID, newFolder.ID);
+                GiveInventoryFolder(client, recipientId, senderId, childFolder.ID, newFolder.ID, prefetchAssets: false);
             }
 
             return newFolder;
+        }
+
+        private void PrefetchGiveFolderAssets(UUID senderId, UUID recipientId, UUID folderId)
+        {
+            IInventoryAccessModule invAccess = RequestModuleInterface<IInventoryAccessModule>();
+            if (invAccess is null)
+                return;
+
+            List<UUID> assetIDs = new();
+            CollectGiveFolderAssetIDs(senderId, folderId, assetIDs);
+            if (assetIDs.Count == 0)
+                return;
+
+            invAccess.FetchItemAssets(senderId, assetIDs);
+            invAccess.PostItemAssets(recipientId, assetIDs);
+        }
+
+        private void CollectGiveFolderAssetIDs(UUID senderId, UUID folderId, List<UUID> assetIDs)
+        {
+            InventoryCollection contents = InventoryService.GetFolderContent(senderId, folderId);
+            if (contents is null)
+                return;
+
+            if (contents.Items is not null)
+            {
+                foreach (InventoryItemBase item in contents.Items)
+                {
+                    if (item.AssetID.IsNotZero()
+                            && item.AssetType != (int)AssetType.Link
+                            && item.AssetType != (int)AssetType.LinkFolder)
+                        assetIDs.Add(item.AssetID);
+                }
+            }
+
+            if (contents.Folders is not null)
+            {
+                foreach (InventoryFolderBase childFolder in contents.Folders)
+                    CollectGiveFolderAssetIDs(senderId, childFolder.ID, assetIDs);
+            }
         }
 
         public void CopyInventoryItem(IClientAPI remoteClient, uint callbackID, UUID oldAgentID, UUID oldItemID,
@@ -1659,19 +1703,28 @@ namespace OpenSim.Region.Framework.Scenes
             InventoryFolderBase newFolder = new(newFolderID, category, destID, -1, rootFolder.ID, rootFolder.Version);
             InventoryService.AddFolder(newFolder);
 
+            List<UUID> postedAssets = new();
             foreach (UUID itemID in items)
             {
                 InventoryItemBase agentItem = CreateAgentInventoryItemFromTask(destID, host, itemID, out string message);
                 if (agentItem is not null)
                 {
                     agentItem.Folder = newFolderID;
-                    AddInventoryItem(agentItem);
+                    AddInventoryItem(agentItem, false);
+                    if (agentItem.AssetID.IsNotZero())
+                        postedAssets.Add(agentItem.AssetID);
                     RemoveNonCopyTaskItemFromPrim(host, itemID);
                 }
                 else
                 {
                     remoteClient.SendAgentAlertMessage(message, false);
                 }
+            }
+
+            if (postedAssets.Count > 0)
+            {
+                IInventoryAccessModule invAccess = RequestModuleInterface<IInventoryAccessModule>();
+                invAccess?.PostItemAssets(destID, postedAssets);
             }
 
             if(sendUpdates)
@@ -1805,7 +1858,7 @@ namespace OpenSim.Region.Framework.Scenes
                     $"[PRIM INVENTORY]: Update prim {primLocalID} with item {item.Name} requested by {remoteClient.Name}");
 
                 IInventoryAccessModule invAccess = RequestModuleInterface<IInventoryAccessModule>();
-                invAccess?.FetchRemoteHGItemAssets(remoteClient.AgentId, item);
+                invAccess?.FetchItemAssets(remoteClient.AgentId, item);
 
                 part.SendPropertiesToClient(remoteClient);
                 if (!Permissions.BypassPermissions())

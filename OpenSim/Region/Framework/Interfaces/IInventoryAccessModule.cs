@@ -127,7 +127,28 @@ namespace OpenSim.Region.Framework.Interfaces
             UUID RayTargetID, byte BypassRayCast, bool RayEndIsIntersection,
             bool RezSelected, bool RemoveItem, UUID fromTaskID, bool attachment);
 
-        void FetchRemoteHGItemAssets(UUID OwnerID, InventoryItemBase item);
+        /// <summary>
+        /// Fetch nested assets for one inventory item.
+        /// Foreign owners: pull from the user's home asset server.
+        /// Local owners: gather via the local IAssetService (Flotsam / Robust).
+        /// </summary>
+        void FetchItemAssets(UUID OwnerID, InventoryItemBase item);
+
+        /// <summary>
+        /// Fetch nested assets for several inventory roots.
+        /// Foreign owners: pull from the user's home asset server.
+        /// Local owners: gather via the local IAssetService (Flotsam / Robust).
+        /// No-op when the list is empty.
+        /// </summary>
+        void FetchItemAssets(UUID ownerID, IList<UUID> assetIDs);
+
+        /// <summary>
+        /// Post or prefetch nested assets for several inventory roots.
+        /// Foreign owners: push to the user's home asset server.
+        /// Local owners: gather via the local IAssetService (Flotsam / Robust).
+        /// No-op when the list is empty.
+        /// </summary>
+        void PostItemAssets(UUID ownerID, IList<UUID> assetIDs);
 
         void TransferInventoryAssets(InventoryItemBase item, UUID sender, UUID receiver);
 

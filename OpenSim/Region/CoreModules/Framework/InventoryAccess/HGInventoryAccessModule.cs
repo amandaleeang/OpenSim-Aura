@@ -97,13 +97,14 @@ namespace OpenSim.Region.CoreModules.Framework.InventoryAccess
                         m_CheckSeparateAssets = thisModuleConfig.GetBoolean("CheckSeparateAssets", false);
                         m_LocalAssetsURL = thisModuleConfig.GetString("RegionHGAssetServerURI", string.Empty);
                         m_LocalAssetsURL = m_LocalAssetsURL.Trim('/');
+                        ApplyAssetGatherConfig(thisModuleConfig,
+                            ref m_concurrentAssetGather, ref m_gatherConcurrent, ref m_gatherTimeoutSec);
                     }
                     else
                         m_log.Warn("[HG INVENTORY ACCESS MODULE]: HGInventoryAccessModule configs not found");
 
                     m_bypassPermissions = !Util.GetConfigVarFromSections<bool>(source, "serverside_object_permissions",
                                             new string[] { "Startup", "Permissions" }, true);
-
                 }
             }
         }
@@ -120,7 +121,11 @@ namespace OpenSim.Region.CoreModules.Framework.InventoryAccess
                 return;
             }
 
-            m_assMapper = new HGAssetMapper(scene, m_thisGridInfo.HomeURLNoEndSlash);
+            m_assMapper = new HGAssetMapper(scene, m_thisGridInfo.HomeURLNoEndSlash,
+                m_concurrentAssetGather, m_gatherConcurrent, m_gatherTimeoutSec);
+            m_log.DebugFormat(
+                "[HG INVENTORY ACCESS MODULE]: HGAssetMapper concurrent={0} wave={1} timeout={2}s",
+                m_concurrentAssetGather, m_gatherConcurrent, m_gatherTimeoutSec);
 
             scene.EventManager.OnNewInventoryItemUploadComplete += PostInventoryAsset;
             scene.EventManager.OnTeleportStart += TeleportStart;
@@ -330,10 +335,8 @@ namespace OpenSim.Region.CoreModules.Framework.InventoryAccess
                 return null;
             }
 
-            if (IsForeignUser(remoteClient.AgentId, out string userAssetServer))
-            {
+            if (IsForeignUser(remoteClient.AgentId, out string userAssetServer) && userAssetServer.Length > 0)
                 m_assMapper.Get(item.AssetID, remoteClient.AgentId, userAssetServer);
-            }
 
             // OK, we're done fetching. Pass it up to the default RezObject
             SceneObjectGroup sog = base.RezObject(remoteClient, itemID, groupID, RayEnd, RayStart, RayTargetID, BypassRayCast, RayEndIsIntersection,
@@ -343,7 +346,7 @@ namespace OpenSim.Region.CoreModules.Framework.InventoryAccess
 
         }
 
-        public override void FetchRemoteHGItemAssets(UUID OwnerID, InventoryItemBase item)
+        public override void FetchItemAssets(UUID OwnerID, InventoryItemBase item)
         {
             if(item is null || item.AssetID.IsZero())
                 return;
@@ -353,8 +356,34 @@ namespace OpenSim.Region.CoreModules.Framework.InventoryAccess
                 return;
             }
 
-            if (IsForeignUser(OwnerID, out string userAssetServer))
+            if (IsForeignUser(OwnerID, out string userAssetServer) && userAssetServer.Length > 0)
                 m_assMapper.Get(item.AssetID, OwnerID, userAssetServer);
+            else
+                base.FetchItemAssets(OwnerID, item);
+        }
+
+        public override void FetchItemAssets(UUID ownerID, IList<UUID> assetIDs)
+        {
+            if (assetIDs is null || assetIDs.Count == 0)
+                return;
+            if (IsForeignUser(ownerID, out string userAssetServer) && userAssetServer.Length > 0)
+                m_assMapper.Get(assetIDs, ownerID, userAssetServer);
+            else
+                base.FetchItemAssets(ownerID, assetIDs);
+        }
+
+        public override void PostItemAssets(UUID ownerID, IList<UUID> assetIDs)
+        {
+            if (assetIDs is null || assetIDs.Count == 0)
+                return;
+            if (IsForeignUser(ownerID, out string userAssetServer) && userAssetServer.Length > 0)
+            {
+                if (!m_OutboundPermission)
+                    return;
+                m_assMapper.Post(assetIDs, ownerID, userAssetServer);
+            }
+            else
+                base.PostItemAssets(ownerID, assetIDs);
         }
 
         public override void TransferInventoryAssets(InventoryItemBase item, UUID sender, UUID receiver)
@@ -365,9 +394,12 @@ namespace OpenSim.Region.CoreModules.Framework.InventoryAccess
             isForeignSender = IsForeignUser(sender, out senderAssetServer);
             isForeignReceiver = IsForeignUser(receiver, out receiverAssetServer);
 
-            // They're both local. Nothing to do.
+            // Both local: prefetch nested assets from the local grid asset service.
             if (!isForeignSender && !isForeignReceiver)
+            {
+                base.TransferInventoryAssets(item, sender, receiver);
                 return;
+            }
 
             // At least one of them is foreign.
             // If both users have the same asset server, no need to transfer the asset

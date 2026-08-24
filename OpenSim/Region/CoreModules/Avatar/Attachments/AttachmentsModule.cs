@@ -803,6 +803,26 @@ namespace OpenSim.Region.CoreModules.Avatar.Attachments
                 m_log.Debug(
                     $"[ATTACHMENTS MODULE]: Rezzing {rezlist.Count} attachments from inventory for {sp.Name} in {m_scene.Name}");
 
+            if (m_invAccessModule is not null && rezlist.Count > 1)
+            {
+                UUID[] itemIDs = new UUID[rezlist.Count];
+                for (int i = 0; i < rezlist.Count; i++)
+                    itemIDs[i] = rezlist[i].Key;
+
+                InventoryItemBase[] attItems = m_scene.InventoryService.GetMultipleItems(sp.UUID, itemIDs);
+                if (attItems is not null)
+                {
+                    List<UUID> assetIDs = new(attItems.Length);
+                    foreach (InventoryItemBase attItem in attItems)
+                    {
+                        if (attItem is not null && attItem.AssetID.IsNotZero())
+                            assetIDs.Add(attItem.AssetID);
+                    }
+                    if (assetIDs.Count > 0)
+                        m_invAccessModule.FetchItemAssets(sp.UUID, assetIDs);
+                }
+            }
+
             foreach (KeyValuePair<UUID, uint> rez in rezlist)
             {
                 RezSingleAttachmentFromInventory(sp, rez.Key, rez.Value);
