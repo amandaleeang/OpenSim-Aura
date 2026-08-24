@@ -32,6 +32,7 @@ using System;
 using System.Collections.Generic;
 using System.Collections.Concurrent;
 using System.Reflection;
+using System.Threading;
 using OpenSim.Framework;
 
 using OpenSim.Server.Base;
@@ -50,6 +51,8 @@ namespace OpenSim.Region.CoreModules.ServiceConnectorsOut.Inventory
                 MethodBase.GetCurrentMethod().DeclaringType);
 
         private static bool m_Enabled = false;
+        private int m_folderFetchWave = 8;
+        private int m_folderFetchTimeoutMs = 30000;
 
         private const int CONNECTORS_CACHE_EXPIRE = 60000; // 1 minute
 
@@ -127,6 +130,22 @@ namespace OpenSim.Region.CoreModules.ServiceConnectorsOut.Inventory
                     {
                         m_log.Error("[HG INVENTORY CONNECTOR]: Can't load local inventory service");
                         return;
+                    }
+
+                    IConfig transferConfig = source.Configs["EntityTransfer"];
+                    if (transferConfig != null)
+                    {
+                        m_folderFetchWave = transferConfig.GetInt("UuidGatherConcurrent", 8);
+                        if (transferConfig.Contains("HGUuidGatherConcurrent"))
+                            m_folderFetchWave = transferConfig.GetInt("HGUuidGatherConcurrent");
+                        if (m_folderFetchWave < 1)
+                            m_folderFetchWave = 1;
+                        int timeoutSec = transferConfig.GetInt("UuidGatherTimeout", 30);
+                        if (transferConfig.Contains("HGUuidGatherTimeout"))
+                            timeoutSec = transferConfig.GetInt("HGUuidGatherTimeout");
+                        if (timeoutSec < 1)
+                            timeoutSec = 1;
+                        m_folderFetchTimeoutMs = timeoutSec * 1000;
                     }
 
                     m_Enabled = true;
@@ -360,12 +379,110 @@ namespace OpenSim.Region.CoreModules.ServiceConnectorsOut.Inventory
             if (invURL is null) // not there, forward to local inventory connector to resolve
                 return m_LocalGridInventoryService.GetMultipleFoldersContent(userID, folderIDs);
 
+            if (folderIDs is null || folderIDs.Length == 0)
+                return Array.Empty<InventoryCollection>();
+
             InventoryCollection[] coll = new InventoryCollection[folderIDs.Length];
-            int i = 0;
-            foreach (UUID fid in folderIDs)
-                coll[i++] = GetFolderContent(userID, fid);
+            List<int> missIdx = new();
+            List<UUID> missIds = new();
+
+            for (int i = 0; i < folderIDs.Length; i++)
+            {
+                InventoryCollection cached = m_Cache.GetFolderContent(userID, folderIDs[i]);
+                if (cached != null)
+                    coll[i] = cached;
+                else
+                {
+                    missIdx.Add(i);
+                    missIds.Add(folderIDs[i]);
+                }
+            }
+
+            if (missIds.Count == 0)
+                return coll;
+
+            IInventoryService connector = GetConnector(invURL);
+            if (connector is null)
+                return coll;
+
+            InventoryCollection[] fetched = null;
+            try
+            {
+                fetched = connector.GetMultipleFoldersContent(userID, missIds.ToArray());
+            }
+            catch (Exception e)
+            {
+                m_log.DebugFormat("[HG INVENTORY CONNECTOR]: GetMultipleFoldersContent batch failed: {0}", e.Message);
+            }
+
+            bool batchOk = fetched is not null && fetched.Length == missIds.Count;
+            if (batchOk)
+            {
+                int got = 0;
+                for (int i = 0; i < fetched.Length; i++)
+                {
+                    if (fetched[i] is not null && !fetched[i].FolderID.IsZero())
+                        got++;
+                    coll[missIdx[i]] = fetched[i];
+                }
+                // Restricted HGInventoryService returns an empty array or all-null/zero folders.
+                if (got == 0 && missIds.Count > 0)
+                    batchOk = false;
+            }
+
+            if (!batchOk)
+            {
+                List<int> still = new();
+                for (int i = 0; i < missIdx.Count; i++)
+                {
+                    if (coll[missIdx[i]] is null)
+                        still.Add(missIdx[i]);
+                }
+                FetchFoldersInWaves(userID, folderIDs, coll, still);
+            }
 
             return coll;
+        }
+
+        private void FetchFoldersInWaves(UUID userID, UUID[] folderIDs, InventoryCollection[] coll, List<int> needIdx)
+        {
+            int offset = 0;
+            while (offset < needIdx.Count)
+            {
+                int n = Math.Min(m_folderFetchWave, needIdx.Count - offset);
+                Exception[] errors = new Exception[n];
+                ManualResetEventSlim[] done = new ManualResetEventSlim[n];
+                InventoryCollection[] got = new InventoryCollection[n];
+
+                for (int i = 0; i < n; i++)
+                {
+                    done[i] = new ManualResetEventSlim(false);
+                    int idx = i;
+                    int dest = needIdx[offset + i];
+                    UUID fid = folderIDs[dest];
+                    Util.FireAndForget(_ =>
+                    {
+                        try { got[idx] = GetFolderContent(userID, fid); }
+                        catch (Exception e) { errors[idx] = e; }
+                        finally { try { done[idx].Set(); } catch (ObjectDisposedException) { } }
+                    }, null, "HGInventoryBroker.GetFolderContent");
+                }
+
+                WaitHandle[] handles = new WaitHandle[n];
+                for (int i = 0; i < n; i++)
+                    handles[i] = done[i].WaitHandle;
+                WaitHandle.WaitAll(handles, m_folderFetchTimeoutMs);
+
+                for (int i = 0; i < n; i++)
+                {
+                    int dest = needIdx[offset + i];
+                    if (done[i].IsSet && errors[i] is null)
+                        coll[dest] = got[i];
+                    done[i].Dispose();
+                }
+
+                offset += n;
+            }
         }
 
         public List<InventoryItemBase> GetFolderItems(UUID userID, UUID folderID)
