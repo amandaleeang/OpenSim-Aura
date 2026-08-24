@@ -29,6 +29,7 @@ using System;
 using System.Collections.Generic;
 using System.Reflection;
 using System.Text;
+using System.Threading;
 
 using log4net;
 using OpenMetaverse;
@@ -50,15 +51,21 @@ namespace OpenSim.Region.CoreModules.Framework.InventoryAccess
 
         private Scene m_scene;
         private string m_HomeURI;
+        private readonly bool m_concurrent;
+        private readonly int m_waveSize;
+        private readonly int m_timeoutMs;
 
         #endregion
 
         #region Constructor
 
-        public HGAssetMapper(Scene scene, string homeURL)
+        public HGAssetMapper(Scene scene, string homeURL, bool concurrent = true, int waveSize = 8, int timeoutSec = 30)
         {
             m_scene = scene;
             m_HomeURI = homeURL;
+            m_concurrent = concurrent;
+            m_waveSize = waveSize < 1 ? 1 : waveSize;
+            m_timeoutMs = timeoutSec < 1 ? 1000 : timeoutSec * 1000;
         }
 
         #endregion
@@ -193,51 +200,85 @@ namespace OpenSim.Region.CoreModules.Framework.InventoryAccess
 
         public void Get(UUID assetID, UUID ownerID, string userAssetURL)
         {
-            // The act of gathering UUIDs downloads some assets from the remote server
-            // but not all...
-            if(string.IsNullOrEmpty(userAssetURL))
+            Get(new[] { assetID }, ownerID, userAssetURL);
+        }
+
+        public void Get(IEnumerable<UUID> assetIDs, UUID ownerID, string userAssetURL)
+        {
+            if (string.IsNullOrEmpty(userAssetURL))
             {
-                m_log.Debug($"[HG ASSET MAPPER]: Problems getting item asset {assetID}. Asset server unknown");
+                m_log.Debug("[HG ASSET MAPPER]: Problems getting item assets. Asset server unknown");
                 return;
             }
 
             HGUuidGatherer uuidGatherer = new(m_scene.AssetService, userAssetURL);
-            uuidGatherer.AddForInspection(assetID);
-            uuidGatherer.GatherAll();
-
-            m_log.Debug($"[HG ASSET MAPPER]: Preparing to get {uuidGatherer.GatheredUuids.Count} assets");
-            bool success = true;
-            foreach (UUID uuid in uuidGatherer.GatheredUuids.Keys)
+            UUID first = UUID.Zero;
+            int added = 0;
+            foreach (UUID id in assetIDs)
             {
-                if (FetchAsset(userAssetURL, uuid) == null)
-                    success = false;
+                if (id.IsZero())
+                    continue;
+                if (added == 0)
+                    first = id;
+                uuidGatherer.AddForInspection(id);
+                added++;
             }
-            if(uuidGatherer.FailedUUIDs.Count > 0)
-                success = false;
+            if (added == 0)
+                return;
 
-            // maybe all pieces got here...
-            if (!success)
-                m_log.Debug($"[HG ASSET MAPPER]: Problems getting item asset {assetID} from asset server {userAssetURL}");
+            if (m_concurrent)
+                uuidGatherer.GatherAllConcurrent(m_waveSize, m_timeoutMs);
             else
-                m_log.Debug($"[HG ASSET MAPPER]: Successfully got item asset {assetID} from asset server {userAssetURL}");
+            {
+                uuidGatherer.GatherAll();
+                foreach (UUID uuid in uuidGatherer.GatheredUuids.Keys)
+                    FetchAsset(userAssetURL, uuid);
+            }
+
+            bool success = uuidGatherer.FailedUUIDs.Count == 0;
+            if (!success)
+                m_log.Debug($"[HG ASSET MAPPER]: Problems getting {added} item asset(s) (first {first}) from asset server {userAssetURL}");
+            else
+                m_log.Debug($"[HG ASSET MAPPER]: Successfully got {added} item asset(s) (first {first}, gathered {uuidGatherer.GatheredUuids.Count}) from asset server {userAssetURL}");
         }
 
         public void Post(UUID assetID, UUID ownerID, string userAssetURL)
         {
-            AssetBase asset = m_scene.AssetService.Get(assetID.ToString());
-            if (asset == null)
+            Post(new[] { assetID }, ownerID, userAssetURL);
+        }
+
+        public void Post(IEnumerable<UUID> assetIDs, UUID ownerID, string userAssetURL)
+        {
+            if (string.IsNullOrEmpty(userAssetURL))
+                return;
+
+            HGUuidGatherer uuidGatherer = new HGUuidGatherer(m_scene.AssetService, string.Empty);
+            UUID first = UUID.Zero;
+            int added = 0;
+            foreach (UUID id in assetIDs)
             {
-                m_log.DebugFormat("[HG ASSET MAPPER POST]: Something wrong with asset {0}, it could not be found", assetID);
+                if (id.IsZero())
+                    continue;
+                if (added == 0)
+                    first = id;
+                uuidGatherer.AddForInspection(id);
+                added++;
+            }
+            if (added == 0)
+                return;
+
+            m_log.DebugFormat("[HG ASSET MAPPER  POST]: Starting to send {0} asset(s) (first {1}) to asset server {2}", added, first, userAssetURL);
+
+            if (m_concurrent)
+                uuidGatherer.GatherAllConcurrent(m_waveSize, m_timeoutMs);
+            else
+                uuidGatherer.GatherAll(true);
+
+            if (uuidGatherer.GatheredUuids.Count == 0)
+            {
+                m_log.DebugFormat("[HG ASSET MAPPER POST]: Something wrong with asset {0}, it could not be found", first);
                 return;
             }
-            m_log.DebugFormat("[HG ASSET MAPPER  POST]: Starting to send asset {0} to asset server {1}", assetID, userAssetURL);
-
-            // Find all the embedded assets
-            HGUuidGatherer uuidGatherer = new HGUuidGatherer(m_scene.AssetService, string.Empty);
-            uuidGatherer.AddForInspection(asset.FullID);
-            uuidGatherer.GatherAll(true);
-
-            // Check which assets already exist in the destination server
 
             string url = userAssetURL;
             if (!url.EndsWith('/') && !url.EndsWith('='))
@@ -255,7 +296,7 @@ namespace OpenSim.Region.CoreModules.Framework.InventoryAccess
             }
             catch
             {
-                m_log.DebugFormat("[HG ASSET MAPPER POST]: Problems sending asset {0} to asset server {1}", assetID, userAssetURL);
+                m_log.DebugFormat("[HG ASSET MAPPER POST]: Problems sending asset {0} to asset server {1}", first, userAssetURL);
                 return;
             }
 
@@ -263,16 +304,13 @@ namespace OpenSim.Region.CoreModules.Framework.InventoryAccess
             i = 0;
             foreach (UUID id in uuidGatherer.GatheredUuids.Keys)
             {
-                if (exist[i])
+                if (exist != null && i < exist.Length && exist[i])
                     existSet.Add(id.ToString());
                 ++i;
             }
 
-            // Send only those assets which don't already exist in the destination server
-
-            bool success = true;
             var notFound = new List<string>();
-            var posted = new List<string>();
+            var toPost = new List<AssetBase>();
 
             foreach (UUID uuid in uuidGatherer.GatheredUuids.Keys)
             {
@@ -280,40 +318,50 @@ namespace OpenSim.Region.CoreModules.Framework.InventoryAccess
                 if (existSet.Contains(idstr))
                     continue;
 
-                asset = m_scene.AssetService.Get(idstr);
+                AssetBase asset = m_scene.AssetService.Get(idstr);
                 if (asset == null)
                 {
                     notFound.Add(idstr);
                     continue;
                 }
+                toPost.Add(asset);
+            }
 
-                try
-                {
-                    bool b = PostAsset(userAssetURL, asset, false);
-                    if(b)
-                        posted.Add(idstr);
-                    success &= b;
-                }
-                catch (Exception e)
-                {
-                    m_log.Error(
-                        string.Format(
-                            "[HG ASSET MAPPER POST]: Failed to post asset {0} (type {1}, length {2}) referenced from {3} to {4} with exception  ",
-                            asset.ID, asset.Type, asset.Data.Length, assetID, userAssetURL),
-                        e);
+            var posted = new List<string>();
+            bool success = true;
 
-                    // For debugging purposes for now we will continue to throw the exception up the stack as was already happening.  However, after
-                    // debugging we may want to simply report the failure if we can tell this is due to a failure
-                    // with a particular asset and not a destination network failure where all asset posts will fail (and
-                    // generate large amounts of log spam).
-                    throw;
+            if (toPost.Count > 0)
+            {
+                if (m_concurrent)
+                    success &= PostAssetWave(userAssetURL, toPost, first, posted);
+                else
+                {
+                    foreach (AssetBase asset in toPost)
+                    {
+                        try
+                        {
+                            bool b = PostAsset(userAssetURL, asset, false);
+                            if (b)
+                                posted.Add(asset.ID);
+                            success &= b;
+                        }
+                        catch (Exception e)
+                        {
+                            m_log.Error(
+                                string.Format(
+                                    "[HG ASSET MAPPER POST]: Failed to post asset {0} (type {1}, length {2}) referenced from {3} to {4} with exception  ",
+                                    asset.ID, asset.Type, asset.Data != null ? asset.Data.Length : 0, first, userAssetURL),
+                                e);
+                            throw;
+                        }
+                    }
                 }
             }
+
             StringBuilder sb = null;
             if (notFound.Count > 0)
             {
-                if (sb == null)
-                    sb = new StringBuilder(512);
+                sb = new StringBuilder(512);
                 i = notFound.Count - 1;
                 sb.Append("[HG ASSET MAPPER POST]: did not find embedded UUIDs as assets:\n\t");
                 for (int j = 0; j < notFound.Count; ++j)
@@ -327,11 +375,10 @@ namespace OpenSim.Region.CoreModules.Framework.InventoryAccess
             }
             if (existSet.Count > 0)
             {
-                if (sb == null) 
-                    sb = new StringBuilder(512);
+                sb ??= new StringBuilder(512);
                 i = existSet.Count;
                 sb.Append("[HG ASSET MAPPER POST]: embedded assets already at destination server:\n\t");
-                foreach (UUID id in existSet)
+                foreach (string id in existSet)
                 {
                     sb.Append(id);
                     if (--i > 0)
@@ -342,8 +389,7 @@ namespace OpenSim.Region.CoreModules.Framework.InventoryAccess
             }
             if (posted.Count > 0)
             {
-                if (sb == null) 
-                    sb = new StringBuilder(512);
+                sb ??= new StringBuilder(512);
                 i = posted.Count - 1;
                 sb.Append("[HG ASSET MAPPER POST]: Posted assets:\n\t");
                 for (int j = 0; j < posted.Count; ++j)
@@ -356,9 +402,78 @@ namespace OpenSim.Region.CoreModules.Framework.InventoryAccess
             }
 
             if (!success)
-                m_log.DebugFormat("[HG ASSET MAPPER POST]: Problems sending asset {0} to asset server {1}", assetID, userAssetURL);
+                m_log.DebugFormat("[HG ASSET MAPPER POST]: Problems sending asset {0} to asset server {1}", first, userAssetURL);
             else
-                m_log.DebugFormat("[HG ASSET MAPPER POST]: Successfully sent asset {0} to asset server {1}", assetID, userAssetURL);
+                m_log.DebugFormat("[HG ASSET MAPPER POST]: Successfully sent asset {0} to asset server {1}", first, userAssetURL);
+        }
+
+        /// <summary>
+        /// Post missing assets in waves of at most m_waveSize concurrent Stores.
+        /// Each worker copies the asset (PostAsset already copies) so instances are not shared across threads.
+        /// </summary>
+        private bool PostAssetWave(string userAssetURL, List<AssetBase> assets, UUID referencedFrom, List<string> posted)
+        {
+            bool success = true;
+            int offset = 0;
+            while (offset < assets.Count)
+            {
+                int n = Math.Min(m_waveSize, assets.Count - offset);
+                bool[] ok = new bool[n];
+                Exception[] errors = new Exception[n];
+                ManualResetEventSlim[] done = new ManualResetEventSlim[n];
+
+                for (int i = 0; i < n; i++)
+                {
+                    done[i] = new ManualResetEventSlim(false);
+                    int idx = i;
+                    AssetBase asset = assets[offset + i];
+                    Util.FireAndForget(_ =>
+                    {
+                        try { ok[idx] = PostAsset(userAssetURL, asset, false); }
+                        catch (Exception e) { errors[idx] = e; }
+                        finally { try { done[idx].Set(); } catch (ObjectDisposedException) { } }
+                    }, null, "HGAssetMapper.PostAsset");
+                }
+
+                WaitHandle[] handles = new WaitHandle[n];
+                for (int i = 0; i < n; i++)
+                    handles[i] = done[i].WaitHandle;
+                WaitHandle.WaitAll(handles, m_timeoutMs);
+
+                try
+                {
+                    for (int i = 0; i < n; i++)
+                    {
+                        AssetBase asset = assets[offset + i];
+                        if (!done[i].IsSet)
+                        {
+                            m_log.Debug($"[HG ASSET MAPPER POST]: Post of asset {asset.ID} timed out after {m_timeoutMs} ms");
+                            success = false;
+                        }
+                        else if (errors[i] != null)
+                        {
+                            m_log.Error(
+                                string.Format(
+                                    "[HG ASSET MAPPER POST]: Failed to post asset {0} (type {1}, length {2}) referenced from {3} to {4} with exception  ",
+                                    asset.ID, asset.Type, asset.Data != null ? asset.Data.Length : 0, referencedFrom, userAssetURL),
+                                errors[i]);
+                            throw errors[i];
+                        }
+                        else if (ok[i])
+                            posted.Add(asset.ID);
+                        else
+                            success = false;
+                    }
+                }
+                finally
+                {
+                    for (int i = 0; i < n; i++)
+                        done[i].Dispose();
+                }
+
+                offset += n;
+            }
+            return success;
         }
 
         #endregion
