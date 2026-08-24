@@ -433,7 +433,7 @@ namespace OpenSim.Region.OptionalModules.Avatar.Appearance
                                     sb.Append(cdl.ToString());
 
                                     uuidGatherer.AddForInspection(wi.AssetID);
-                                    uuidGatherer.GatherAll();
+                                    uuidGatherer.GatherAllConcurrent();
                                     string[] assetStrings
                                         = Array.ConvertAll<UUID, string>(uuidGatherer.GatheredUuids.Keys.ToArray(), u => u.ToString());
 
