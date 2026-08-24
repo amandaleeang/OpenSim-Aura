@@ -388,6 +388,10 @@ namespace OpenSim.Region.CoreModules.Avatar.InstantMessage
                     gim.ParentEstateID = ParentEstateID;
                     gim.Position = Position;
                     gim.binaryBucket = binaryBucket;
+                    gim.fromAgentHomeURI = GridInstantMessage.ResolveSenderHomeURI(
+                        requestData.ContainsKey("from_agent_home_uri") ? requestData["from_agent_home_uri"] as string : null,
+                        requestData.ContainsKey("from_agent_uui") ? requestData["from_agent_uui"] as string : null,
+                        fromAgentName);
 
                     // Trigger the Instant message in the scene.
                     foreach (Scene scene in m_Scenes)
@@ -687,6 +691,13 @@ namespace OpenSim.Region.CoreModules.Avatar.InstantMessage
             gim["binary_bucket"] = Convert.ToBase64String(msg.binaryBucket,Base64FormattingOptions.None);
             if (m_MessageKey != String.Empty)
                 gim["message_key"] = m_MessageKey;
+            if (!string.IsNullOrWhiteSpace(msg.fromAgentHomeURI))
+            {
+                gim["from_agent_home_uri"] = msg.fromAgentHomeURI;
+                string uui = msg.BuildFromAgentUUI();
+                if (!string.IsNullOrEmpty(uui))
+                    gim["from_agent_uui"] = uui;
+            }
             return gim;
         }
     }
