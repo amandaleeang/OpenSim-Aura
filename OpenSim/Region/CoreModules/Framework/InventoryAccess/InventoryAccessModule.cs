@@ -52,6 +52,10 @@ namespace OpenSim.Region.CoreModules.Framework.InventoryAccess
         protected bool m_Enabled = false;
         protected Scene m_Scene;
 
+        protected bool m_concurrentAssetGather = true;
+        protected int m_gatherConcurrent = 8;
+        protected int m_gatherTimeoutSec = 30;
+
         protected GridInfo m_thisGridInfo;
         protected IUserManagement m_UserManagement;
         protected IUserManagement UserManagementModule
@@ -89,7 +93,7 @@ namespace OpenSim.Region.CoreModules.Framework.InventoryAccess
 
                     InitialiseCommon(source);
 
-                    m_log.Info($"[INVENTORY ACCESS MODULE]: {Name} enabled.");
+                    m_log.Info($"[INVENTORY ACCESS MODULE]: {Name} enabled (concurrent={m_concurrentAssetGather} wave={m_gatherConcurrent} timeout={m_gatherTimeoutSec}s).");
                 }
             }
         }
@@ -102,6 +106,9 @@ namespace OpenSim.Region.CoreModules.Framework.InventoryAccess
         {
             IConfig inventoryConfig = source.Configs["Inventory"];
             CoalesceMultipleObjectsToInventory = inventoryConfig is null || inventoryConfig.GetBoolean("CoalesceMultipleObjectsToInventory", true);
+
+            ApplyAssetGatherConfig(source.Configs["EntityTransfer"],
+                ref m_concurrentAssetGather, ref m_gatherConcurrent, ref m_gatherTimeoutSec);
         }
 
         public virtual void PostInitialise()
@@ -512,6 +519,22 @@ namespace OpenSim.Region.CoreModules.Framework.InventoryAccess
             foreach (List<SceneObjectGroup> bundle in bundlesToCopy.Values)
                 copiedItems.Add(CopyBundleToInventory(action, folderID, bundle, remoteClient, asAttachment));
 
+            if (copiedItems.Count > 0)
+            {
+                InventoryFolderBase trash = m_Scene.InventoryService.GetFolderForType(copiedItems[0].Owner, FolderType.Trash);
+                List<UUID> assetIDs = new(copiedItems.Count);
+                foreach (InventoryItemBase copied in copiedItems)
+                {
+                    if (copied is null || copied.AssetID.IsZero())
+                        continue;
+                    if (trash is not null && copied.Folder.Equals(trash.ID))
+                        continue;
+                    assetIDs.Add(copied.AssetID);
+                }
+                if (assetIDs.Count > 0)
+                    PostItemAssets(copiedItems[0].Owner, assetIDs);
+            }
+
             return copiedItems;
         }
 
@@ -661,7 +684,7 @@ namespace OpenSim.Region.CoreModules.Framework.InventoryAccess
                 else
                    AddPermissions(item, objlist[0], objlist, remoteClient);
 
-                m_Scene.AddInventoryItem(item);
+                m_Scene.AddInventoryItem(item, false);
 
                 if (isowner)
                 {
@@ -1163,8 +1186,76 @@ namespace OpenSim.Region.CoreModules.Framework.InventoryAccess
             return group;
         }
 
-        public virtual void FetchRemoteHGItemAssets(UUID OwnerID, InventoryItemBase item)
+        public virtual void FetchItemAssets(UUID OwnerID, InventoryItemBase item)
         {
+            if (item is null || item.AssetID.IsZero())
+                return;
+            if (item.AssetType == (int)AssetType.Link || item.AssetType == (int)AssetType.LinkFolder)
+                return;
+            PrefetchLocalAssets(new[] { item.AssetID });
+        }
+
+        public virtual void FetchItemAssets(UUID ownerID, IList<UUID> assetIDs)
+        {
+            PrefetchLocalAssets(assetIDs);
+        }
+
+        public virtual void PostItemAssets(UUID ownerID, IList<UUID> assetIDs)
+        {
+            PrefetchLocalAssets(assetIDs);
+        }
+
+        /// <summary>
+        /// Read ConcurrentAssetGather / UuidGatherConcurrent / UuidGatherTimeout.
+        /// HG-prefixed aliases are still accepted so older OpenSim.ini values keep working.
+        /// </summary>
+        protected static void ApplyAssetGatherConfig(IConfig config, ref bool concurrent, ref int wave, ref int timeoutSec)
+        {
+            if (config is null)
+                return;
+
+            concurrent = config.GetBoolean("ConcurrentAssetGather", concurrent);
+            if (config.Contains("HGConcurrentAssetGather"))
+                concurrent = config.GetBoolean("HGConcurrentAssetGather");
+
+            wave = config.GetInt("UuidGatherConcurrent", wave);
+            if (config.Contains("HGUuidGatherConcurrent"))
+                wave = config.GetInt("HGUuidGatherConcurrent");
+            if (wave < 1)
+                wave = 1;
+
+            timeoutSec = config.GetInt("UuidGatherTimeout", timeoutSec);
+            if (config.Contains("HGUuidGatherTimeout"))
+                timeoutSec = config.GetInt("HGUuidGatherTimeout");
+            if (timeoutSec < 1)
+                timeoutSec = 1;
+        }
+
+        /// <summary>
+        /// Gather nested assets via the local IAssetService (Flotsam then Robust in grid mode).
+        /// Used for local-grid users; HG overrides call the mapper for foreign users instead.
+        /// </summary>
+        protected void PrefetchLocalAssets(IList<UUID> assetIDs)
+        {
+            if (assetIDs is null || assetIDs.Count == 0 || m_Scene is null)
+                return;
+
+            UuidGatherer gatherer = new(m_Scene.AssetService);
+            int added = 0;
+            foreach (UUID id in assetIDs)
+            {
+                if (id.IsZero())
+                    continue;
+                gatherer.AddForInspection(id);
+                added++;
+            }
+            if (added == 0)
+                return;
+
+            if (m_concurrentAssetGather)
+                gatherer.GatherAllConcurrent(m_gatherConcurrent, m_gatherTimeoutSec * 1000);
+            else
+                gatherer.GatherAll();
         }
 
         /// <summary>
@@ -1367,6 +1458,11 @@ namespace OpenSim.Region.CoreModules.Framework.InventoryAccess
 
         public virtual void TransferInventoryAssets(InventoryItemBase item, UUID sender, UUID receiver)
         {
+            if (item is null || item.AssetID.IsZero())
+                return;
+            if (item.AssetType == (int)AssetType.Link || item.AssetType == (int)AssetType.LinkFolder)
+                return;
+            PrefetchLocalAssets(new[] { item.AssetID });
         }
 
         public virtual bool CanGetAgentInventoryItem(IClientAPI remoteClient, UUID itemID, UUID requestID)

@@ -56,12 +56,12 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
         private int m_levelHGTeleport = 0;
 
         /// <summary>
-        /// When true, HG attachment assets are gathered with wave-based concurrent fetches.
+        /// When true, attachment assets are gathered with wave-based concurrent fetches.
         /// When false, the legacy sequential GatherNext + FetchAsset path is used.
         /// </summary>
-        private bool m_hgConcurrentAssetGather = true;
-        private int m_hgGatherConcurrent = 8;
-        private int m_hgGatherTimeoutSec = 30;
+        private bool m_concurrentAssetGather = true;
+        private int m_gatherConcurrent = 8;
+        private int m_gatherTimeoutSec = 30;
 
         private GatekeeperServiceConnector m_GatekeeperConnector;
         private IUserAgentService m_UAS;
@@ -144,14 +144,20 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
                     {
                         m_levelHGTeleport = transferConfig.GetInt("LevelHGTeleport", 0);
 
-                        m_hgConcurrentAssetGather = transferConfig.GetBoolean("HGConcurrentAssetGather", true);
+                        m_concurrentAssetGather = transferConfig.GetBoolean("ConcurrentAssetGather", true);
+                        if (transferConfig.Contains("HGConcurrentAssetGather"))
+                            m_concurrentAssetGather = transferConfig.GetBoolean("HGConcurrentAssetGather");
 
-                        m_hgGatherConcurrent = transferConfig.GetInt("HGUuidGatherConcurrent", 8);
-                        if (m_hgGatherConcurrent < 1)
-                            m_hgGatherConcurrent = 1;
-                        m_hgGatherTimeoutSec = transferConfig.GetInt("HGUuidGatherTimeout", 30);
-                        if (m_hgGatherTimeoutSec < 1)
-                            m_hgGatherTimeoutSec = 1;
+                        m_gatherConcurrent = transferConfig.GetInt("UuidGatherConcurrent", 8);
+                        if (transferConfig.Contains("HGUuidGatherConcurrent"))
+                            m_gatherConcurrent = transferConfig.GetInt("HGUuidGatherConcurrent");
+                        if (m_gatherConcurrent < 1)
+                            m_gatherConcurrent = 1;
+                        m_gatherTimeoutSec = transferConfig.GetInt("UuidGatherTimeout", 30);
+                        if (transferConfig.Contains("HGUuidGatherTimeout"))
+                            m_gatherTimeoutSec = transferConfig.GetInt("HGUuidGatherTimeout");
+                        if (m_gatherTimeoutSec < 1)
+                            m_gatherTimeoutSec = 1;
 
                         m_RestrictAppearanceAbroad = transferConfig.GetBoolean("RestrictAppearanceAbroad", false);
                         if (m_RestrictAppearanceAbroad)
@@ -164,11 +170,11 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
 
                     InitialiseCommon(source);
                     m_log.DebugFormat(
-                        "[HG ENTITY TRANSFER MODULE]: {0} enabled (HGConcurrentAssetGather={1}, wave={2}, timeout={3}s).",
+                        "[HG ENTITY TRANSFER MODULE]: {0} enabled (ConcurrentAssetGather={1}, wave={2}, timeout={3}s).",
                         Name,
-                        m_hgConcurrentAssetGather,
-                        m_hgGatherConcurrent,
-                        m_hgGatherTimeoutSec);
+                        m_concurrentAssetGather,
+                        m_gatherConcurrent,
+                        m_gatherTimeoutSec);
                 }
             }
         }
@@ -738,11 +744,11 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
                                 HGUuidGatherer uuidGatherer = new HGUuidGatherer(m_scene.AssetService, url, ids);
                                 uuidGatherer.AddForInspection(defso);
 
-                                int timeoutMs = m_hgGatherTimeoutSec * 1000;
+                                int timeoutMs = m_gatherTimeoutSec * 1000;
 
-                                if (m_hgConcurrentAssetGather)
+                                if (m_concurrentAssetGather)
                                 {
-                                    uuidGatherer.GatherAllConcurrent(m_hgGatherConcurrent, timeoutMs);
+                                    uuidGatherer.GatherAllConcurrent(m_gatherConcurrent, timeoutMs);
 
                                     // Unreachable remote asset server: every request timed out and nothing was retrieved.
                                     if (uuidGatherer.FetchTimeouts > 0 && uuidGatherer.AssetGetCount == 0)
@@ -865,11 +871,11 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
                                     return;
                                 }
 
-                                int timeoutMs = m_hgGatherTimeoutSec * 1000;
+                                int timeoutMs = m_gatherTimeoutSec * 1000;
 
-                                if (m_hgConcurrentAssetGather)
+                                if (m_concurrentAssetGather)
                                 {
-                                    uuidGatherer.GatherAllConcurrent(m_hgGatherConcurrent, timeoutMs);
+                                    uuidGatherer.GatherAllConcurrent(m_gatherConcurrent, timeoutMs);
 
                                     if (sp.IsDeleted)
                                     {

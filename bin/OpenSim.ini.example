@@ -807,25 +807,28 @@
     ;; Disabling cancellation can be okay in small closed grids where all teleports are highly likely to suceed.
     ;DisableInterRegionTeleportCancellation = false
 
-    ;# {HGConcurrentAssetGather} {} {Use concurrent wave-based HG attachment asset gathering} {true false} true
-    ;; When true, gather/download assets for incoming HG attachments with
-    ;; wave-based concurrent fetches (faster over high-latency links).
+    ;# {ConcurrentAssetGather} {} {Use concurrent wave-based asset gathering (HG and grid Robust)} {true false} true
+    ;; When true, gather/download assets in waves: incoming HG attachments,
+    ;; object copy on rez/open/buy/give, local-grid attachment rez / folder
+    ;; give / take-from-prim, and grid-mode Gets from Robust.
     ;; When false, use the legacy sequential GatherNext + FetchAsset path.
-    ;HGConcurrentAssetGather = true
+    ;; Formerly HGConcurrentAssetGather (still accepted).
+    ;ConcurrentAssetGather = true
 
-    ;# {HGUuidGatherConcurrent} {} {Maximum concurrent asset requests when gathering a remote (HG) attachment's assets} {1 4 8 16 32} 8
-    ;; How many requests to run at once against a remote (HG) asset server while
-    ;; gathering the assets of an incoming HG attachment (HGConcurrentAssetGather=true).
+    ;# {UuidGatherConcurrent} {} {Maximum concurrent asset requests per gather/post wave} {1 4 8 16 32} 8
+    ;; How many requests to run at once against an HG home asset server or the
+    ;; local grid Robust asset service (ConcurrentAssetGather=true).
     ;; Requests run in waves of at most this many at a time.  Ignored when false.
-    ;HGUuidGatherConcurrent = 8
+    ;; Formerly HGUuidGatherConcurrent (still accepted).
+    ;UuidGatherConcurrent = 8
 
-    ;# {HGUuidGatherTimeout} {} {Timeout in seconds for each HG asset fetch / fetch wave} {} 30
-    ;; With HGConcurrentAssetGather=true: a single asset request that has not
+    ;# {UuidGatherTimeout} {} {Timeout in seconds for each asset fetch / post wave} {} 30
+    ;; With ConcurrentAssetGather=true: a single asset request that has not
     ;; responded within this many seconds is abandoned without holding back the
     ;; other requests of the wave.
-    ;; With HGConcurrentAssetGather=false: a single request exceeding this aborts
-    ;; the whole gather.
-    ;HGUuidGatherTimeout = 30
+    ;; With ConcurrentAssetGather=false: a sequential gather is used instead.
+    ;; Formerly HGUuidGatherTimeout (still accepted).
+    ;UuidGatherTimeout = 30
 
     ;# {LandingPointBehavior} {} {How to honor landing points and telehubs for gods.} {LandingPointBehavior_OS LandingPointBehavior_SL} LandingPointBehavior_OS
     ;; This option exists to control the behavior of teleporting gods into places that have landing points
