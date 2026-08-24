@@ -1,0 +1,160 @@
+# Compile OpenSim-Aura the same way BUILDING.md does locally.
+# Linux:  ./runprebuild.sh && dotnet build --configuration Release OpenSim.sln
+# Windows: runprebuild.bat && dotnet build --configuration Release OpenSim.sln
+#
+# Run by hand: Actions → Build → Run workflow.
+# Builds on Linux and Windows. By default both zips go on one GitHub Release.
+# Release notes are filled from git commits since the previous tag.
+
+name: Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish_release:
+        description: Publish zips to the GitHub Releases page
+        type: boolean
+        default: true
+      tag:
+        description: Release tag (leave empty for r + short commit)
+        type: string
+        required: false
+      title:
+        description: Release title (leave empty for OpenSim-Aura + tag)
+        type: string
+        required: false
+      notes:
+        description: Optional extra text placed above the auto-generated commit list
+        type: string
+        required: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux
+          - os: windows-latest
+            platform: win
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Install native dependencies
+      if: runner.os == 'Linux'
+      run: sudo apt-get update && sudo apt-get install -y libgdiplus libc6-dev
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: 8.0.x
+
+    - name: Generate project files (Linux)
+      if: runner.os == 'Linux'
+      run: ./runprebuild.sh
+
+    - name: Generate project files (Windows)
+      if: runner.os == 'Windows'
+      shell: cmd
+      run: runprebuild.bat
+
+    - name: Build
+      run: dotnet build --configuration Release OpenSim.sln
+
+    - name: Release names
+      id: vars
+      shell: bash
+      env:
+        INPUT_TAG: ${{ inputs.tag }}
+        PLATFORM: ${{ matrix.platform }}
+      run: |
+        sha_short=$(git rev-parse --short HEAD)
+        if [ -n "$INPUT_TAG" ]; then
+          tag="$INPUT_TAG"
+        else
+          tag="r${sha_short}"
+        fi
+        echo "sha_short=${sha_short}" >> "$GITHUB_OUTPUT"
+        echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+        echo "zip=opensim-aura-${tag}-${PLATFORM}.zip" >> "$GITHUB_OUTPUT"
+
+    - name: Package (Linux)
+      if: runner.os == 'Linux'
+      run: zip -r "${{ steps.vars.outputs.zip }}" bin ThirdPartyLicenses README.md CONTRIBUTORS.txt LICENSE.txt
+
+    - name: Package (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: Compress-Archive -Path bin, ThirdPartyLicenses, README.md, CONTRIBUTORS.txt, LICENSE.txt -DestinationPath "${{ steps.vars.outputs.zip }}"
+
+    - uses: actions/upload-artifact@v4
+      with:
+        name: ${{ steps.vars.outputs.zip }}
+        path: ${{ steps.vars.outputs.zip }}
+
+  release:
+    needs: build
+    if: inputs.publish_release
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+        fetch-tags: true
+
+    - name: Release names
+      id: vars
+      env:
+        INPUT_TAG: ${{ inputs.tag }}
+      run: |
+        sha_short=$(git rev-parse --short HEAD)
+        if [ -n "$INPUT_TAG" ]; then
+          tag="$INPUT_TAG"
+        else
+          tag="r${sha_short}"
+        fi
+        echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+
+    - uses: actions/download-artifact@v4
+      with:
+        path: dist
+        merge-multiple: true
+
+    - name: Generate release notes
+      env:
+        NOTES: ${{ inputs.notes }}
+      run: |
+        {
+          if [ -n "$NOTES" ]; then
+            printf '%s\n\n' "$NOTES"
+          fi
+
+          PREV=$(git describe --tags --abbrev=0 2>/dev/null || true)
+          if [ -n "$PREV" ]; then
+            echo "## Changes since $PREV"
+            echo
+            git log --pretty=format:'- %s (%h)' "$PREV"..HEAD
+          else
+            echo "## Changes"
+            echo
+            git log --pretty=format:'- %s (%h)' -50
+          fi
+          echo
+        } > RELEASE_NOTES.md
+
+    - name: Publish release
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: ${{ steps.vars.outputs.tag }}
+        name: ${{ inputs.title || format('OpenSim-Aura {0}', steps.vars.outputs.tag) }}
+        body_path: RELEASE_NOTES.md
+        files: dist/*.zip
+        make_latest: true
