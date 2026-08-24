@@ -1,117 +1,103 @@
-Welcome to OpenSimulator (OpenSim for short)!
+# OpenSim-Aura
 
-# Overview
+OpenSim-Aura is a fork of [OpenSimulator](https://github.com/opensim/opensim) (OpenSim).
 
-OpenSim is a BSD Licensed Open Source project to develop a functioning
-virtual worlds server platform capable of supporting multiple clients
-and servers in a heterogeneous grid structure. OpenSim is written in
-C#, and can run under Mono or the Microsoft .NET runtimes.
+Aura focuses on Hypergrid travel, asset transfer, baked textures, profiles, and attachment scripts — the parts that are slow or broken when avatars move between grids.
 
-This is considered an alpha release.  Some stuff works, a lot doesn't.
-If it breaks, you get to keep *both* pieces.
+Binaries are on the [Releases](https://github.com/amandaleeang/OpenSim-Aura/releases) page. To build from source, see [BUILDING.md](BUILDING.md). For installing, running, and configuring OpenSim itself, see [opensimulator.org](http://opensimulator.org).
 
-# Compiling OpenSim
+# What Aura implements
 
-Please see BUILDING.md
+Stock Hypergrid often does one HTTP GET per asset, fully sequential. Hundreds of attachment textures and meshes then take minutes. Profiles of foreign avatars fail. Bakes greyscale on every hop because TextureIDs change. Attachment scripts stay dead until detach/reattach. Aura addresses those.
 
-# Running OpenSim on Windows
+## Concurrent asset gather
 
-You will need dotnet 8.0 runtime (https://dotnet.microsoft.com/en-us/download/dotnet/8.0)
+Incoming assets are fetched in concurrent waves instead of one-at-a-time HTTP GETs.
 
+Measured on 587 HG attachment assets from OSGrid:
 
-To run OpenSim from a command prompt
+| Mode | Time |
+|------|------|
+| Sequential | ~173–201 s |
+| 8 concurrent | ~40 s |
+| 16 concurrent | ~21 s |
 
- * cd to the bin/ directory where you unpacked OpenSim
- * review and change configuration files (.ini) for your needs. see the "Configuring OpenSim" section
- * run OpenSim.exe
+The same gather is used for:
 
+- HG login / teleport (incoming attachments)
+- Buy / open object
+- Copying inventory, giving a folder or item
+- Rezzing attachments
+- Taking items from a prim
+- Asset gather from Robust
+- OAR and IAR writes
+- Flotsam region cache and appearance-info walks
 
-# Running OpenSim on Linux/Mac
+HG asset Get/Post can batch several inventory roots in one pass. Missing assets at the destination are stored in waves. Nested item assets are prefetched on inventory operations. Remote folder contents can be asked in one `GetMultipleFoldersContent` call, with concurrent per-folder fallback if the batch is empty or the far grid restricts inventory.
 
-You will need
+## XBakes (baked textures)
 
- * [dotnet 8.0 Runtime](https://dotnet.microsoft.com/en-us/download/dotnet/8.0)
- * libgdiplus 
- 
- if you have mono 6.x complete, you already have libgdiplus, otherwise you need to install it
- using a package manager for your operating system, like apt, brew, macports, etc
- for example on debian:
- 
- `apt-get update && apt-get install -y apt-utils libgdiplus libc6-dev`
- 
-To run OpenSim, from the unpacked distribution type:
+- Bakes stored by deterministic **CacheId**, not only TextureID (TextureIDs are not canonical across hops).
+- On CacheId match, stored JPEG2000 is re-keyed to the incoming TextureID so the same outfit does not rebake on homecoming.
+- XBakes runs for **HG visitors** and for **avatars returning home** (`Validate` on ViaHGLogin; appearance is not saved for foreign users).
+- **Standalone** (no Robust): when `[XBakes] URL` is unset, an in-process file store under `BaseDirectory` uses the same XML and hashed paths as Robust XBakes.
 
- * cd bin
- * review and change configuration files (.ini) for your needs. see the "Configuring OpenSim" section
- * run ./opensim.sh
+## Hypergrid profiles
 
+- **HG visitor profiles** load even when `get_user_info` / HomeURI cache fails; fallback to HomeURL and re-query `get_server_urls`.
+- **Self profile** on a foreign sim uses the agent circuit `ProfileServerURI`; failed responses are not cached.
+- **Friends’ profiles:** seed UserManagement from the visitor’s home friends list; ask the visitor’s home `get_uui` for a friend’s home URL so OSGrid (and similar) friends are fetched from the right grid, not from the visitor’s profile host.
 
-# Configuring OpenSim
+## Attachment scripts on HG login / teleport
 
-When OpenSim starts for the first time, you will be prompted with a
-series of questions that look something like:
+On HG entry, `CompleteMovement` often finishes before async asset gather. When attachments attach later on a root agent, scripts are started and resumed the same way local teleports do. Local users also resume attachment scripts after HG teleport.
 
-	[09-17 03:54:40] DEFAULT REGION CONFIG: Simulator Name [OpenSim Test]:
+Related upstream fix: scripts are marked **HasRun** on event dispatch so teleport does not serialize empty script state.
 
-For all the options except simulator name, you can safely hit enter to accept
-the default if you want to connect using a client on the same machine or over
-your local network.
+# In progress / planned
 
-You will then be asked "Do you wish to join an existing estate?".  If you're
-starting OpenSim for the first time then answer no (which is the default) and
-provide an estate name.
+- Keep HG visitor attachments **only in simulator cache**; promote to the DB asset store on drop or rez (cleaner DB).
+- **FSAssets** on SQLite.
+- Allow HG teleport to a sim with the **same SIM coordinates**.
+- **HOP** teleports that land at the coordinates in the URI.
+- **Group messages** via Hypergrid.
+- **Display names**. (Evaluating)
+- Fetch **only foreign** assets (skip a redundant local probe) — still evaluating whether it is worth it.
 
-Shortly afterwards, you will then be asked to enter an estate owner first name,
-last name, password and e-mail (which can be left blank).  Do not forget these
-details, since initially only this account will be able to manage your region
-in-world.  You can also use these details to perform your first login.
+Not a priority: async HTTP server.
 
-Once you are presented with a prompt that looks like:
+# Aura configuration
 
-	Region (My region name) #
+Everything else (database, regions, Hypergrid URIs, groups, viewers, ports) is stock OpenSim: [Configuration](http://opensimulator.org/wiki/Configuration) and [Configuring Regions](http://opensimulator.org/wiki/Configuring_Regions).
 
-You have successfully started OpenSim.
+Aura adds the following INI settings.
 
-If you want to create another user account to login rather than the estate
-account, then type "create user" on the OpenSim console and follow the prompts.
+## `[EntityTransfer]` — concurrent gather
 
-Helpful resources:
- * http://opensimulator.org/wiki/Configuration
- * http://opensimulator.org/wiki/Configuring_Regions
+In `OpenSim.ini` / `OpenSimDefaults.ini`. Defaults below are the Aura defaults (`ConcurrentAssetGather = true`). The older `HG`-prefixed names are still accepted.
 
-# Connecting to your OpenSim
+| Setting | Default | Meaning |
+|---------|---------|---------|
+| `ConcurrentAssetGather` | `true` | Wave-based concurrent gather (HG attachments, rez/open/buy/give, local-grid attachment rez / folder give / take-from-prim, Robust Gets). `false` keeps sequential `GatherNext` + `FetchAsset`. |
+| `UuidGatherConcurrent` | `8` | Max concurrent asset requests per gather/post wave. Ignored when `ConcurrentAssetGather` is false. |
+| `UuidGatherTimeout` | `30` | Per-request timeout in seconds. A slow request is abandoned without holding the rest of the wave. |
 
-By default your sim will be available for login on port 9000.  You can login by
-adding -loginuri http://127.0.0.1:9000 to the command that starts Second Life
-(e.g. in the Target: box of the client icon properties on Windows).  You can
-also login using the network IP address of the machine running OpenSim (e.g.
-http://192.168.1.2:9000)
+## `[XBakes]` — bake store
 
-To login, use the avatar details that you gave for your estate ownership or the
-one you set up using the "create user" command.
+In `OpenSim.ini`. Standalone and StandaloneHypergrid set `BaseDirectory` in their include files.
 
-# Bug reports
+| Setting | Meaning |
+|---------|---------|
+| `URL` | Robust BakedTextureService (grid). Leave unset for standalone. |
+| `BaseDirectory` | In-process file store when `URL` is unset (standalone). Same hashed layout as Robust XBakes. Example: `BaseDirectory = "bakes"`. |
 
-In the very likely event of bugs biting you (err, your OpenSim) we
-encourage you to see whether the problem has already been reported on
-the [OpenSim mantis system](http://opensimulator.org/mantis/main_page.php).
+Disabled if both `URL` and `BaseDirectory` are unset.
 
-If your bug has already been reported, you might want to add to the
-bug description and supply additional information.
+# Bugs, discussions, and new features
 
-If your bug has not been reported yet, file a bug report ("opening a
-mantis"). Useful information to include:
- * description of what went wrong
- * stack trace
- * OpenSim.log (attach as file)
- * OpenSim.ini (attach as file)
+**OpenSim-Aura only** — bugs, discussions, and feature requests that belong to the Aura work listed above (concurrent gather, XBakes, HG profiles, attachment scripts on HG login/teleport, and the in-progress items in that list) go to **this GitHub repo**:
+
+https://github.com/amandaleeang/OpenSim-Aura/issues
 
 
-# More Information on OpenSim
-
-More extensive information on building, running, and configuring
-OpenSim, as well as how to report bugs, and participate in the OpenSim
-project can always be found at http://opensimulator.org.
-
-Thanks for trying OpenSim, we hope it is a pleasant experience.
-
+**Everything other feature or bug belongs to OpenSim.** Report bugs to the OpenSim project on [Mantis](http://opensimulator.org/mantis/main_page.php). Use [opensimulator.org](http://opensimulator.org) for documentation, discussion, and new-feature process (including the opensim-dev list).
