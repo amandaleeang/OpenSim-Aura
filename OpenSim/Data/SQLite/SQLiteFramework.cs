@@ -78,5 +78,14 @@ namespace OpenSim.Data.SQLite
                 return cmd.ExecuteReader();
             }
         }
+
+        protected object ExecuteScalar(SQLiteCommand cmd, SQLiteConnection connection)
+        {
+            lock (connection)
+            {
+                cmd.Connection = connection;
+                return cmd.ExecuteScalar();
+            }
+        }
     }
 }
