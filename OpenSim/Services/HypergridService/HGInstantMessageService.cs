@@ -136,6 +136,8 @@ namespace OpenSim.Services.HypergridService
                     string offlineIMService = cnf.GetString("OfflineIMService", string.Empty);
                     if (offlineIMService != string.Empty)
                         m_OfflineIMService = ServerUtils.LoadPlugin<IOfflineIMService>(offlineIMService, args);
+                    if (m_OfflineIMService is null)
+                        m_log.Warn("[HG IM SERVICE]: InGatekeeper is true but [Messaging] OfflineIMService is missing or failed to load; incoming IMs to offline users will not be stored");
                 }
                 else
                     m_log.Debug("[HG IM SERVICE]: Starting");
@@ -265,7 +267,10 @@ namespace OpenSim.Services.HypergridService
         private bool UndeliveredMessage(GridInstantMessage im)
         {
             if (m_OfflineIMService == null)
+            {
+                m_log.WarnFormat("[HG IM SERVICE]: Dropping undelivered IM to {0}; OfflineIMService is not configured", im.toAgentID);
                 return false;
+            }
 
             if (m_ForwardOfflineGroupMessages)
             {
@@ -294,8 +299,12 @@ namespace OpenSim.Services.HypergridService
                 }
             }
 
-            //m_log.DebugFormat("[HG IM SERVICE]: Message saved");
-            return m_OfflineIMService.StoreMessage(im, out string reason);
+            bool stored = m_OfflineIMService.StoreMessage(im, out string reason);
+            if (stored)
+                m_log.DebugFormat("[HG IM SERVICE]: Stored offline IM for {0}", im.toAgentID);
+            else
+                m_log.WarnFormat("[HG IM SERVICE]: Failed to store offline IM for {0}: {1}", im.toAgentID, reason);
+            return stored;
         }
     }
 }
