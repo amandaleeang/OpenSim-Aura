@@ -26,65 +26,24 @@
  */
 
 using System;
-using System.Collections;
-using System.Collections.Generic;
-using System.Data;
-using OpenMetaverse;
-using OpenSim.Framework;
 using System.Data.SQLite;
 
 namespace OpenSim.Data.SQLite
 {
-    /// <summary>
-    /// A database interface class to a user profile storage system
-    /// </summary>
-    public class SQLiteFramework
+    public class SQLiteOfflineIMData : SQLiteGenericTableHandler<OfflineIMData>, IOfflineIMData
     {
-        protected object m_lockObject = new Object();
-
-        protected SQLiteFramework(string connectionString)
+        public SQLiteOfflineIMData(string connectionString, string realm)
+            : base(connectionString, realm, "IM_Store")
         {
-            DllmapConfigHelper.RegisterAssembly(typeof(SQLiteConnection).Assembly);
         }
 
-        //////////////////////////////////////////////////////////////
-        //
-        // All non queries are funneled through one connection
-        // to increase performance a little
-        //
-        protected int ExecuteNonQuery(SQLiteCommand cmd, SQLiteConnection connection)
+        public void DeleteOld()
         {
-            lock (connection)
+            using (SQLiteCommand cmd = new SQLiteCommand())
             {
-                cmd.Connection = connection;
-                //Console.WriteLine("XXX " + cmd.CommandText);
+                cmd.CommandText = String.Format("delete from {0} where datetime(TMStamp) < datetime('now', '-14 days')", m_Realm);
 
-                return cmd.ExecuteNonQuery();
-            }
-        }
-
-        protected IDataReader ExecuteReader(SQLiteCommand cmd, SQLiteConnection connection)
-        {
-            lock (connection)
-            {
-                //SQLiteConnection newConnection =
-                //        (SQLiteConnection)((ICloneable)connection).Clone();
-                //newConnection.Open();
-
-                //cmd.Connection = newConnection;
-                cmd.Connection = connection;
-                //Console.WriteLine("XXX " + cmd.CommandText);
-
-                return cmd.ExecuteReader();
-            }
-        }
-
-        protected object ExecuteScalar(SQLiteCommand cmd, SQLiteConnection connection)
-        {
-            lock (connection)
-            {
-                cmd.Connection = connection;
-                return cmd.ExecuteScalar();
+                ExecuteNonQuery(cmd, m_Connection);
             }
         }
     }
