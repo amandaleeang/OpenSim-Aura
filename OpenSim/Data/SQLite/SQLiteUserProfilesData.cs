@@ -74,6 +74,7 @@ namespace OpenSim.Data.SQLite
 
             m_connection = new SQLiteConnection(m_connectionString);
             m_connection.Open();
+            SQLiteConnectionHelper.Configure(m_connection, m_connectionString);
 
             Migration m = new Migration(m_connection, Assembly, "UserProfiles");
             m.Update();

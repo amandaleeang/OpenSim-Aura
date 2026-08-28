@@ -75,14 +75,10 @@ namespace OpenSim.Data.SQLite
 
             m_conn = new SQLiteConnection(connect);
             m_conn.Open();
+            SQLiteConnectionHelper.Configure(m_conn, connect);
 
             Migration m = new Migration(m_conn, Assembly, "FSAssetStore");
             m.Update();
-
-            using (SQLiteCommand cmd = new SQLiteCommand("PRAGMA busy_timeout=30000;", m_conn))
-                cmd.ExecuteNonQuery();
-            using (SQLiteCommand cmd = new SQLiteCommand("PRAGMA journal_mode=WAL;", m_conn))
-                cmd.ExecuteNonQuery();
         }
 
         public void Dispose()
@@ -91,6 +87,7 @@ namespace OpenSim.Data.SQLite
             {
                 if (m_conn != null)
                 {
+                    SQLiteConnectionHelper.CheckpointTruncate(m_conn);
                     m_conn.Close();
                     m_conn.Dispose();
                     m_conn = null;
@@ -291,6 +288,7 @@ namespace OpenSim.Data.SQLite
                 try
                 {
                     importConn.Open();
+                    SQLiteConnectionHelper.Configure(importConn, conn);
                 }
                 catch (Exception e)
                 {

@@ -35,6 +35,7 @@ using log4net;
 using Nini.Config;
 using OpenMetaverse;
 using OpenMetaverse.StructuredData;
+using OpenSim.Data;
 using OpenSim.Framework;
 using OpenSim.Framework.Servers;
 using OpenSim.Framework.Servers.HttpServer;
@@ -95,6 +96,7 @@ namespace OpenSim.Region.UserStatistics
 
             dbConn = new SQLiteConnection("URI=file:LocalUserStatistics.db");
             dbConn.Open();
+            SQLiteConnectionHelper.Configure(dbConn);
             CreateTables(dbConn);
 
             Prototype_distributor protodep = new Prototype_distributor();
@@ -173,6 +175,7 @@ namespace OpenSim.Region.UserStatistics
             if (!enabled)
                 return;
 
+            SQLiteConnectionHelper.CheckpointTruncate(dbConn);
             dbConn.Close();
             dbConn.Dispose();
             m_sessions.Clear();
