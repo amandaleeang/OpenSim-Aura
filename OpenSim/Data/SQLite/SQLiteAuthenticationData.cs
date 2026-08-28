@@ -65,6 +65,7 @@ namespace OpenSim.Data.SQLite
 
                 m_Connection = new SQLiteConnection(connectionString);
                 m_Connection.Open();
+                SQLiteConnectionHelper.Configure(m_Connection, connectionString);
 
                 Migration m = new Migration(m_Connection, Assembly, "AuthStore");
                 m.Update();

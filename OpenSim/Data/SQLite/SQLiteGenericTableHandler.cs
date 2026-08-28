@@ -67,6 +67,7 @@ namespace OpenSim.Data.SQLite
                 m_Connection = new SQLiteConnection(connectionString);
                 //Console.WriteLine(string.Format("OPENING CONNECTION FOR {0} USING {1}", storeName, connectionString));
                 m_Connection.Open();
+                SQLiteConnectionHelper.Configure(m_Connection, connectionString);
 
                 if (storeName != String.Empty)
                 {
