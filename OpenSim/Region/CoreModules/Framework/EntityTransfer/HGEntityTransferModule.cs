@@ -57,7 +57,7 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
 
         /// <summary>
         /// When true, attachment assets are gathered with wave-based concurrent fetches.
-        /// When false, the legacy sequential GatherNext + FetchAsset path is used.
+        /// When false, sequential GatherNext plus FetchAsset of unfetched leaves is used.
         /// </summary>
         private bool m_concurrentAssetGather = true;
         private int m_gatherConcurrent = 8;
@@ -765,6 +765,9 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
 
                         foreach (UUID id in ids.Keys)
                         {
+                            if (uuidGatherer.IsFetched(id))
+                                continue;
+
                             int tickStart = Util.EnvironmentTickCount();
                             uuidGatherer.FetchAsset(id);
 
@@ -913,6 +916,9 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
                                             toadd = null;
                                             return;
                                         }
+
+                                        if (uuidGatherer.IsFetched(id))
+                                            continue;
 
                                         int tickStart = Util.EnvironmentTickCount();
                                         uuidGatherer.FetchAsset(id);
