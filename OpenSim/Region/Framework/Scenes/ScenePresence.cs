@@ -90,6 +90,7 @@ namespace OpenSim.Region.Framework.Scenes
         //}
 
         public bool GotAttachmentsData = false;
+        private bool m_attachmentScriptsStarted;
         public int EnvironmentVersion = -1;
         private ViewerEnvironment m_environment = null;
         public ViewerEnvironment Environment
@@ -1567,32 +1568,37 @@ namespace OpenSim.Region.Framework.Scenes
             return true;
         }
 
-        private void RestartAttachmentScripts()
+        /// <summary>
+        /// Start attachment scripts once this agent is root and incoming attachments are complete.
+        /// </summary>
+        /// <remarks>
+        /// Gatherer and CompleteMovement both call this. Skip while child or while gather is
+        /// still adding. The flag starts exactly once per root session (cache-hit gather finishing
+        /// before MakeRoot, or late gather after; HG visitors and local homecoming).
+        /// </remarks>
+        public void StartAttachmentScriptsIfRoot()
         {
-            // We need to restart scripts here so that they receive the correct changed events (CHANGED_TELEPORT
-            // and CHANGED_REGION) when the attachments have been rezzed in the new region.  This cannot currently
-            // be done in AttachmentsModule.CopyAttachments(AgentData ad, IScenePresence sp) itself since we are
-            // not transporting the required data.
-            //
-            // We must take a copy of the attachments list here (rather than locking) to avoid a deadlock where a script in one of
-            // the attachments may start processing an event (which locks ScriptInstance.m_Script) that then calls a method here
-            // which needs to lock m_attachments.  ResumeScripts() needs to take a ScriptInstance.m_Script lock to try to unset the Suspend status.
-            //
-            // FIXME: In theory, this deadlock should not arise since scripts should not be processing events until ResumeScripts().
-            // But XEngine starts all scripts unsuspended.  Starting them suspended will not currently work because script rezzing
-            // is placed in an asynchronous queue in XEngine and so the ResumeScripts() call will almost certainly execute before the
-            // script is rezzed.  This means the ResumeScripts() does absolutely nothing when using XEngine.
-            List<SceneObjectGroup> attachments = GetAttachments();
+            List<SceneObjectGroup> attachments;
+            lock (AttachmentsSyncLock)
+            {
+                if (IsChildAgent || m_attachmentScriptsStarted || !GotAttachmentsData)
+                    return;
 
-            m_log.DebugFormat(
-                "[SCENE PRESENCE]: Restarting scripts in {0} attachments for {1} in {2}", attachments.Count, Name, Scene.Name);
+                attachments = GetAttachments();
+                if (attachments.Count == 0)
+                    return;
 
-            // Resume scripts
+                m_attachmentScriptsStarted = true;
+            }
+
+            if (m_scene.RegionInfo.RegionSettings.DisableScripts)
+                return;
+
+            int stateSource = GetStateSource();
             foreach (SceneObjectGroup sog in attachments)
             {
-                sog.RootPart.ParentGroup.CreateScriptInstances(0, false, m_scene.DefaultScriptEngine, GetStateSource());
+                sog.CreateScriptInstances(0, false, m_scene.DefaultScriptEngine, stateSource);
                 sog.ResumeScripts();
-                sog.ScheduleGroupForFullUpdate();
             }
         }
 
@@ -1692,6 +1698,8 @@ namespace OpenSim.Region.Framework.Scenes
             //Velocity = new Vector3(0, 0, 0);
 
             IsChildAgent = true;
+            m_attachmentScriptsStarted = false;
+            GotAttachmentsData = false;
             m_scene.SwapRootAgentCount(true, IsNPC);
             RemoveFromPhysicalScene();
             ParentID = 0; // Child agents can't be sitting
@@ -2370,25 +2378,10 @@ namespace OpenSim.Region.Framework.Scenes
                 }
                 else
                 {
+                    StartAttachmentScriptsIfRoot();
+
                     if (m_attachments.Count > 0)
                     {
-                        foreach (SceneObjectGroup sog in m_attachments)
-                        {
-                            // HG gather starts scripts after assets arrive (fast or slow).
-                            // Starting them here as well double-inits timer/listen/sensor scripts.
-                            // On HGLogin script may or may not have been downloaded yet, may or may not be in cache.
-                            
-                            bool localUser = m_scene.UserManagementModule.IsLocalGridUser(UUID);
-                            bool hgEntry = (m_teleportFlags & TeleportFlags.ViaHGLogin) != 0;
-
-                            // Only foreign HG visitors wait on gather. Local homecoming does not.
-                            if (!hgEntry || localUser)
-                            {
-                                sog.RootPart.ParentGroup.CreateScriptInstances(0, false, m_scene.DefaultScriptEngine, GetStateSource());
-                                sog.ResumeScripts();
-                            }
-                        }
-
                         foreach (ScenePresence p in allpresences)
                         {
                             if (p == this)
