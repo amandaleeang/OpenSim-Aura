@@ -95,11 +95,6 @@ namespace OpenSim.Region.CoreModules.Framework.InventoryAccess
             return meta;
         }
 
-        private AssetBase FetchAsset(string url, UUID assetID)
-        {
-            return m_scene.AssetService.Get(assetID.ToString(), url, true);
-        }
-
         public bool PostAsset(string url, AssetBase asset, bool verbose = true)
         {
             if (asset == null)
@@ -230,9 +225,10 @@ namespace OpenSim.Region.CoreModules.Framework.InventoryAccess
                 uuidGatherer.GatherAllConcurrent(m_waveSize, m_timeoutMs);
             else
             {
+                // GatherAll already GETs inspect-queue assets (via HGUuidGatherer.GetAsset).
+                // Only pull leaves that were listed but not retrieved (textures/sounds/etc.).
                 uuidGatherer.GatherAll();
-                foreach (UUID uuid in uuidGatherer.GatheredUuids.Keys)
-                    FetchAsset(userAssetURL, uuid);
+                uuidGatherer.FetchUnfetchedLeavesSequential();
             }
 
             bool success = uuidGatherer.FailedUUIDs.Count == 0;
