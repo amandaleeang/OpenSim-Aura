@@ -62,6 +62,7 @@ namespace OpenSim.Data.SQLite
         {
             if (m_conn != null)
             {
+                SQLiteConnectionHelper.CheckpointTruncate(m_conn);
                 m_conn.Close();
                 m_conn = null;
             }
@@ -85,6 +86,7 @@ namespace OpenSim.Data.SQLite
             }
             m_conn = new SQLiteConnection(dbconnect);
             m_conn.Open();
+            SQLiteConnectionHelper.Configure(m_conn, dbconnect);
 
             Migration m = new Migration(m_conn, Assembly, "AssetStore");
             m.Update();
