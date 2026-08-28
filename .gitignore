@@ -40,6 +40,8 @@ bin/Debug/*.dll
 bin/*.dll.mdb
 bin/*.db
 bin/*.db-journal
+bin/*.db-wal
+bin/*.db-shm
 bin/addin-db-*
 bin/*.dll
 bin/OpenSim.vshost.exe.config
@@ -63,6 +65,7 @@ bin/UserAssets
 bin/assetcache
 bin/maptiles
 bin/bakes
+bin/fsassets
 bin/MeshCache
 bin/estate_settings.xml
 bin/config-include/CenomeCache.ini
