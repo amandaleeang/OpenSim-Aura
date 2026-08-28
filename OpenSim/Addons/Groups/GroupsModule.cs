@@ -931,9 +931,10 @@ namespace OpenSim.Groups
                 if (money != null && money.GroupCreationCharge > 0)
                     money.ApplyCharge(remoteClient.AgentId, money.GroupCreationCharge, MoneyTransactionType.GroupCreate, name);
 
+                // Viewer HACK on CreateGroupReply: push a fake membership named
+                // "new group". Drop that ID then send the real membership list.
                 remoteClient.SendCreateGroupReply(groupID, true, "Group created successfully");
-
-                // Update the founder with new group information.
+                remoteClient.SendAgentDropGroup(groupID);
                 SendAgentGroupDataUpdate(remoteClient, true);
             }
             else

@@ -1110,6 +1110,9 @@
     ; Module = "Groups Module V2"
 
     ;# {StorageProvider} {Module:Groups Module V2} {The DLL that provides the storage for V2} {OpenSim.Data.MySQL.dll}
+    ;; Storage dll for Groups Module V2. Leave commented to inherit
+    ;; [DatabaseService] StorageProvider (SQLite, MySQL, or PGSQL).
+    ;; Only set this if Groups should use a different provider than DatabaseService.
     ; StorageProvider = OpenSim.Data.MySQL.dll
 
     ;# {ServicesConnectorModule} {Module:GroupsModule Module:Groups Module V2} {Service connector to use for groups} {XmlRpcGroupsServicesConnector "Groups Local Service Connector" "Groups Remote Service Connector" "Groups HG Service Connector"} XmlRpcGroupsServicesConnector
