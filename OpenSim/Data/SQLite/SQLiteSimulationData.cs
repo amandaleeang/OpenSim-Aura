@@ -119,6 +119,7 @@ namespace OpenSim.Data.SQLite
                 m_log.Info("[SQLITE REGION DB]: Sqlite - connecting: " + connectionString);
                 m_conn = new SQLiteConnection(m_connectionString);
                 m_conn.Open();
+                SQLiteConnectionHelper.Configure(m_conn, m_connectionString);
 
                 SQLiteCommand primSelectCmd = new SQLiteCommand(primSelect, m_conn);
                 primDa = new SQLiteDataAdapter(primSelectCmd);
@@ -308,6 +309,7 @@ namespace OpenSim.Data.SQLite
         {
             if (m_conn != null)
             {
+                SQLiteConnectionHelper.CheckpointTruncate(m_conn);
                 m_conn.Close();
                 m_conn = null;
             }
@@ -1064,7 +1066,10 @@ namespace OpenSim.Data.SQLite
         public void Shutdown()
         {
             lock(ds)
+            {
                 Commit();
+                SQLiteConnectionHelper.CheckpointTruncate(m_conn);
+            }
         }
 
         /***********************************************************************
