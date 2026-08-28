@@ -2789,6 +2789,40 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
             if (!newPosition.IsZero())
                 so.RootPart.GroupPosition = newPosition;
 
+            if (so.IsAttachmentCheckFull())
+            {
+                ScenePresence sp = m_scene.GetScenePresence(so.OwnerID);
+                if (sp is null)
+                {
+                    if (!m_scene.AddSceneObject(so))
+                    {
+                        m_log.DebugFormat(
+                            "[ENTITY TRANSFER MODULE]: Problem adding scene object {0} {1} into {2} ",
+                            so.Name, so.UUID, m_sceneName);
+                        return false;
+                    }
+                    return true;
+                }
+
+                bool startNow;
+                lock (sp.AttachmentsSyncLock)
+                {
+                    if (!m_scene.AddSceneObject(so))
+                    {
+                        m_log.DebugFormat(
+                            "[ENTITY TRANSFER MODULE]: Problem adding scene object {0} {1} into {2} ",
+                            so.Name, so.UUID, m_sceneName);
+                        return false;
+                    }
+                    startNow = sp.ShouldStartIncomingAttachmentNow();
+                }
+
+                if (startNow)
+                    sp.StartThisAttachmentIfRoot(so);
+
+                return true;
+            }
+
             if (!m_scene.AddSceneObject(so))
             {
                 m_log.DebugFormat(
@@ -2798,31 +2832,22 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
                 return false;
             }
 
-            if (!so.IsAttachment)
+            // FIXME: It would be better to never add the scene object at all rather than add it and then delete
+            // it
+            if (!m_scene.Permissions.CanObjectEntry(so, true, so.AbsolutePosition))
             {
-                // FIXME: It would be better to never add the scene object at all rather than add it and then delete
-                // it
-                if (!m_scene.Permissions.CanObjectEntry(so, true, so.AbsolutePosition))
-                {
-                    // Deny non attachments based on parcel settings
-                    //
-                    m_log.Info("[ENTITY TRANSFER MODULE]: Denied prim crossing because of parcel settings");
+                // Deny non attachments based on parcel settings
+                //
+                m_log.Info("[ENTITY TRANSFER MODULE]: Denied prim crossing because of parcel settings");
 
-                    m_scene.DeleteSceneObject(so, false);
+                m_scene.DeleteSceneObject(so, false);
 
-                    return false;
-                }
-
-                // For attachments, we need to wait until the agent is root
-                // before we restart the scripts, or else some functions won't work.
-                so.RootPart.ParentGroup.CreateScriptInstances(0, false, m_scene.DefaultScriptEngine, GetStateSource(so));
-
-                so.ResumeScripts();
-
-                // AddSceneObject already does this and doing it again messes
-                //if (so.RootPart.KeyframeMotion != null)
-                //    so.RootPart.KeyframeMotion.UpdateSceneObject(so);
+                return false;
             }
+
+            so.RootPart.ParentGroup.CreateScriptInstances(0, false, m_scene.DefaultScriptEngine, GetStateSource(so));
+
+            so.ResumeScripts();
 
             return true;
         }

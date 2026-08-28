@@ -91,6 +91,7 @@ namespace OpenSim.Region.Framework.Scenes
 
         public bool GotAttachmentsData = false;
         private bool m_attachmentScriptsStarted;
+        private bool m_completeMovementReachedAttachments;
         public int EnvironmentVersion = -1;
         private ViewerEnvironment m_environment = null;
         public ViewerEnvironment Environment
@@ -1572,25 +1573,66 @@ namespace OpenSim.Region.Framework.Scenes
         /// Start attachment scripts once this agent is root and incoming attachments are complete.
         /// </summary>
         /// <remarks>
-        /// Gatherer and CompleteMovement both call this. Skip while child or while gather is
-        /// still adding. The flag starts exactly once per root session (cache-hit gather finishing
-        /// before MakeRoot, or late gather after; HG visitors and local homecoming).
+        /// Batch gatherer and CompleteMovement call this. Skip while child or while the batch is
+        /// still adding. Exactly once per root session.
         /// </remarks>
         public void StartAttachmentScriptsIfRoot()
         {
-            List<SceneObjectGroup> attachments;
+            List<SceneObjectGroup> attachments = TakeAttachmentScriptStartLocked(markCompleteMovement: false);
+            if (attachments != null)
+                StartAttachmentScriptList(attachments);
+        }
+
+        /// <summary>
+        /// CompleteMovement has reached attachments: start the current set if the incoming
+        /// batch is already complete, otherwise a later HandleIncomingSceneObject will start
+        /// each object as it arrives.
+        /// </summary>
+        public void OnCompleteMovementAttachments()
+        {
+            List<SceneObjectGroup> attachments = TakeAttachmentScriptStartLocked(markCompleteMovement: true);
+            if (attachments != null)
+                StartAttachmentScriptList(attachments);
+        }
+
+        /// <summary>
+        /// After IncomingCreateObject has added an attachment. Returns true if this object
+        /// should be started now (CompleteMovement already ran). Caller must hold AttachmentsSyncLock.
+        /// </summary>
+        public bool ShouldStartIncomingAttachmentNow()
+        {
+            GotAttachmentsData = true;
+            return !IsChildAgent && m_completeMovementReachedAttachments;
+        }
+
+        private List<SceneObjectGroup> TakeAttachmentScriptStartLocked(bool markCompleteMovement)
+        {
             lock (AttachmentsSyncLock)
             {
-                if (IsChildAgent || m_attachmentScriptsStarted || !GotAttachmentsData)
-                    return;
+                if (markCompleteMovement)
+                    m_completeMovementReachedAttachments = true;
 
-                attachments = GetAttachments();
+                if (IsChildAgent || m_attachmentScriptsStarted || !GotAttachmentsData)
+                    return null;
+
+                List<SceneObjectGroup> attachments = GetAttachments();
                 if (attachments.Count == 0)
-                    return;
+                    return null;
 
                 m_attachmentScriptsStarted = true;
+                return attachments;
             }
+        }
 
+        public void StartThisAttachmentIfRoot(SceneObjectGroup sog)
+        {
+            if (sog is null)
+                return;
+            StartAttachmentScriptList(new List<SceneObjectGroup> { sog });
+        }
+
+        private void StartAttachmentScriptList(List<SceneObjectGroup> attachments)
+        {
             if (m_scene.RegionInfo.RegionSettings.DisableScripts)
                 return;
 
@@ -1699,6 +1741,7 @@ namespace OpenSim.Region.Framework.Scenes
 
             IsChildAgent = true;
             m_attachmentScriptsStarted = false;
+            m_completeMovementReachedAttachments = false;
             GotAttachmentsData = false;
             m_scene.SwapRootAgentCount(true, IsNPC);
             RemoveFromPhysicalScene();
@@ -2378,7 +2421,7 @@ namespace OpenSim.Region.Framework.Scenes
                 }
                 else
                 {
-                    StartAttachmentScriptsIfRoot();
+                    OnCompleteMovementAttachments();
 
                     if (m_attachments.Count > 0)
                     {
@@ -2397,6 +2440,9 @@ namespace OpenSim.Region.Framework.Scenes
                         }
                     }
                 }
+
+                lock (AttachmentsSyncLock)
+                    m_completeMovementReachedAttachments = true;
 
                 if (!IsNPC)
                 {
