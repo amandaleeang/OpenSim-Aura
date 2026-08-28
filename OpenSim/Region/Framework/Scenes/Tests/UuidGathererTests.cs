@@ -25,8 +25,10 @@
  * SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
+using System;
 using System.Collections.Generic;
 using System.Text;
+using System.Threading;
 using NUnit.Framework;
 using OpenMetaverse;
 using OpenSim.Framework;
@@ -216,6 +218,77 @@ namespace OpenSim.Region.Framework.Scenes.Tests
             Assert.That(m_uuidGatherer.GatheredUuids.ContainsKey(TestHelpers.ParseTail(0x41)));
             Assert.That(m_uuidGatherer.GatheredUuids.ContainsKey(TestHelpers.ParseTail(0x42)));
             Assert.That(m_uuidGatherer.GatheredUuids.ContainsKey(TestHelpers.ParseTail(0x43)));
+        }
+
+        /// <summary>
+        /// A parent GET that misses the wave timeout must not drop nested UUIDs.
+        /// GatherAllConcurrent returns; the drain inspects the late parent and fetches children.
+        /// </summary>
+        [Test]
+        public void TestTimedOutInspectStillGathersChildren()
+        {
+            TestHelpers.InMethod();
+
+            UUID embeddedId = TestHelpers.ParseTail(0x20);
+            UUID secondLevelEmbeddedId = TestHelpers.ParseTail(0x21);
+            UUID missingEmbeddedId = TestHelpers.ParseTail(0x22);
+            UUID ncAssetId = TestHelpers.ParseTail(0x30);
+
+            m_assetService.Store(AssetHelpers.CreateNotecardAsset(
+                ncAssetId, string.Format("{0}Hello{1}World{2}", noteBase, embeddedId, missingEmbeddedId)));
+            m_assetService.Store(AssetHelpers.CreateNotecardAsset(
+                embeddedId, string.Format("{0}{1} We'll meet again.", noteBase, secondLevelEmbeddedId)));
+            m_assetService.Store(AssetHelpers.CreateNotecardAsset(
+                secondLevelEmbeddedId, noteBase + "Don't know where, don't know when."));
+
+            DelayedGetUuidGatherer gatherer = new DelayedGetUuidGatherer(m_assetService);
+            gatherer.DelayMs[ncAssetId] = 300;
+
+            FireAndForgetMethod previous = Util.FireAndForgetMethod;
+            try
+            {
+                Util.FireAndForgetMethod = FireAndForgetMethod.QueueUserWorkItem;
+
+                gatherer.AddForInspection(ncAssetId);
+
+                int tickStart = Environment.TickCount;
+                Assert.That(gatherer.GatherAllConcurrent(4, 50), Is.True);
+                int elapsed = Environment.TickCount - tickStart;
+
+                Assert.That(elapsed, Is.LessThan(200), "GatherAllConcurrent must return on wave timeout");
+                Assert.That(gatherer.FetchTimeouts, Is.GreaterThan(0));
+                Assert.That(gatherer.GatheredUuids.ContainsKey(ncAssetId), Is.False,
+                    "Timed-out parent must not be inspected on the calling thread");
+                Assert.That(gatherer.FailedUUIDs.Contains(ncAssetId), Is.False,
+                    "In-flight parent must not be recorded as a permanent miss");
+
+                Assert.That(gatherer.WaitForPendingFetches(5000), Is.True);
+
+                Assert.That(gatherer.GatheredUuids.ContainsKey(ncAssetId), Is.True);
+                Assert.That(gatherer.GatheredUuids.ContainsKey(embeddedId), Is.True);
+                Assert.That(gatherer.GatheredUuids.ContainsKey(secondLevelEmbeddedId), Is.True);
+                Assert.That(gatherer.FailedUUIDs.Contains(ncAssetId), Is.False);
+                Assert.That(m_assetService.Get(embeddedId.ToString()), Is.Not.Null);
+                Assert.That(m_assetService.Get(secondLevelEmbeddedId.ToString()), Is.Not.Null);
+            }
+            finally
+            {
+                Util.FireAndForgetMethod = previous;
+            }
+        }
+
+        private sealed class DelayedGetUuidGatherer : UuidGatherer
+        {
+            public Dictionary<UUID, int> DelayMs { get; } = new Dictionary<UUID, int>();
+
+            public DelayedGetUuidGatherer(IAssetService assetService) : base(assetService) {}
+
+            protected override AssetBase GetAsset(UUID uuid)
+            {
+                if (DelayMs.TryGetValue(uuid, out int ms) && ms > 0)
+                    Thread.Sleep(ms);
+                return base.GetAsset(uuid);
+            }
         }
     }
 }
