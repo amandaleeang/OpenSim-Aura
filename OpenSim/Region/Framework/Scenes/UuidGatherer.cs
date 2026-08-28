@@ -256,7 +256,11 @@ namespace OpenSim.Region.Framework.Scenes
 
         private readonly List<InflightFetch> m_pendingLate = new();
         private readonly HashSet<UUID> m_inFlight = new();
-        private HashSet<UUID> m_concurrentFetched;
+        /// <summary>
+        /// IDs already retrieved (inspect GET or leaf GET). Shared by sequential and concurrent paths
+        /// so callers do not FetchAsset inspect-queue assets a second time.
+        /// </summary>
+        private readonly HashSet<UUID> m_fetched = new();
         private int m_waveSize;
         private int m_fetchTimeoutMs;
         private ManualResetEventSlim m_drainDone;
@@ -548,6 +552,53 @@ namespace OpenSim.Region.Framework.Scenes
         }
 
         /// <summary>
+        /// True if this gatherer has already retrieved the asset (inspect GET or leaf GET).
+        /// Sequential HG callers skip a second FetchAsset of inspect-queue IDs.
+        /// </summary>
+        public bool IsFetched(UUID id)
+        {
+            return m_fetched.Contains(id);
+        }
+
+        /// <summary>
+        /// GET gathered leaf assets that were only listed during inspect, not retrieved
+        /// (textures, sounds, animations, and any other type recorded without a GET).
+        /// Sequential counterpart of the leaf pass in <see cref="GatherAllConcurrent"/>.
+        /// Inspect-queue IDs already retrieved during gather are not requested again.
+        /// </summary>
+        public void FetchUnfetchedLeavesSequential()
+        {
+            List<UUID> leaves = CollectUnfetchedLeaves();
+            for (int i = 0; i < leaves.Count; ++i)
+            {
+                UUID id = leaves[i];
+                AssetBase asset;
+                try
+                {
+                    asset = GetAsset(id);
+                }
+                catch (Exception e)
+                {
+                    if (verbose)
+                        m_log.Error($"[UUID GATHERER]: Failed to get asset {id} : {e.Message}");
+                    ErrorCount++;
+                    FailedUUIDs.Add(id);
+                    m_fetched.Add(id);
+                    continue;
+                }
+
+                m_fetched.Add(id);
+                if (asset != null)
+                    ++AssetGetCount;
+                else
+                {
+                    FailedUUIDs.Add(id);
+                    ErrorCount++;
+                }
+            }
+        }
+
+        /// <summary>
         /// Concurrent gather+download: drain the inspect queue in waves (FireAndForget),
         /// inspect on the calling thread (which discovers nested UUIDs), then download any remaining
         /// gathered leaf assets (textures/sounds/etc. that were only listed, not opened).
@@ -569,7 +620,7 @@ namespace OpenSim.Region.Framework.Scenes
             m_fetchTimeoutMs = fetchTimeoutMs;
             m_pendingLate.Clear();
             m_inFlight.Clear();
-            m_concurrentFetched = new HashSet<UUID>();
+            m_fetched.Clear();
             if (m_drainDone != null && m_drainDone.IsSet)
             {
                 m_drainDone.Dispose();
@@ -611,7 +662,7 @@ namespace OpenSim.Region.Framework.Scenes
 
         /// <summary>
         /// One concurrent wave: dequeue up to waveSize IDs, FireAndForget GetAsset, wait with timeout.
-        /// On success, optionally InspectAsset (inspect waves) and record in <see cref="m_concurrentFetched"/>.
+        /// On success, optionally InspectAsset (inspect waves) and record in <see cref="m_fetched"/>.
         /// Timed-out workers stay in <see cref="m_pendingLate"/>; the wait handle is not disposed until
         /// the GET completes so a late Store can still be inspected.
         /// </summary>
@@ -625,7 +676,7 @@ namespace OpenSim.Region.Framework.Scenes
             while (wave.Count < n && queue.Count > 0)
             {
                 UUID id = queue.Dequeue();
-                if (id.IsZero() || FailedUUIDs.Contains(id) || m_concurrentFetched.Contains(id) || m_inFlight.Contains(id))
+                if (id.IsZero() || FailedUUIDs.Contains(id) || m_fetched.Contains(id) || m_inFlight.Contains(id))
                     continue;
 
                 InflightFetch fetch = new InflightFetch
@@ -670,14 +721,20 @@ namespace OpenSim.Region.Framework.Scenes
             }
         }
 
-        private void FetchUnfetchedLeaves()
+        private List<UUID> CollectUnfetchedLeaves()
         {
             List<UUID> leaves = new List<UUID>();
             foreach (UUID id in GatheredUuids.Keys)
             {
-                if (!m_concurrentFetched.Contains(id) && !FailedUUIDs.Contains(id) && !m_inFlight.Contains(id))
+                if (!m_fetched.Contains(id) && !FailedUUIDs.Contains(id) && !m_inFlight.Contains(id))
                     leaves.Add(id);
             }
+            return leaves;
+        }
+
+        private void FetchUnfetchedLeaves()
+        {
+            List<UUID> leaves = CollectUnfetchedLeaves();
             if (leaves.Count == 0)
                 return;
 
@@ -795,7 +852,7 @@ namespace OpenSim.Region.Framework.Scenes
                 }
                 else
                 {
-                    m_concurrentFetched.Add(fetch.Id);
+                    m_fetched.Add(fetch.Id);
                     if (fetch.Inspect)
                         InspectAsset(fetch.Asset, fetch.Id);
                     else if (fetch.Asset != null)
@@ -855,6 +912,9 @@ namespace OpenSim.Region.Framework.Scenes
                 FailedUUIDs.Add(assetUuid);
                 return;
             }
+
+            if (assetBase != null)
+                m_fetched.Add(assetUuid);
 
             InspectAsset(assetBase, assetUuid);
         }
