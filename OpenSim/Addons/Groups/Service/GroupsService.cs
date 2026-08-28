@@ -695,10 +695,11 @@ namespace OpenSim.Groups
             if (mdata == null || (mdata != null && mdata.Length == 0))
                 return memberships;
 
+            HashSet<UUID> seen = new HashSet<UUID>();
             foreach (MembershipData d in mdata)
             {
                 GroupMembershipData gmember = GetAgentGroupMembership(RequestingAgentID, AgentID, d.GroupID, d);
-                if (gmember != null)
+                if (gmember != null && seen.Add(gmember.GroupID))
                 {
                     memberships.Add(gmember);
                     //m_log.DebugFormat("[XXX]: Member of {0} as {1}", gmember.GroupName, gmember.GroupTitle);

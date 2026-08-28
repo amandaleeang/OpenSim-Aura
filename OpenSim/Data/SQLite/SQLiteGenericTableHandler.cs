@@ -150,64 +150,72 @@ namespace OpenSim.Data.SQLite
 
         protected T[] DoQuery(SQLiteCommand cmd)
         {
-            IDataReader reader = ExecuteReader(cmd, m_Connection);
-            if (reader == null)
-                return new T[0];
-
-            CheckColumnNames(reader);
-
-            List<T> result = new List<T>();
-
-            while (reader.Read())
+            // Keep the connection locked for the whole read. The shared static
+            // connection plus an undisposed reader lets a second Groups query
+            // (CreateGroupReply triggers AgentDataUpdateRequest) see duplicate rows.
+            lock (m_Connection)
             {
-                T row = new T();
+                IDataReader reader = ExecuteReader(cmd, m_Connection);
+                if (reader == null)
+                    return new T[0];
 
-                foreach (string name in m_Fields.Keys)
+                try
                 {
-                    if (m_Fields[name].GetValue(row) is bool)
-                    {
-                        int v = Convert.ToInt32(reader[name]);
-                        m_Fields[name].SetValue(row, v != 0 ? true : false);
-                    }
-                    else if (m_Fields[name].GetValue(row) is UUID)
-                    {
-                        UUID uuid = UUID.Zero;
+                    CheckColumnNames(reader);
 
-                        UUID.TryParse(reader[name].ToString(), out uuid);
-                        m_Fields[name].SetValue(row, uuid);
-                    }
-                    else if (m_Fields[name].GetValue(row) is int)
+                    List<T> result = new List<T>();
+
+                    while (reader.Read())
                     {
-                        int v = Convert.ToInt32(reader[name]);
-                        m_Fields[name].SetValue(row, v);
+                        T row = new T();
+
+                        foreach (string name in m_Fields.Keys)
+                        {
+                            if (m_Fields[name].GetValue(row) is bool)
+                            {
+                                int v = Convert.ToInt32(reader[name]);
+                                m_Fields[name].SetValue(row, v != 0 ? true : false);
+                            }
+                            else if (m_Fields[name].GetValue(row) is UUID)
+                            {
+                                m_Fields[name].SetValue(row, DBGuid.FromDB(reader[name]));
+                            }
+                            else if (m_Fields[name].GetValue(row) is int)
+                            {
+                                int v = Convert.ToInt32(reader[name]);
+                                m_Fields[name].SetValue(row, v);
+                            }
+                            else
+                            {
+                                m_Fields[name].SetValue(row, reader[name]);
+                            }
+                        }
+
+                        if (m_DataField != null)
+                        {
+                            Dictionary<string, string> data =
+                                    new Dictionary<string, string>();
+
+                            foreach (string col in m_ColumnNames)
+                            {
+                                data[col] = reader[col].ToString();
+                                if (data[col] == null)
+                                    data[col] = String.Empty;
+                            }
+
+                            m_DataField.SetValue(row, data);
+                        }
+
+                        result.Add(row);
                     }
-                    else
-                    {
-                        m_Fields[name].SetValue(row, reader[name]);
-                    }
+
+                    return result.ToArray();
                 }
-
-                if (m_DataField != null)
+                finally
                 {
-                    Dictionary<string, string> data =
-                            new Dictionary<string, string>();
-
-                    foreach (string col in m_ColumnNames)
-                    {
-                        data[col] = reader[col].ToString();
-                        if (data[col] == null)
-                            data[col] = String.Empty;
-                    }
-
-                    m_DataField.SetValue(row, data);
+                    reader.Dispose();
                 }
-
-                result.Add(row);
             }
-
-            //CloseCommand(cmd);
-
-            return result.ToArray();
         }
 
         public virtual T[] Get(string where)
