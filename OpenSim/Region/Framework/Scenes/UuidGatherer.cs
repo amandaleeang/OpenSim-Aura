@@ -242,6 +242,26 @@ namespace OpenSim.Region.Framework.Scenes
         private bool verbose = true;
 
         /// <summary>
+        /// In-flight GET that missed the wave Wait. Inspect runs on the drain
+        /// thread when it completes so nested UUIDs still land in cache/DB.
+        /// </summary>
+        private class InflightFetch
+        {
+            public UUID Id;
+            public AssetBase Asset;
+            public Exception Error;
+            public ManualResetEventSlim Done;
+            public bool Inspect;
+        }
+
+        private readonly List<InflightFetch> m_pendingLate = new();
+        private readonly HashSet<UUID> m_inFlight = new();
+        private HashSet<UUID> m_concurrentFetched;
+        private int m_waveSize;
+        private int m_fetchTimeoutMs;
+        private ManualResetEventSlim m_drainDone;
+
+        /// <summary>
         /// Gets the next UUID to inspect.
         /// </summary>
         /// <value>If there is no next UUID then returns null</value>
@@ -533,6 +553,8 @@ namespace OpenSim.Region.Framework.Scenes
         /// gathered leaf assets (textures/sounds/etc. that were only listed, not opened).
         /// Used for HG home fetches and for grid-mode Robust HTTP Gets (same IAssetService.Get path).
         /// Serial GatherAll remains for callers that opt out.
+        /// A wave timeout does not cancel the GET. GatherAllConcurrent still returns so rez/scripts
+        /// can proceed; late completions are inspected on a drain thread and children are stored.
         /// </summary>
         public bool GatherAllConcurrent(int waveSize = 8, int fetchTimeoutMs = 30000)
         {
@@ -543,95 +565,251 @@ namespace OpenSim.Region.Framework.Scenes
             if (fetchTimeoutMs < 1)
                 fetchTimeoutMs = 1;
 
-            // UUIDs successfully retrieved during inspect waves (skip re-download later).
-            HashSet<UUID> fetched = new HashSet<UUID>();
+            m_waveSize = waveSize;
+            m_fetchTimeoutMs = fetchTimeoutMs;
+            m_pendingLate.Clear();
+            m_inFlight.Clear();
+            m_concurrentFetched = new HashSet<UUID>();
+            if (m_drainDone != null && m_drainDone.IsSet)
+            {
+                m_drainDone.Dispose();
+                m_drainDone = null;
+            }
 
             while (m_assetUuidsToInspect.Count > 0)
-            {
-                FetchAssetWave(m_assetUuidsToInspect, waveSize, fetchTimeoutMs, fetched, inspect: true);
-            }
+                FetchAssetWave(m_assetUuidsToInspect, inspect: true);
 
-            // Leaf assets (and any other gathered IDs) that were recorded without a GET.
-            List<UUID> leaves = new List<UUID>();
-            foreach (UUID id in GatheredUuids.Keys)
+            FetchUnfetchedLeaves();
+
+            if (m_pendingLate.Count > 0)
             {
-                if (!fetched.Contains(id) && !FailedUUIDs.Contains(id))
-                    leaves.Add(id);
-            }
-            if (leaves.Count > 0)
-            {
-                Queue<UUID> leafQueue = new Queue<UUID>(leaves);
-                while (leafQueue.Count > 0)
-                    FetchAssetWave(leafQueue, waveSize, fetchTimeoutMs, fetched, inspect: false);
+                if (m_drainDone == null)
+                    m_drainDone = new ManualResetEventSlim(false);
+                // Own thread: drain Waits on GetAsset pool workers and must not occupy one.
+                Thread drainThread = new Thread(DrainLateFetches)
+                {
+                    IsBackground = true,
+                    Name = "UuidGatherer.DrainLate"
+                };
+                drainThread.Start();
             }
 
             return true;
         }
 
         /// <summary>
-        /// One concurrent wave: dequeue up to waveSize IDs, FireAndForget GetAsset, wait with timeout.
-        /// On success, optionally InspectAsset (inspect waves) and record in <paramref name="fetched"/>.
+        /// Wait until the late-fetch drain has finished (or <paramref name="timeoutMs"/> elapses).
+        /// No-op if nothing was left in flight when <see cref="GatherAllConcurrent"/> returned.
         /// </summary>
-        private void FetchAssetWave(Queue<UUID> queue, int waveSize, int fetchTimeoutMs, HashSet<UUID> fetched, bool inspect)
+        public bool WaitForPendingFetches(int timeoutMs)
         {
-            int n = Math.Min(waveSize, queue.Count);
+            ManualResetEventSlim done = m_drainDone;
+            if (done == null)
+                return true;
+            return done.Wait(timeoutMs);
+        }
+
+        /// <summary>
+        /// One concurrent wave: dequeue up to waveSize IDs, FireAndForget GetAsset, wait with timeout.
+        /// On success, optionally InspectAsset (inspect waves) and record in <see cref="m_concurrentFetched"/>.
+        /// Timed-out workers stay in <see cref="m_pendingLate"/>; the wait handle is not disposed until
+        /// the GET completes so a late Store can still be inspected.
+        /// </summary>
+        private void FetchAssetWave(Queue<UUID> queue, bool inspect)
+        {
+            int n = Math.Min(m_waveSize, queue.Count);
             if (n < 1)
                 return;
 
-            UUID[] ids = new UUID[n];
-            AssetBase[] assets = new AssetBase[n];
-            Exception[] errors = new Exception[n];
-            ManualResetEventSlim[] done = new ManualResetEventSlim[n];
-
-            for (int i = 0; i < n; i++)
+            List<InflightFetch> wave = new List<InflightFetch>(n);
+            while (wave.Count < n && queue.Count > 0)
             {
-                ids[i] = queue.Dequeue();
-                done[i] = new ManualResetEventSlim(false);
-                int idx = i;
+                UUID id = queue.Dequeue();
+                if (id.IsZero() || FailedUUIDs.Contains(id) || m_concurrentFetched.Contains(id) || m_inFlight.Contains(id))
+                    continue;
+
+                InflightFetch fetch = new InflightFetch
+                {
+                    Id = id,
+                    Inspect = inspect,
+                    Done = new ManualResetEventSlim(false)
+                };
+                m_inFlight.Add(id);
+                wave.Add(fetch);
+                InflightFetch captured = fetch;
                 Util.FireAndForget(_ =>
                 {
-                    try { assets[idx] = GetAsset(ids[idx]); }
-                    catch (Exception e) { errors[idx] = e; }
-                    finally { try { done[idx].Set(); } catch (ObjectDisposedException) { } }
+                    try { captured.Asset = GetAsset(captured.Id); }
+                    catch (Exception e) { captured.Error = e; }
+                    finally { captured.Done.Set(); }
                 }, null, "UuidGatherer.GetAsset");
             }
+            if (wave.Count == 0)
+                return;
 
-            WaitHandle[] handles = new WaitHandle[n];
-            for (int i = 0; i < n; i++)
-                handles[i] = done[i].WaitHandle;
-            WaitHandle.WaitAll(handles, fetchTimeoutMs);
-
-            for (int i = 0; i < n; i++)
+            int tickStart = Util.EnvironmentTickCount();
+            foreach (InflightFetch fetch in wave)
             {
-                if (!done[i].IsSet)
+                int left = m_fetchTimeoutMs - Util.EnvironmentTickCountSubtract(tickStart);
+                if (left < 0)
+                    left = 0;
+                fetch.Done.Wait(left);
+            }
+
+            foreach (InflightFetch fetch in wave)
+            {
+                if (!fetch.Done.IsSet)
                 {
                     if (verbose)
-                        m_log.Debug($"[UUID GATHERER]: Fetch of asset {ids[i]} timed out after {fetchTimeoutMs} ms");
+                        m_log.Debug($"[UUID GATHERER]: Fetch of asset {fetch.Id} timed out after {m_fetchTimeoutMs} ms");
                     FetchTimeouts++;
-                    ErrorCount++;
-                    FailedUUIDs.Add(ids[i]);
+                    m_pendingLate.Add(fetch);
                 }
-                else if (errors[i] != null)
+                else
+                    ApplyFetchResult(fetch);
+            }
+        }
+
+        private void FetchUnfetchedLeaves()
+        {
+            List<UUID> leaves = new List<UUID>();
+            foreach (UUID id in GatheredUuids.Keys)
+            {
+                if (!m_concurrentFetched.Contains(id) && !FailedUUIDs.Contains(id) && !m_inFlight.Contains(id))
+                    leaves.Add(id);
+            }
+            if (leaves.Count == 0)
+                return;
+
+            Queue<UUID> leafQueue = new Queue<UUID>(leaves);
+            while (leafQueue.Count > 0)
+                FetchAssetWave(leafQueue, inspect: false);
+        }
+
+        /// <summary>
+        /// Background: wait for GETs that missed their wave, InspectAsset, then fetch any new children.
+        /// Does not block GatherAllConcurrent. Bound so a wedged HTTP cannot drain forever.
+        /// </summary>
+        private void DrainLateFetches()
+        {
+            const int maxRounds = 8;
+            try
+            {
+                int rounds = 0;
+                while (rounds < maxRounds && (m_pendingLate.Count > 0 || m_assetUuidsToInspect.Count > 0))
+                {
+                    rounds++;
+                    ReapPendingLate(Math.Max(m_fetchTimeoutMs * 4, 2000));
+
+                    while (m_assetUuidsToInspect.Count > 0)
+                        FetchAssetWave(m_assetUuidsToInspect, inspect: true);
+
+                    FetchUnfetchedLeaves();
+                }
+
+                AbandonPendingLate();
+            }
+            catch (Exception e)
+            {
+                m_log.Error($"[UUID GATHERER]: Late fetch drain failed: {e.Message}");
+                AbandonPendingLate();
+            }
+            finally
+            {
+                m_drainDone?.Set();
+            }
+        }
+
+        private void ReapPendingLate(int waitMs)
+        {
+            if (m_pendingLate.Count == 0)
+                return;
+
+            List<InflightFetch> batch = new List<InflightFetch>(m_pendingLate);
+            m_pendingLate.Clear();
+
+            int tickStart = Util.EnvironmentTickCount();
+            foreach (InflightFetch fetch in batch)
+            {
+                int left = waitMs - Util.EnvironmentTickCountSubtract(tickStart);
+                if (left < 0)
+                    left = 0;
+                fetch.Done.Wait(left);
+            }
+
+            foreach (InflightFetch fetch in batch)
+            {
+                if (fetch.Done.IsSet)
                 {
                     if (verbose)
-                        m_log.Error($"[UUID GATHERER]: Failed to get asset {ids[i]} : {errors[i].Message}");
+                        m_log.Debug($"[UUID GATHERER]: Late fetch of asset {fetch.Id} completed");
+                    ApplyFetchResult(fetch);
+                }
+                else
+                    m_pendingLate.Add(fetch);
+            }
+        }
+
+        private void AbandonPendingLate()
+        {
+            if (m_pendingLate.Count == 0)
+                return;
+
+            List<InflightFetch> leftover = new List<InflightFetch>(m_pendingLate);
+            m_pendingLate.Clear();
+            foreach (InflightFetch fetch in leftover)
+            {
+                if (fetch.Done.IsSet)
+                {
+                    ApplyFetchResult(fetch);
+                    continue;
+                }
+
+                if (verbose)
+                    m_log.Debug($"[UUID GATHERER]: Giving up on timed-out fetch of asset {fetch.Id}");
+                m_inFlight.Remove(fetch.Id);
+                FailedUUIDs.Add(fetch.Id);
+                ErrorCount++;
+                InflightFetch captured = fetch;
+                Util.FireAndForget(_ =>
+                {
+                    try { captured.Done.Wait(120000); }
+                    catch { }
+                    try { captured.Done.Dispose(); }
+                    catch { }
+                }, null, "UuidGatherer.LateDispose", false);
+            }
+        }
+
+        private void ApplyFetchResult(InflightFetch fetch)
+        {
+            m_inFlight.Remove(fetch.Id);
+            try
+            {
+                if (fetch.Error != null)
+                {
+                    if (verbose)
+                        m_log.Error($"[UUID GATHERER]: Failed to get asset {fetch.Id} : {fetch.Error.Message}");
                     ErrorCount++;
-                    FailedUUIDs.Add(ids[i]);
+                    FailedUUIDs.Add(fetch.Id);
                 }
                 else
                 {
-                    fetched.Add(ids[i]);
-                    if (inspect)
-                        InspectAsset(assets[i], ids[i]);
-                    else if (assets[i] != null)
+                    m_concurrentFetched.Add(fetch.Id);
+                    if (fetch.Inspect)
+                        InspectAsset(fetch.Asset, fetch.Id);
+                    else if (fetch.Asset != null)
                         ++AssetGetCount;
                     else
                     {
-                        FailedUUIDs.Add(ids[i]);
+                        FailedUUIDs.Add(fetch.Id);
                         ErrorCount++;
                     }
                 }
-                done[i].Dispose();
+            }
+            finally
+            {
+                fetch.Done.Dispose();
             }
         }
 
