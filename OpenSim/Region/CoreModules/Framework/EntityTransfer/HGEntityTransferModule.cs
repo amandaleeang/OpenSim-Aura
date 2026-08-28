@@ -823,6 +823,7 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
                 return false;
             }
 
+            // Local homecoming: assets are already here, no gather. Foreign ViaHGLogin: gather, then base.
             if (OwnerID.IsZero() || m_scene.UserManagementModule.IsLocalGridUser(OwnerID))
                 return base.HandleIncomingAttachments(sp, attachments);
 
