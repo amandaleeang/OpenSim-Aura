@@ -40,6 +40,7 @@ using OpenSim.Services.Connectors.Hypergrid;
 using OpenSim.Services.Friends;
 using OpenSim.Services.HypergridService;
 using OpenSim.Services.Interfaces;
+using OpenSim.Region.CoreModules.Framework.UserManagement;
 using FriendInfo = OpenSim.Services.Interfaces.FriendInfo;
 
 namespace OpenSim.Services.Friends.Tests
@@ -188,6 +189,35 @@ namespace OpenSim.Services.Friends.Tests
         {
             Dictionary<string, object> parsed = ServerUtils.ParseXmlResponse(Encoding.UTF8.GetString(reply));
             return HGFriendsServicesConnector.TryParseSuccess(parsed, out bool ok) && ok;
+        }
+
+        [Test]
+        public void ResolveFriendsServerURI_CircuitFriendsThenHome()
+        {
+            UUID id = UUID.Random();
+            AgentCircuitData circuit = new AgentCircuitData
+            {
+                AgentID = id,
+                ServiceURLs = new Dictionary<string, object>
+                {
+                    ["FriendsServerURI"] = "http://friends.example:8002/",
+                    ["HomeURI"] = "http://home.example:8002/"
+                }
+            };
+            string friends = HGIdentity.ResolveFriendsServerURI(null, null, id, circuit);
+            Assert.That(friends.IndexOf("friends.example", StringComparison.OrdinalIgnoreCase) >= 0);
+
+            circuit.ServiceURLs.Remove("FriendsServerURI");
+            string home = HGIdentity.ResolveFriendsServerURI(null, null, id, circuit);
+            Assert.That(home.IndexOf("home.example", StringComparison.OrdinalIgnoreCase) >= 0);
+        }
+
+        [Test]
+        public void TryResolveUUI_FailsIfUnknownWithoutGetUui()
+        {
+            bool ok = HGIdentity.TryResolveUUI(null, null, UUID.Random(), UUID.Random(), out string uui);
+            Assert.That(ok, Is.False);
+            Assert.That(string.IsNullOrEmpty(uui));
         }
 
         class FakeHGFriendsService : IHGFriendsService
