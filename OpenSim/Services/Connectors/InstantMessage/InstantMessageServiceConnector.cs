@@ -49,13 +49,23 @@ namespace OpenSim.Services.Connectors.InstantMessage
         /// <returns>Bool if the message was successfully delivered at the other side.</returns>
         public static bool SendInstantMessage(string url, GridInstantMessage im, string messageKey)
         {
+            return SendInstantMessage(url, im, messageKey, 10000);
+        }
+
+        /// <summary>
+        /// XML-RPC grid_instant_message with an explicit HTTP timeout (ms).
+        /// Friendship offer popups use 2000 so persist is not blocked on the 10s default.
+        /// </summary>
+        public static bool SendInstantMessage(string url, GridInstantMessage im, string messageKey, int timeoutMs)
+        {
             Hashtable xmlrpcdata = ConvertGridInstantMessageToXMLRPC(im, messageKey);
             xmlrpcdata["region_handle"] = 0;
 
             XmlRpcRequest GridReq = new("grid_instant_message", new ArrayList { xmlrpcdata });
             try
             {
-                using HttpClient hclient = WebUtil.GetNewGlobalHttpClient(10000);
+                int timeout = timeoutMs > 0 ? timeoutMs : 10000;
+                using HttpClient hclient = WebUtil.GetNewGlobalHttpClient(timeout);
                 XmlRpcResponse GridResp = GridReq.Send(url, hclient);
 
                 Hashtable responseData = (Hashtable)GridResp.Value;

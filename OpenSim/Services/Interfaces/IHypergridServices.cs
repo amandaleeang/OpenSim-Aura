@@ -125,12 +125,42 @@ namespace OpenSim.Services.Interfaces
         bool LocalFriendshipApproved(UUID userID, string userName, UUID friendID);
     }
 
+    public enum FriendshipCompleteReason
+    {
+        Upgraded,
+        Already,
+        NoPending,
+        HomeAFailed
+    }
+
+    public class HGFriendshipOffer
+    {
+        public UUID FromID;
+        public UUID ToID;
+        public string Message = string.Empty;
+        public string FromName = string.Empty;
+        public string FromHomeURI = string.Empty;
+        public string FromFirst = string.Empty;
+        public string FromLast = string.Empty;
+        public UUID SessionID;
+        public string ServiceKey = string.Empty;
+
+        public bool HasSessionProof =>
+            SessionID.IsNotZero() && !string.IsNullOrEmpty(ServiceKey)
+            && !string.IsNullOrWhiteSpace(FromHomeURI);
+    }
+
     public interface IHGFriendsService
     {
         int GetFriendPerms(UUID userID, UUID friendID);
         bool NewFriendship(FriendInfo finfo, bool verified);
+        bool NewFriendship(FriendInfo finfo, bool verified, out string reason);
+        bool NewFriendship(FriendInfo finfo, bool verified, UUID sessionId, out string reason);
         bool DeleteFriendship(FriendInfo finfo, string secret);
         bool FriendshipOffered(UUID from, string fromName, UUID to, string message);
+        bool FriendshipOffered(HGFriendshipOffer offer, out bool delivered);
+        bool StoreReversePending(UUID fromId, UUID toId, string fromUui);
+        bool DropReversePending(UUID fromId, UUID toId);
         bool ValidateFriendshipOffered(UUID fromID, UUID toID);
         // Returns the local friends online
         List<UUID> StatusNotification(List<string> friends, UUID userID, bool online);

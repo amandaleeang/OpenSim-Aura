@@ -54,6 +54,7 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
         private static readonly ILog m_log = LogManager.GetLogger(MethodBase.GetCurrentMethod().DeclaringType);
 
         private int m_levelHGFriends = 0;
+        private bool m_HomeCanonicalOffers = false;
 
         IUserManagement m_uMan;
         public IUserManagement UserManagementModule
@@ -81,6 +82,7 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
 
             base.AddRegion(scene);
             scene.RegisterModuleInterface<IFriendsSimConnector>(this);
+            scene.EventManager.OnIncomingInstantMessage += OnIncomingFriendshipIM;
         }
 
         public override void RegionLoaded(Scene scene)
@@ -89,6 +91,13 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
                 return;
             if (m_StatusNotifier == null)
                 m_StatusNotifier = new HGStatusNotifier(this);
+        }
+
+        public override void RemoveRegion(Scene scene)
+        {
+            if (m_Enabled)
+                scene.EventManager.OnIncomingInstantMessage -= OnIncomingFriendshipIM;
+            base.RemoveRegion(scene);
         }
 
         protected override void InitModule(IConfigSource config)
@@ -100,9 +109,7 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
             if (friendsConfig != null)
             {
                 m_levelHGFriends = friendsConfig.GetInt("LevelHGFriends", 0);
-
-                // TODO: read in all config variables pertaining to
-                // HG friendship permissions
+                m_HomeCanonicalOffers = friendsConfig.GetBoolean("HomeCanonicalOffers", false);
             }
         }
 
@@ -126,37 +133,95 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
 
         protected override void OnInstantMessage(IClientAPI client, GridInstantMessage im)
         {
-            if ((InstantMessageDialog)im.dialog == InstantMessageDialog.FriendshipOffered)
+            if ((InstantMessageDialog)im.dialog != InstantMessageDialog.FriendshipOffered)
             {
-                // we got a friendship offer
-                UUID principalID = new(im.fromAgentID);
-                UUID friendID = new(im.toAgentID);
+                base.OnInstantMessage(client, im);
+                return;
+            }
 
-                // Check if friendID is foreigner and if principalID has the permission
-                // to request friendships with foreigners. If not, return immediately.
-                if (!UserManagementModule.IsLocalGridUser(friendID))
+            UUID principalID = new(im.fromAgentID);
+            UUID friendID = new(im.toAgentID);
+
+            if (!UserManagementModule.IsLocalGridUser(friendID))
+            {
+                ((Scene)client.Scene).TryGetScenePresence(principalID, out ScenePresence avatar);
+                if (avatar is null)
+                    return;
+
+                if (avatar.GodController.UserLevel < m_levelHGFriends)
                 {
-                    ((Scene)client.Scene).TryGetScenePresence(principalID, out ScenePresence avatar);
-                    if (avatar is null)
-                        return;
-
-                    if (avatar.GodController.UserLevel < m_levelHGFriends)
-                    {
-                        client.SendAgentAlertMessage("Unable to send friendship invitation to foreigner. Insufficient permissions.", false);
-                        return;
-                    }
+                    client.SendAgentAlertMessage("Unable to send friendship invitation to foreigner. Insufficient permissions.", false);
+                    return;
                 }
             }
 
-            base.OnInstantMessage(client, im);
+            bool aLocal = UserManagementModule.IsLocalGridUser(principalID);
+            bool bLocal = UserManagementModule.IsLocalGridUser(friendID);
+            if (!m_HomeCanonicalOffers || (aLocal && bLocal))
+            {
+                base.OnInstantMessage(client, im);
+                return;
+            }
+
+            FriendInfo[] finfos = GetFriendsFromCache(principalID);
+            if (finfos is not null)
+            {
+                FriendInfo f = GetFriend(finfos, friendID);
+                if (f is not null)
+                {
+                    client.SendAgentAlertMessage("This person is already your friend. Please delete it first if you want to reestablish the friendship.", false);
+                    return;
+                }
+            }
+
+            OfferHomeCanonical(client, principalID, friendID, im);
         }
 
         protected override void OnApproveFriendRequest(IClientAPI client, UUID friendID, List<UUID> callingCardFolders)
         {
-            // Update the local cache. Yes, we need to do it right here
-            // because the HGFriendsService placed something on the DB
-            // from under the sim
-            base.OnApproveFriendRequest(client, friendID, callingCardFolders);
+            AddFriendship(client, friendID);
+        }
+
+        public override void AddFriendship(IClientAPI client, UUID friendID)
+        {
+            bool aLocal = UserManagementModule.IsLocalGridUser(client.AgentId);
+            bool bLocal = UserManagementModule.IsLocalGridUser(friendID);
+            if (!m_HomeCanonicalOffers || (aLocal && bLocal))
+            {
+                base.AddFriendship(client, friendID);
+                return;
+            }
+
+            if (!CompleteHomeCanonical(client, friendID))
+                return;
+
+            RecacheFriends(client);
+            ICallingCardModule ccm = client.Scene.RequestModuleInterface<ICallingCardModule>();
+            ccm?.CreateCallingCard(client.AgentId, friendID, UUID.Zero);
+            if (LocalFriendshipApproved(client.AgentId, client.Name, friendID))
+                client.SendAgentOnline(new UUID[] { friendID });
+        }
+
+        protected override void OnDenyFriendRequest(IClientAPI client, UUID friendID, List<UUID> callingCardFolders)
+        {
+            bool aLocal = UserManagementModule.IsLocalGridUser(client.AgentId);
+            bool bLocal = UserManagementModule.IsLocalGridUser(friendID);
+            if (!m_HomeCanonicalOffers || (aLocal && bLocal))
+            {
+                base.OnDenyFriendRequest(client, friendID, callingCardFolders);
+                return;
+            }
+
+            Scene scene = (Scene)client.Scene;
+            AgentCircuitData circuit = HGIdentity.GetCircuit(scene, client.AgentId);
+            string homeB = HGIdentity.ResolveFriendsServerURI(scene, UserManagementModule, client.AgentId, circuit);
+            string homeA = HGIdentity.ResolveFriendsServerURI(scene, UserManagementModule, friendID, HGIdentity.GetCircuit(scene, friendID));
+            // Both homes store Principal=B, Friend=A (pending / reverse). Drop that pair.
+            if (!string.IsNullOrEmpty(homeB))
+                new HGFriendsServicesConnector(homeB).DropReversePending(friendID, client.AgentId);
+            if (!string.IsNullOrEmpty(homeA))
+                new HGFriendsServicesConnector(homeA).DropReversePending(friendID, client.AgentId);
+            RecacheFriends(client);
         }
 
         protected override bool CacheFriends(IClientAPI client)
@@ -918,6 +983,145 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
             }
 
             return false;
+        }
+
+        void OnIncomingFriendshipIM(GridInstantMessage im)
+        {
+            if (im is null || im.fromGroup)
+                return;
+            if ((InstantMessageDialog)im.dialog != InstantMessageDialog.FriendshipOffered)
+                return;
+            LocalFriendshipOffered(new UUID(im.toAgentID), im);
+        }
+
+        bool OfferHomeCanonical(IClientAPI client, UUID agentID, UUID friendID, GridInstantMessage im)
+        {
+            Scene scene = (Scene)client.Scene;
+            IUserManagement um = UserManagementModule;
+
+            if (!HGIdentity.TryResolveUUI(scene, um, agentID, friendID, out string friendUui)
+                    && string.IsNullOrEmpty(HGIdentity.ResolveHomeURI(scene, um, friendID)))
+            {
+                client.SendAgentAlertMessage("Unable to send friendship invitation. User identity could not be resolved.", false);
+                return false;
+            }
+
+            AgentCircuitData aCircuit = HGIdentity.GetCircuit(scene, agentID);
+            if (aCircuit is null || aCircuit.SessionID.IsZero())
+            {
+                client.SendAgentAlertMessage("Unable to send friendship invitation. Could not reach your home grid.", false);
+                return false;
+            }
+
+            string homeA = HGIdentity.ResolveHomeURI(scene, um, agentID, aCircuit);
+            string friendsA = HGIdentity.ResolveFriendsServerURI(scene, um, agentID, aCircuit);
+            string homeB = HGIdentity.ResolveHomeURI(scene, um, friendID);
+            string friendsB = HGIdentity.ResolveFriendsServerURI(scene, um, friendID, HGIdentity.GetCircuit(scene, friendID));
+            if (string.IsNullOrWhiteSpace(homeB) && string.IsNullOrWhiteSpace(friendsB))
+            {
+                client.SendAgentAlertMessage("Unable to send friendship invitation. User identity could not be resolved.", false);
+                return false;
+            }
+            if (string.IsNullOrWhiteSpace(friendsB))
+                friendsB = homeB;
+            if (string.IsNullOrWhiteSpace(friendsA))
+                friendsA = homeA;
+
+            bool aLocal = um.IsLocalGridUser(agentID);
+
+            if (!aLocal && string.IsNullOrEmpty(aCircuit.ServiceSessionID))
+            {
+                client.SendAgentAlertMessage("Unable to send friendship invitation. Could not reach your home grid.", false);
+                return false;
+            }
+
+            if (aLocal)
+            {
+                FriendsService.StoreFriend(friendID.ToString(), agentID.ToString(), 0);
+            }
+            else
+            {
+                if (string.IsNullOrWhiteSpace(friendsA))
+                {
+                    client.SendAgentAlertMessage("Unable to send friendship invitation. Could not reach your home grid.", false);
+                    return false;
+                }
+                HGFriendsServicesConnector homeAConn = new(friendsA, aCircuit.SessionID, aCircuit.ServiceSessionID);
+                if (!homeAConn.StoreReversePending(agentID, friendID, agentID.ToString(), aCircuit.SessionID, aCircuit.ServiceSessionID))
+                {
+                    client.SendAgentAlertMessage("Unable to send friendship invitation. Could not reach your home grid.", false);
+                    return false;
+                }
+            }
+
+            string fromHome = homeA;
+            string fromName = im.fromAgentName;
+            if (!string.IsNullOrWhiteSpace(fromHome))
+            {
+                try
+                {
+                    string lastname = "@" + new Uri(fromHome).Authority;
+                    fromName = im.fromAgentName.Replace(" ", ".") + lastname;
+                }
+                catch (UriFormatException) { }
+            }
+            GridInstantMessage.SplitDisplayName(im.fromAgentName, out string fromFirst, out string fromLast);
+
+            // Persist on HomeB's service (this Robust when B is local; foreign /hgfriends otherwise).
+            HGFriendsServicesConnector homeBConn = new(friendsB, aCircuit.SessionID, aCircuit.ServiceSessionID ?? string.Empty);
+            bool persistOk = homeBConn.FriendshipOffered(agentID, friendID, im.message, fromName,
+                fromHome, fromFirst, fromLast, aCircuit.SessionID, aCircuit.ServiceSessionID ?? string.Empty, out bool delivered);
+
+            if (!persistOk)
+            {
+                if (aLocal)
+                    FriendsService.Delete(friendID, agentID.ToString());
+                else if (!string.IsNullOrWhiteSpace(friendsA))
+                    new HGFriendsServicesConnector(friendsA).DropReversePending(agentID, friendID);
+                client.SendAgentAlertMessage("Unable to send friendship invitation. Could not reach the destination home grid.", false);
+                return false;
+            }
+
+            if (!delivered)
+                LocalFriendshipOffered(friendID, im);
+
+            if (Util.ParseUniversalUserIdentifier(friendUui, out UUID fid, out string fhome, out string ffirst, out string flast, out _))
+                HGIdentity.RememberContact(scene, um, fid, ffirst, flast, fhome);
+            else if (!string.IsNullOrWhiteSpace(homeB))
+                HGIdentity.RememberContact(scene, um, friendID, string.Empty, string.Empty, homeB);
+            HGIdentity.RememberContact(scene, um, agentID, fromFirst, fromLast, fromHome);
+            return true;
+        }
+
+        bool CompleteHomeCanonical(IClientAPI client, UUID friendID)
+        {
+            Scene scene = (Scene)client.Scene;
+            AgentCircuitData circuit = HGIdentity.GetCircuit(scene, client.AgentId);
+            string homeB = HGIdentity.ResolveFriendsServerURI(scene, UserManagementModule, client.AgentId, circuit);
+            if (string.IsNullOrWhiteSpace(homeB))
+            {
+                client.SendAgentAlertMessage("Unable to complete friendship. Could not reach your home grid.", false);
+                return false;
+            }
+
+            HGFriendsServicesConnector conn;
+            if (circuit is not null)
+                conn = new HGFriendsServicesConnector(homeB, circuit.SessionID, circuit.ServiceSessionID ?? string.Empty);
+            else
+                conn = new HGFriendsServicesConnector(homeB);
+
+            if (!conn.NewFriendship(client.AgentId, friendID.ToString(), out string reason))
+            {
+                client.SendAgentAlertMessage("Unable to complete friendship.", false);
+                return false;
+            }
+            if (reason.Equals("no_pending", StringComparison.OrdinalIgnoreCase)
+                    || reason.Equals("homea_failed", StringComparison.OrdinalIgnoreCase))
+            {
+                client.SendAgentAlertMessage("Unable to complete friendship.", false);
+                return false;
+            }
+            return true;
         }
 
         public override bool LocalFriendshipOffered(UUID toID, GridInstantMessage im)

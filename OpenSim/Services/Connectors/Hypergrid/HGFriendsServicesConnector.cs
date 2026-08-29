@@ -118,6 +118,12 @@ namespace OpenSim.Services.Connectors.Hypergrid
 
         public bool NewFriendship(UUID PrincipalID, string Friend)
         {
+            return NewFriendship(PrincipalID, Friend, out _);
+        }
+
+        public bool NewFriendship(UUID PrincipalID, string Friend, out string reason)
+        {
+            reason = string.Empty;
             FriendInfo finfo = new FriendInfo();
             finfo.PrincipalID = PrincipalID;
             finfo.Friend = Friend;
@@ -146,8 +152,18 @@ namespace OpenSim.Services.Connectors.Hypergrid
             {
                 Dictionary<string, object> replyData = ServerUtils.ParseXmlResponse(reply);
 
+                if (replyData != null && replyData.TryGetValue("Reason", out object r) && r != null)
+                    reason = r.ToString();
+                else if (replyData != null && replyData.TryGetValue("REASON", out r) && r != null)
+                    reason = r.ToString();
+
                 if (TryParseSuccess(replyData, out bool success))
+                {
+                    if (reason.Equals("already", StringComparison.OrdinalIgnoreCase)
+                            || reason.Equals("upgraded", StringComparison.OrdinalIgnoreCase))
+                        return true;
                     return success;
+                }
 
                 m_log.DebugFormat("[HGFRIENDS CONNECTOR]: StoreFriend {0} {1} received null response",
                     PrincipalID, Friend);
@@ -157,6 +173,83 @@ namespace OpenSim.Services.Connectors.Hypergrid
 
             return false;
 
+        }
+
+        /// <summary>
+        /// Synchronous /hgfriends friendship_offered (persist + optional Delivered).
+        /// Does not use FriendsSimConnector.Call (FireAndForget).
+        /// </summary>
+        public bool FriendshipOffered(UUID fromId, UUID toId, string message, string fromName,
+            string fromHomeURI, string fromFirst, string fromLast,
+            UUID sessionId, string serviceKey, out bool delivered)
+        {
+            delivered = false;
+            Dictionary<string, object> sendData = new()
+            {
+                ["METHOD"] = "friendship_offered",
+                ["FromID"] = fromId.ToString(),
+                ["ToID"] = toId.ToString(),
+                ["Message"] = message ?? string.Empty,
+                ["FromName"] = fromName ?? string.Empty,
+                ["FromHomeURI"] = fromHomeURI ?? string.Empty,
+                ["FromFirst"] = fromFirst ?? string.Empty,
+                ["FromLast"] = fromLast ?? string.Empty,
+                ["SESSIONID"] = sessionId.ToString(),
+                ["KEY"] = serviceKey ?? string.Empty
+            };
+
+            Dictionary<string, object> replyData = PostSync(sendData, 20);
+            if (replyData is null)
+                return false;
+            if (replyData.TryGetValue("Delivered", out object d) && d != null)
+                bool.TryParse(d.ToString(), out delivered);
+            return TryParseSuccess(replyData, out bool success) && success;
+        }
+
+        public bool StoreReversePending(UUID fromId, UUID toId, string fromUui,
+            UUID sessionId, string serviceKey)
+        {
+            Dictionary<string, object> sendData = new()
+            {
+                ["METHOD"] = "store_reverse_pending",
+                ["FromID"] = fromId.ToString(),
+                ["ToID"] = toId.ToString(),
+                ["FromUUI"] = fromUui ?? fromId.ToString(),
+                ["SESSIONID"] = sessionId.ToString(),
+                ["KEY"] = serviceKey ?? string.Empty
+            };
+            Dictionary<string, object> replyData = PostSync(sendData, 15);
+            return replyData is not null && TryParseSuccess(replyData, out bool success) && success;
+        }
+
+        public bool DropReversePending(UUID fromId, UUID toId)
+        {
+            Dictionary<string, object> sendData = new()
+            {
+                ["METHOD"] = "drop_reverse_pending",
+                ["FromID"] = fromId.ToString(),
+                ["ToID"] = toId.ToString()
+            };
+            Dictionary<string, object> replyData = PostSync(sendData, 15);
+            return replyData is not null && TryParseSuccess(replyData, out bool success) && success;
+        }
+
+        Dictionary<string, object> PostSync(Dictionary<string, object> sendData, int timeoutSecs)
+        {
+            string uri = m_ServerURI + "/hgfriends";
+            try
+            {
+                string reply = SynchronousRestFormsRequester.MakeRequest("POST",
+                    uri, ServerUtils.BuildQueryString(sendData), timeoutSecs);
+                if (string.IsNullOrEmpty(reply))
+                    return null;
+                return ServerUtils.ParseXmlResponse(reply);
+            }
+            catch (Exception e)
+            {
+                m_log.DebugFormat("[HGFRIENDS CONNECTOR]: Exception when contacting friends server at {0}: {1}", uri, e.Message);
+                return null;
+            }
         }
 
         /// <summary>

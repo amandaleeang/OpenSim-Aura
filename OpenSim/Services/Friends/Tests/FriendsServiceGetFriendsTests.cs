@@ -220,22 +220,94 @@ namespace OpenSim.Services.Friends.Tests
             Assert.That(string.IsNullOrEmpty(uui));
         }
 
+        [Test]
+        public void HomeHostsMatch_HttpsDefaultPortVsFromName()
+        {
+            Assert.That(HGFriendsService.HomeHostsMatch("https://grid.example/", "First.Last@grid.example"), Is.True);
+            Assert.That(HGFriendsService.HomeHostsMatch("https://grid.example:8002/", "First.Last@other.example"), Is.False);
+            Assert.That(HGFriendsService.HomeHostsMatch("https://grid.example:8002/", "First.Last@grid.example:8002"), Is.True);
+            Assert.That(HGFriendsService.HomeHostsMatch("https://grid.example/", ""), Is.True);
+        }
+
+        [Test]
+        public void TryCompleteLocal_UpgradeAlreadyNoPending()
+        {
+            NullFriendsData.Clear();
+            IniConfigSource config = new IniConfigSource();
+            config.AddConfig("FriendsService");
+            config.Configs["FriendsService"].Set("StorageProvider",
+                Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "OpenSim.Data.Null.dll")));
+            IFriendsService svc = new FriendsService(config);
+
+            UUID b = UUID.Random();
+            UUID a = UUID.Random();
+            string aUui = a + ";http://a.example:8002/;Ann Bee;abcd1234";
+
+            FriendInfo req = new FriendInfo { PrincipalID = b, Friend = a.ToString() };
+            Assert.That(HGFriendsService.TryCompleteLocal(svc, req, out _), Is.EqualTo(FriendshipCompleteReason.NoPending));
+
+            svc.StoreFriend(b.ToString(), aUui, 0);
+            svc.StoreFriend(a.ToString(), b.ToString(), 0);
+            FriendshipCompleteReason r = HGFriendsService.TryCompleteLocal(svc, req, out string exact);
+            Assert.That(r, Is.EqualTo(FriendshipCompleteReason.Upgraded));
+            Assert.That(exact, Is.EqualTo(aUui));
+
+            FriendInfo[] bFriends = svc.GetFriends(b.ToString());
+            Assert.That(Array.Exists(bFriends, f => f.Friend == aUui && f.MyFlags == 1 && f.TheirFlags != -1));
+            FriendInfo[] aFriends = svc.GetFriends(a.ToString());
+            Assert.That(Array.Exists(aFriends, f => f.Friend == b.ToString() && f.TheirFlags == -1), Is.False,
+                "UUID-only reverse pending must be deleted on upgrade");
+
+            r = HGFriendsService.TryCompleteLocal(svc, req, out _);
+            Assert.That(r, Is.EqualTo(FriendshipCompleteReason.Already));
+        }
+
+        [Test]
+        public void FriendshipOfferedHandler_ReturnsDelivered()
+        {
+            FakeHGFriendsService svc = new FakeHGFriendsService { OfferResult = true, OfferDelivered = false };
+            HGFriendsServerPostHandler handler = new HGFriendsServerPostHandler(svc, null, null);
+            byte[] reply = Post(handler, "METHOD=friendship_offered&FromID=" + UUID.Random() + "&ToID=" + UUID.Random()
+                + "&FromName=Ann.Bee@a.example&Message=hi");
+            Dictionary<string, object> parsed = ServerUtils.ParseXmlResponse(Encoding.UTF8.GetString(reply));
+            Assert.That(HGFriendsServicesConnector.TryParseSuccess(parsed, out bool ok) && ok);
+            Assert.That(parsed.TryGetValue("Delivered", out object d) && d != null && d.ToString().Equals("False", StringComparison.OrdinalIgnoreCase));
+        }
+
         class FakeHGFriendsService : IHGFriendsService
         {
             public bool DeleteCalled;
             public string LastSecret;
             public bool DeleteResult;
             public bool NewFriendshipResult;
+            public bool OfferResult;
+            public bool OfferDelivered;
 
             public int GetFriendPerms(UUID userID, UUID friendID) { return -1; }
             public bool NewFriendship(FriendInfo finfo, bool verified) { return NewFriendshipResult; }
+            public bool NewFriendship(FriendInfo finfo, bool verified, out string reason)
+            {
+                reason = NewFriendshipResult ? "upgraded" : "no_pending";
+                return NewFriendshipResult;
+            }
+            public bool NewFriendship(FriendInfo finfo, bool verified, UUID sessionId, out string reason)
+            {
+                return NewFriendship(finfo, verified, out reason);
+            }
             public bool DeleteFriendship(FriendInfo finfo, string secret)
             {
                 DeleteCalled = true;
                 LastSecret = secret;
                 return DeleteResult;
             }
-            public bool FriendshipOffered(UUID from, string fromName, UUID to, string message) { return false; }
+            public bool FriendshipOffered(UUID from, string fromName, UUID to, string message) { return OfferResult; }
+            public bool FriendshipOffered(HGFriendshipOffer offer, out bool delivered)
+            {
+                delivered = OfferDelivered;
+                return OfferResult;
+            }
+            public bool StoreReversePending(UUID fromId, UUID toId, string fromUui) { return true; }
+            public bool DropReversePending(UUID fromId, UUID toId) { return true; }
             public bool ValidateFriendshipOffered(UUID fromID, UUID toID) { return false; }
             public List<UUID> StatusNotification(List<string> friends, UUID userID, bool online) { return new List<UUID>(); }
         }

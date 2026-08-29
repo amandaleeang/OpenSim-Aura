@@ -220,7 +220,7 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
 
         public virtual void RegionLoaded(Scene scene) {}
 
-        public void RemoveRegion(Scene scene)
+        public virtual void RemoveRegion(Scene scene)
         {
             if (!m_Enabled)
                 return;
@@ -721,7 +721,7 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
             AddFriendship(client, friendID);
         }
 
-        public void AddFriendship(IClientAPI client, UUID friendID)
+        public virtual void AddFriendship(IClientAPI client, UUID friendID)
         {
             StoreFriendships(client.AgentId, friendID);
 
@@ -756,7 +756,7 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
             }
         }
 
-        private void OnDenyFriendRequest(IClientAPI client, UUID friendID, List<UUID> callingCardFolders)
+        protected virtual void OnDenyFriendRequest(IClientAPI client, UUID friendID, List<UUID> callingCardFolders)
         {
             m_log.DebugFormat("[FRIENDS]: {0} denied friendship to {1}", client.AgentId, friendID);
 

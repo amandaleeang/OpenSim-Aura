@@ -833,6 +833,7 @@
 
 [HGFriendsService]
     LocalServiceModule = "OpenSim.Services.HypergridService.dll:HGFriendsService"
+    ; Used to VerifyAgent (via the offerer's home) and LocateUser for traveler popups.
     UserAgentService = "OpenSim.Services.HypergridService.dll:UserAgentService"
     FriendsService = "OpenSim.Services.FriendsService.dll:FriendsService"
     UserAccountService = "OpenSim.Services.UserAccountService.dll:UserAccountService"

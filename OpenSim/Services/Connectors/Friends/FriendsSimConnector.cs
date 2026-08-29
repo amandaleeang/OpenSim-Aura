@@ -55,6 +55,11 @@ namespace OpenSim.Services.Connectors.Friends
 
         public virtual bool FriendshipOffered(GridRegion region, UUID userID, UUID friendID, string message, string userName)
         {
+            return FriendshipOffered(region, userID, friendID, message, userName, string.Empty);
+        }
+
+        public virtual bool FriendshipOffered(GridRegion region, UUID userID, UUID friendID, string message, string userName, string fromHomeURI)
+        {
             Dictionary<string, object> sendData = new Dictionary<string, object>();
             //sendData["VERSIONMIN"] = ProtocolVersions.ClientProtocolVersionMin.ToString();
             //sendData["VERSIONMAX"] = ProtocolVersions.ClientProtocolVersionMax.ToString();
@@ -65,6 +70,8 @@ namespace OpenSim.Services.Connectors.Friends
             sendData["Message"] = message;
             if (userName != String.Empty)
                 sendData["FromName"] = userName;
+            if (!string.IsNullOrEmpty(fromHomeURI))
+                sendData["FromHomeURI"] = fromHomeURI;
 
             return Call(region, sendData);
         }

@@ -396,6 +396,12 @@
     ; User level required to be able to send friendship invitations to foreign users
     ;LevelHGFriends = 0;
 
+    ; Home-canonical HG offers. Default false for one release. Incoming /hgfriends
+    ; on this process always upgrades pending. Set true when HomeA grids you offer
+    ; into understand store_reverse_pending. Old HomeA + flag true → "Could not
+    ; reach your home grid".
+    ;HomeCanonicalOffers = false
+
 [Messaging]
 
 

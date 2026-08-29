@@ -117,6 +117,15 @@ namespace OpenSim.Server.Handlers.Hypergrid.Tests
 
             public int GetFriendPerms(UUID userID, UUID friendID) { return -1; }
             public bool NewFriendship(FriendInfo finfo, bool verified) { return NewFriendshipResult; }
+            public bool NewFriendship(FriendInfo finfo, bool verified, out string reason)
+            {
+                reason = NewFriendshipResult ? "upgraded" : "no_pending";
+                return NewFriendshipResult;
+            }
+            public bool NewFriendship(FriendInfo finfo, bool verified, UUID sessionId, out string reason)
+            {
+                return NewFriendship(finfo, verified, out reason);
+            }
             public bool DeleteFriendship(FriendInfo finfo, string secret)
             {
                 DeleteCalled = true;
@@ -124,6 +133,13 @@ namespace OpenSim.Server.Handlers.Hypergrid.Tests
                 return DeleteResult;
             }
             public bool FriendshipOffered(UUID from, string fromName, UUID to, string message) { return false; }
+            public bool FriendshipOffered(HGFriendshipOffer offer, out bool delivered)
+            {
+                delivered = false;
+                return false;
+            }
+            public bool StoreReversePending(UUID fromId, UUID toId, string fromUui) { return false; }
+            public bool DropReversePending(UUID fromId, UUID toId) { return false; }
             public bool ValidateFriendshipOffered(UUID fromID, UUID toID) { return false; }
             public List<UUID> StatusNotification(List<string> friends, UUID userID, bool online)
             {

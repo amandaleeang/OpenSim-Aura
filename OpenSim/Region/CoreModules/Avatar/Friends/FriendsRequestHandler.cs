@@ -163,7 +163,9 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
             // !! HACK
             im.imSessionID = im.fromAgentID;
 
-            if (request.TryGetValue("from_agent_home_uri", out tmpo) && tmpo != null)
+            if (request.TryGetValue("FromHomeURI", out tmpo) && tmpo != null)
+                im.fromAgentHomeURI = tmpo.ToString();
+            else if (request.TryGetValue("from_agent_home_uri", out tmpo) && tmpo != null)
                 im.fromAgentHomeURI = tmpo.ToString();
 
             if (m_FriendsModule.LocalFriendshipOffered(toID, im))

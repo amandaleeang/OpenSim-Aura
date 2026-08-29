@@ -33,6 +33,7 @@ using System.Reflection;
 using OpenSim.Framework;
 using OpenSim.Services.Connectors.Friends;
 using OpenSim.Services.Connectors.Hypergrid;
+using OpenSim.Services.Connectors.InstantMessage;
 using OpenSim.Services.Interfaces;
 using GridRegion = OpenSim.Services.Interfaces.GridRegion;
 using OpenSim.Server.Base;
@@ -63,6 +64,9 @@ namespace OpenSim.Services.HypergridService
         protected static IUserAccountService m_UserAccountService;
         protected static IFriendsSimConnector m_FriendsLocalSimConnector; // standalone, points to HGFriendsModule
         protected static FriendsSimConnector m_FriendsSimConnector; // grid
+        protected static IUserAgentService m_UserAgentService;
+        protected static string m_MessageKey = string.Empty;
+        protected static string m_HomeURI = string.Empty;
 
         private static string m_ConfigName = "HGFriendsService";
 
@@ -106,7 +110,32 @@ namespace OpenSim.Services.HypergridService
 
                 m_FriendsSimConnector = new FriendsSimConnector();
 
-                m_log.DebugFormat("[HGFRIENDS SERVICE]: Starting...");
+                string uas = serverConfig.GetString("UserAgentService", string.Empty);
+                if (uas.Length > 0)
+                {
+                    try
+                    {
+                        m_UserAgentService = ServerUtils.LoadPlugin<IUserAgentService>(uas, args);
+                    }
+                    catch (Exception e)
+                    {
+                        m_log.WarnFormat("[HGFRIENDS SERVICE]: UserAgentService failed to load: {0}", e.Message);
+                    }
+                }
+
+                IConfig messaging = config.Configs["Messaging"];
+                if (messaging is not null)
+                    m_MessageKey = messaging.GetString("MessageKey", string.Empty);
+
+                m_HomeURI = Util.GetConfigVarFromSections<string>(config, "GatekeeperURI",
+                    new string[] { "Startup", "Hypergrid", "UserAgentService", "HGFriendsService" }, string.Empty);
+                if (string.IsNullOrEmpty(m_HomeURI))
+                    m_HomeURI = serverConfig.GetString("HomeURI", string.Empty);
+                if (!string.IsNullOrEmpty(m_HomeURI) && !m_HomeURI.EndsWith("/"))
+                    m_HomeURI += "/";
+
+                m_log.DebugFormat("[HGFRIENDS SERVICE]: Starting... (UserAgentService {0}, HomeURI {1})",
+                    m_UserAgentService is null ? "off" : "on", m_HomeURI);
 
             }
         }
@@ -126,47 +155,142 @@ namespace OpenSim.Services.HypergridService
 
         public bool NewFriendship(FriendInfo friend, bool verified)
         {
-            UUID friendID;
-            string tmp = string.Empty, url = String.Empty, first = String.Empty, last = String.Empty;
-            if (!Util.ParseUniversalUserIdentifier(friend.Friend, out friendID, out url, out first, out last, out tmp))
+            return NewFriendship(friend, verified, UUID.Zero, out _);
+        }
+
+        public bool NewFriendship(FriendInfo friend, bool verified, out string reason)
+        {
+            return NewFriendship(friend, verified, UUID.Zero, out reason);
+        }
+
+        public bool NewFriendship(FriendInfo friend, bool verified, UUID sessionId, out string reason)
+        {
+            if (!verified && sessionId.IsNotZero() && m_PresenceService != null)
+            {
+                // B accepting at home has SessionID but no HG ServiceSessionID.
+                PresenceInfo presence = m_PresenceService.GetAgent(sessionId);
+                if (presence != null
+                        && presence.UserID == friend.PrincipalID.ToString()
+                        && !presence.RegionID.IsZero())
+                    verified = true;
+            }
+
+            FriendshipCompleteReason r = TryCompleteLocal(m_FriendsService, friend, out string pendingExact);
+            reason = ReasonString(r);
+            m_log.DebugFormat("[HGFRIENDS SERVICE]: New friendship {0} {1} verified={2} reason={3}",
+                friend.PrincipalID, friend.Friend, verified, reason);
+
+            if (r == FriendshipCompleteReason.NoPending)
                 return false;
 
-            m_log.DebugFormat("[HGFRIENDS SERVICE]: New friendship {0} {1} ({2})", friend.PrincipalID, friend.Friend, verified);
-
-            // Does the friendship already exist?
-            FriendInfo[] finfos = m_FriendsService.GetFriends(friend.PrincipalID);
-            foreach (FriendInfo finfo in finfos)
+            // Unverified: this is HomeA completing from HomeB. Do not call back (loop).
+            if (!verified)
             {
-                if (finfo.Friend.StartsWith(friendID.ToString()))
-                    return false;
+                if (Util.ParseUniversalUserIdentifier(pendingExact, out UUID otherId, out string url, out string first, out string last, out _))
+                    ForwardToSim("ApproveFriendshipRequest", otherId,
+                        Util.UniversalName(first, last, url), "", friend.PrincipalID, "");
+                return true;
             }
-            // Verified user session. But the user needs to confirm friendship when he gets home
-            if (verified)
-                return m_FriendsService.StoreFriend(friend.PrincipalID.ToString(), friend.Friend, 0);
 
-            // Does the reverted friendship exist? meaning that this user initiated the request
-            finfos = m_FriendsService.GetFriends(friendID);
-            bool userInitiatedOffer = false;
-            foreach (FriendInfo finfo in finfos)
+            if (r == FriendshipCompleteReason.Already)
             {
-                if (friend.Friend.StartsWith(finfo.PrincipalID.ToString()) && finfo.Friend.StartsWith(friend.PrincipalID.ToString()) && finfo.TheirFlags == -1)
+                NotifyOtherHome(friend, pendingExact, retry: false);
+                return true;
+            }
+
+            // Upgraded + verified (HomeB orchestrator): notify HomeA; roll back only this upgrade if that fails.
+            if (!NotifyOtherHome(friend, pendingExact, retry: true))
+            {
+                m_FriendsService.Delete(friend.PrincipalID, pendingExact);
+                m_FriendsService.Delete(pendingExact, friend.PrincipalID.ToString());
+                m_FriendsService.StoreFriend(friend.PrincipalID.ToString(), pendingExact, 0);
+                reason = ReasonString(FriendshipCompleteReason.HomeAFailed);
+                return false;
+            }
+            return true;
+        }
+
+        public static string ReasonString(FriendshipCompleteReason r)
+        {
+            return r switch
+            {
+                FriendshipCompleteReason.Upgraded => "upgraded",
+                FriendshipCompleteReason.Already => "already",
+                FriendshipCompleteReason.HomeAFailed => "homea_failed",
+                _ => "no_pending"
+            };
+        }
+
+        /// <summary>
+        /// Complete a pending HG friendship on this home. Does not create pending (flags=0).
+        /// </summary>
+        public static FriendshipCompleteReason TryCompleteLocal(IFriendsService friends, FriendInfo friend,
+            out string pendingFriendExact)
+        {
+            pendingFriendExact = null;
+            if (friends is null || friend is null)
+                return FriendshipCompleteReason.NoPending;
+            if (!Util.ParseUniversalUserIdentifier(friend.Friend, out UUID friendID,
+                    out _, out _, out _, out _))
+                return FriendshipCompleteReason.NoPending;
+
+            FriendInfo[] mine = friends.GetFriends(friend.PrincipalID.ToString());
+            FriendInfo existing = null;
+            foreach (FriendInfo fi in mine)
+            {
+                if (fi.Friend != null && fi.Friend.StartsWith(friendID.ToString()))
                 {
-                    userInitiatedOffer = true;
-                    // Let's delete the existing friendship relations that was stored
-                    m_FriendsService.Delete(friendID, finfo.Friend);
+                    existing = fi;
                     break;
                 }
             }
 
-            if (userInitiatedOffer)
+            if (existing != null && existing.MyFlags != 0 && existing.TheirFlags != -1)
             {
-                m_FriendsService.StoreFriend(friend.PrincipalID.ToString(), friend.Friend, 1);
-                m_FriendsService.StoreFriend(friend.Friend, friend.PrincipalID.ToString(), 1);
-                // notify the user
-                ForwardToSim("ApproveFriendshipRequest", friendID, Util.UniversalName(first, last, url), "", friend.PrincipalID, "");
-                return true;
+                pendingFriendExact = existing.Friend;
+                return FriendshipCompleteReason.Already;
             }
-            return false;
+
+            FriendInfo[] theirs = friends.GetFriends(friendID.ToString());
+            FriendInfo reverse = null;
+            foreach (FriendInfo fi in theirs)
+            {
+                if (fi.Friend != null && fi.Friend.StartsWith(friend.PrincipalID.ToString())
+                        && fi.TheirFlags == -1)
+                {
+                    reverse = fi;
+                    break;
+                }
+            }
+
+            bool myPending = existing != null && existing.TheirFlags == -1;
+            if (!myPending && reverse == null)
+                return FriendshipCompleteReason.NoPending;
+
+            string uui = existing != null && existing.Friend.Length > 36
+                ? existing.Friend
+                : (friend.Friend.Length > 36 ? friend.Friend : existing?.Friend);
+            if (string.IsNullOrEmpty(uui) && reverse != null)
+                uui = reverse.Friend;
+            if (string.IsNullOrEmpty(uui))
+                return FriendshipCompleteReason.NoPending;
+            pendingFriendExact = uui;
+
+            if (existing != null)
+            {
+                friends.Delete(friend.PrincipalID, existing.Friend);
+                friends.Delete(existing.Friend, friend.PrincipalID.ToString());
+            }
+            if (reverse != null)
+            {
+                friends.Delete(friendID, reverse.Friend);
+                friends.Delete(reverse.Friend, friendID.ToString());
+            }
+
+            friends.StoreFriend(friend.PrincipalID.ToString(), uui, 1);
+            friends.StoreFriend(uui, friend.PrincipalID.ToString(), 1);
+
+            return FriendshipCompleteReason.Upgraded;
         }
 
         public bool DeleteFriendship(FriendInfo friend, string secret)
@@ -190,18 +314,59 @@ namespace OpenSim.Services.HypergridService
 
         public bool FriendshipOffered(UUID fromID, string fromName, UUID toID, string message)
         {
-            UserAccount account = m_UserAccountService.GetUserAccount(UUID.Zero, toID);
+            HGFriendshipOffer offer = new()
+            {
+                FromID = fromID,
+                ToID = toID,
+                FromName = fromName,
+                Message = message
+            };
+            return FriendshipOffered(offer, out _);
+        }
+
+        public bool FriendshipOffered(HGFriendshipOffer offer, out bool delivered)
+        {
+            delivered = false;
+            if (offer is null)
+                return false;
+
+            UserAccount account = m_UserAccountService.GetUserAccount(UUID.Zero, offer.ToID);
             if (account == null)
                 return false;
 
-            // OK, we have that user here.
-            // So let's send back the call, but start a thread to continue
-            // with the verification and the actual action.
+            if (offer.HasSessionProof)
+                return ProcessFriendshipOfferedNew(offer, out delivered);
 
-            Util.FireAndForget(
-                o => ProcessFriendshipOffered(fromID, fromName, toID, message), null, "HGFriendsService.ProcessFriendshipOffered");
+            return ProcessFriendshipOffered(offer.FromID, offer.FromName, offer.ToID, offer.Message, out delivered);
+        }
 
-            return true;
+        public bool StoreReversePending(UUID fromId, UUID toId, string fromUui)
+        {
+            if (fromId.IsZero() || toId.IsZero())
+                return false;
+            string friend = string.IsNullOrWhiteSpace(fromUui) ? fromId.ToString() : fromUui;
+            FriendInfo[] existing = m_FriendsService.GetFriends(toId.ToString());
+            foreach (FriendInfo fi in existing)
+            {
+                if (fi.Friend != null && fi.Friend.StartsWith(fromId.ToString()))
+                    return true;
+            }
+            return m_FriendsService.StoreFriend(toId.ToString(), friend, 0);
+        }
+
+        public bool DropReversePending(UUID fromId, UUID toId)
+        {
+            FriendInfo[] existing = m_FriendsService.GetFriends(toId.ToString());
+            foreach (FriendInfo fi in existing)
+            {
+                if (fi.Friend != null && fi.Friend.StartsWith(fromId.ToString()) && fi.TheirFlags == -1)
+                {
+                    m_FriendsService.Delete(toId, fi.Friend);
+                    m_FriendsService.Delete(fi.Friend, toId.ToString());
+                    return true;
+                }
+            }
+            return false;
         }
 
         public bool ValidateFriendshipOffered(UUID fromID, UUID toID)
@@ -303,6 +468,194 @@ namespace OpenSim.Services.HypergridService
 
         #region Aux
 
+        public static bool HomeHostsMatch(string fromHomeUri, string fromName)
+        {
+            if (string.IsNullOrWhiteSpace(fromName))
+                return true;
+            string nameHome = GridInstantMessage.ResolveSenderHomeURI(null, null, fromName);
+            OSHHTPHost a = new(fromHomeUri);
+            OSHHTPHost b = new(nameHome);
+            if (!a.IsValidHost || !b.IsValidHost)
+                return false;
+            if (!string.Equals(a.Host, b.Host, StringComparison.OrdinalIgnoreCase))
+                return false;
+            bool aExplicit = HasExplicitNonDefaultPort(fromHomeUri);
+            bool bExplicit = HasExplicitNonDefaultPort(nameHome);
+            return !(aExplicit && bExplicit && a.Port != b.Port);
+        }
+
+        public static bool HasExplicitNonDefaultPort(string uri)
+        {
+            if (string.IsNullOrWhiteSpace(uri))
+                return false;
+            OSHHTPHost h = new(uri);
+            if (!h.IsValidHost)
+                return false;
+            int schemeSep = uri.IndexOf("://", StringComparison.Ordinal);
+            int hostStart = schemeSep >= 0 ? schemeSep + 3 : 0;
+            int slash = uri.IndexOf('/', hostStart);
+            string hostport = slash >= 0 ? uri[hostStart..slash] : uri[hostStart..];
+            int colon = hostport.LastIndexOf(':');
+            if (colon <= 0)
+                return false;
+            if (!int.TryParse(hostport[(colon + 1)..], out int port))
+                return false;
+            return port != 80 && port != 443;
+        }
+
+        bool ProcessFriendshipOfferedNew(HGFriendshipOffer offer, out bool delivered)
+        {
+            delivered = false;
+            if (!HomeHostsMatch(offer.FromHomeURI, offer.FromName))
+            {
+                m_log.WarnFormat("[HGFRIENDS SERVICE]: host mismatch FromName={0} FromHomeURI={1}",
+                    offer.FromName, offer.FromHomeURI);
+                return false;
+            }
+
+            try
+            {
+                UserAgentServiceConnector uas = new(offer.FromHomeURI);
+                if (!uas.VerifyAgent(offer.SessionID, offer.ServiceKey))
+                {
+                    m_log.WarnFormat("[HGFRIENDS SERVICE]: VerifyAgent failed for {0} at {1}",
+                        offer.FromID, offer.FromHomeURI);
+                    return false;
+                }
+            }
+            catch (Exception e)
+            {
+                m_log.DebugFormat("[HGFRIENDS SERVICE]: VerifyAgent exception: {0}", e.Message);
+                return false;
+            }
+
+            string home = offer.FromHomeURI;
+            Dictionary<string, object> servers = TryGetServerURLs(offer.FromID, ref home);
+            string friendsUri = null;
+            if (servers != null && servers.TryGetValue("FriendsServerURI", out object fsu) && fsu != null)
+                friendsUri = fsu.ToString();
+            if (string.IsNullOrWhiteSpace(friendsUri))
+                friendsUri = home;
+
+            HGFriendsServicesConnector friendsConn = new(friendsUri);
+            if (!friendsConn.ValidateFriendshipOffered(offer.FromID, offer.ToID))
+            {
+                m_log.WarnFormat("[HGFRIENDS SERVICE]: Friendship request from {0} to {1} is invalid. Impersonations?",
+                    offer.FromID, offer.ToID);
+                return false;
+            }
+
+            string first = offer.FromFirst;
+            string last = offer.FromLast;
+            if (string.IsNullOrWhiteSpace(first) || string.IsNullOrWhiteSpace(last))
+            {
+                GridInstantMessage.SplitDisplayName(
+                    string.IsNullOrWhiteSpace(offer.FromName) ? "Unknown User" : offer.FromName,
+                    out first, out last);
+            }
+            string fromUUI = Util.UniversalIdentifier(offer.FromID, first, last, offer.FromHomeURI);
+            if (!PersistPendingOffer(offer.ToID, offer.FromID, fromUUI, offer.FromName, offer.Message, offer.FromHomeURI, out delivered))
+                return false;
+            return true;
+        }
+
+        bool PersistPendingOffer(UUID toID, UUID fromID, string fromUUI, string fromName, string message, string fromHomeURI, out bool delivered)
+        {
+            delivered = false;
+            string stored = null;
+            FriendInfo[] existing = m_FriendsService.GetFriends(toID.ToString());
+            foreach (FriendInfo fi in existing)
+            {
+                if (fi.Friend != null && fi.Friend.StartsWith(fromID.ToString()) && fi.TheirFlags == -1)
+                {
+                    stored = fi.Friend;
+                    break;
+                }
+            }
+            if (stored is null)
+            {
+                string secret = UUID.Random().ToString().Substring(0, 8);
+                stored = fromUUI + ";" + secret;
+                if (!m_FriendsService.StoreFriend(toID.ToString(), stored, 0))
+                    return false;
+            }
+
+            delivered = DeliverOfferPopup(fromID, fromName, toID, message, fromHomeURI);
+            return true;
+        }
+
+        bool DeliverOfferPopup(UUID fromID, string fromName, UUID toID, string message, string fromHomeURI)
+        {
+            GridInstantMessage im = new(null, fromID, fromName, toID,
+                (byte)InstantMessageDialog.FriendshipOffered, message ?? string.Empty, false, Vector3.Zero)
+            {
+                imSessionID = fromID.Guid,
+                fromAgentHomeURI = fromHomeURI ?? string.Empty
+            };
+
+            PresenceInfo[] sessions = m_PresenceService?.GetAgents(new string[] { toID.ToString() });
+            if (sessions != null && sessions.Length > 0 && !sessions[0].RegionID.IsZero())
+            {
+                GridRegion region = m_GridService.GetRegionByUUID(UUID.Zero, sessions[0].RegionID);
+                if (m_FriendsLocalSimConnector != null)
+                    return m_FriendsLocalSimConnector.LocalFriendshipOffered(toID, im);
+                if (region != null)
+                    return m_FriendsSimConnector.FriendshipOffered(region, fromID, toID, message ?? string.Empty, fromName, fromHomeURI);
+            }
+
+            if (m_UserAgentService is null)
+                return false;
+            string locate;
+            try
+            {
+                locate = m_UserAgentService.LocateUser(toID);
+            }
+            catch (Exception e)
+            {
+                m_log.DebugFormat("[HGFRIENDS SERVICE]: LocateUser failed: {0}", e.Message);
+                return false;
+            }
+            if (string.IsNullOrWhiteSpace(locate))
+                return false;
+            return InstantMessageServiceConnector.SendInstantMessage(locate, im, m_MessageKey, 2000);
+        }
+
+        static bool IsThisHome(string url)
+        {
+            if (string.IsNullOrEmpty(m_HomeURI) || string.IsNullOrEmpty(url))
+                return false;
+            OSHHTPHost a = new(url);
+            OSHHTPHost b = new(m_HomeURI);
+            return a.IsValidHost && b.IsValidHost
+                && string.Equals(a.Host, b.Host, StringComparison.OrdinalIgnoreCase);
+        }
+
+        bool NotifyOtherHome(FriendInfo friend, string pendingExact, bool retry)
+        {
+            if (!Util.ParseUniversalUserIdentifier(pendingExact, out UUID otherId, out string url, out string first, out string last, out string secret))
+                return true;
+            if (string.IsNullOrWhiteSpace(url) || IsThisHome(url))
+            {
+                ForwardToSim("ApproveFriendshipRequest", otherId,
+                    Util.UniversalName(first, last, url), "", friend.PrincipalID, "");
+                return true;
+            }
+
+            UserAccount me = m_UserAccountService.GetUserAccount(UUID.Zero, friend.PrincipalID);
+            string myFirst = me?.FirstName ?? "Unknown";
+            string myLast = me?.LastName ?? "User";
+            string myHome = string.IsNullOrEmpty(m_HomeURI) ? url : m_HomeURI;
+            string myUui = Util.UniversalIdentifier(friend.PrincipalID, myFirst, myLast, myHome);
+            if (!string.IsNullOrEmpty(secret))
+                myUui += ";" + secret;
+
+            HGFriendsServicesConnector conn = new(url);
+            bool ok = conn.NewFriendship(otherId, myUui);
+            if (!ok && retry)
+                ok = conn.NewFriendship(otherId, myUui);
+            return ok;
+        }
+
         /// <summary>
         /// Home URI of an offerer from First.Last@host[:port]. Does not rewrite https to http.
         /// Host without a scheme is parsed as given (OSHHTPHost defaults to http).
@@ -331,16 +684,13 @@ namespace OpenSim.Services.HypergridService
             return true;
         }
 
-        private void ProcessFriendshipOffered(UUID fromID, String fromName, UUID toID, String message)
+        private bool ProcessFriendshipOffered(UUID fromID, String fromName, UUID toID, String message, out bool delivered)
         {
-            // Great, it's a genuine request. Let's proceed.
-            // But now we need to confirm that the requester is who he says he is
-            // before we act on the friendship request.
-
+            delivered = false;
             if (!TryResolveOffererHomeURI(fromName, out string uriStr))
             {
                 m_log.DebugFormat("[HGFRIENDS SERVICE]: Malformed offerer name/home {0}", fromName);
-                return;
+                return false;
             }
 
             string[] parts = fromName.Split(new char[] {'@'});
@@ -356,12 +706,11 @@ namespace OpenSim.Services.HypergridService
             if (!friendsConn.ValidateFriendshipOffered(fromID, toID))
             {
                 m_log.WarnFormat("[HGFRIENDS SERVICE]: Friendship request from {0} to {1} is invalid. Impersonations?", fromID, toID);
-                return;
+                return false;
             }
 
             string fromUUI = Util.UniversalIdentifier(fromID, parts[0], "@" + parts[1], uriStr);
-            // OK, we're good!
-            ForwardToSim("FriendshipOffered", fromID, fromName, fromUUI, toID, message);
+            return PersistPendingOffer(toID, fromID, fromUUI, fromName, message, uriStr, out delivered);
         }
 
         static Dictionary<string, object> TryGetServerURLs(UUID fromID, ref string uriStr)
@@ -405,20 +754,7 @@ namespace OpenSim.Services.HypergridService
             switch (op)
             {
                 case "FriendshipOffered":
-                    // Let's store backwards
-                    string secret = UUID.Random().ToString().Substring(0, 8);
-                    m_FriendsService.StoreFriend(toID.ToString(), fromUUI + ";" + secret, 0);
-                    if (m_FriendsLocalSimConnector != null) // standalone
-                    {
-                        GridInstantMessage im = new GridInstantMessage(null, fromID, name, toID,
-                            (byte)InstantMessageDialog.FriendshipOffered, message, false, Vector3.Zero);
-                        // !! HACK
-                        im.imSessionID = im.fromAgentID;
-                        return m_FriendsLocalSimConnector.LocalFriendshipOffered(toID, im);
-                    }
-                    else if (region != null) // grid
-                        return m_FriendsSimConnector.FriendshipOffered(region, fromID, toID, message, name);
-                    break;
+                    return PersistPendingOffer(toID, fromID, fromUUI, name, message, string.Empty, out _);
                 case "ApproveFriendshipRequest":
                     if (m_FriendsLocalSimConnector != null) // standalone
                         return m_FriendsLocalSimConnector.LocalFriendshipApproved(fromID, name, toID);

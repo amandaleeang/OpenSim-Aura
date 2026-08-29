@@ -104,6 +104,12 @@ namespace OpenSim.Server.Handlers.Hypergrid
                     case "friendship_offered":
                         return FriendshipOffered(request);
 
+                    case "store_reverse_pending":
+                        return StoreReversePending(request);
+
+                    case "drop_reverse_pending":
+                        return DropReversePending(request);
+
                     case "validate_friendship_offered":
                         return ValidateFriendshipOffered(request);
 
@@ -163,13 +169,19 @@ namespace OpenSim.Server.Handlers.Hypergrid
 
         byte[] NewFriendship(Dictionary<string, object> request)
         {
-            bool verified = VerifyServiceKey(request);
+            // Traveling B: KEY+SESSIONID verified by this grid's UserAgentService.
+            // B at home has SessionID but empty ServiceSessionID — do not warn; presence is checked in the service.
+            bool verified = false;
+            if (request.TryGetValue("KEY", out object keyObj) && keyObj is string key && key.Length > 0)
+                verified = VerifyServiceKey(request);
 
             FriendInfo friend = new FriendInfo(request);
+            UUID sessionId = UUID.Zero;
+            if (request.TryGetValue("SESSIONID", out object sid) && UUID.TryParse(sid.ToString(), out UUID parsedSid))
+                sessionId = parsedSid;
 
-            bool success = m_TheService.NewFriendship(friend, verified);
-
-            return BoolResult(success);
+            bool success = m_TheService.NewFriendship(friend, verified, sessionId, out string reason);
+            return BoolResult(success, reason);
         }
 
         byte[] DeleteFriendship(Dictionary<string, object> request)
@@ -194,11 +206,44 @@ namespace OpenSim.Server.Handlers.Hypergrid
             if (!request.TryGetValue("ToID", out object ToIDobj) || !UUID.TryParse(ToIDobj.ToString(), out UUID toID))
                 return BoolResult(false);
 
-            string name = request.TryGetValue("FromName", out object FromNameobj) ? FromNameobj.ToString() : string.Empty;
-            string message = request.TryGetValue("Message", out object Messageobj) ? Messageobj.ToString() : string.Empty;
+            HGFriendshipOffer offer = new()
+            {
+                FromID = fromID,
+                ToID = toID,
+                FromName = request.TryGetValue("FromName", out object FromNameobj) ? FromNameobj.ToString() : string.Empty,
+                Message = request.TryGetValue("Message", out object Messageobj) ? Messageobj.ToString() : string.Empty,
+                FromHomeURI = request.TryGetValue("FromHomeURI", out object hu) ? hu.ToString() : string.Empty,
+                FromFirst = request.TryGetValue("FromFirst", out object ff) ? ff.ToString() : string.Empty,
+                FromLast = request.TryGetValue("FromLast", out object fl) ? fl.ToString() : string.Empty
+            };
+            if (request.TryGetValue("SESSIONID", out object sid) && UUID.TryParse(sid.ToString(), out UUID sessionID))
+                offer.SessionID = sessionID;
+            if (request.TryGetValue("KEY", out object key) && key != null)
+                offer.ServiceKey = key.ToString();
 
-            bool success = m_TheService.FriendshipOffered(fromID, name, toID, message);
-            return BoolResult(success);
+            bool success = m_TheService.FriendshipOffered(offer, out bool delivered);
+            return BoolResult(success, delivered: delivered);
+        }
+
+        byte[] StoreReversePending(Dictionary<string, object> request)
+        {
+            if (!VerifyServiceKey(request))
+                return BoolResult(false);
+            if (!request.TryGetValue("FromID", out object FromIDobj) || !UUID.TryParse(FromIDobj.ToString(), out UUID fromID))
+                return BoolResult(false);
+            if (!request.TryGetValue("ToID", out object ToIDobj) || !UUID.TryParse(ToIDobj.ToString(), out UUID toID))
+                return BoolResult(false);
+            string fromUui = request.TryGetValue("FromUUI", out object uui) ? uui.ToString() : fromID.ToString();
+            return BoolResult(m_TheService.StoreReversePending(fromID, toID, fromUui));
+        }
+
+        byte[] DropReversePending(Dictionary<string, object> request)
+        {
+            if (!request.TryGetValue("FromID", out object FromIDobj) || !UUID.TryParse(FromIDobj.ToString(), out UUID fromID))
+                return BoolResult(false);
+            if (!request.TryGetValue("ToID", out object ToIDobj) || !UUID.TryParse(ToIDobj.ToString(), out UUID toID))
+                return BoolResult(false);
+            return BoolResult(m_TheService.DropReversePending(fromID, toID));
         }
 
         byte[] ValidateFriendshipOffered(Dictionary<string, object> request)
@@ -371,7 +416,7 @@ namespace OpenSim.Server.Handlers.Hypergrid
             return Util.DocToBytes(doc);
         }
 
-        private byte[] BoolResult(bool value)
+        private byte[] BoolResult(bool value, string reason = null, bool? delivered = null)
         {
             XmlDocument doc = new XmlDocument();
 
@@ -388,6 +433,19 @@ namespace OpenSim.Server.Handlers.Hypergrid
             result.AppendChild(doc.CreateTextNode(value.ToString()));
 
             rootElement.AppendChild(result);
+
+            if (!string.IsNullOrEmpty(reason))
+            {
+                XmlElement reasonEl = doc.CreateElement("", "Reason", "");
+                reasonEl.AppendChild(doc.CreateTextNode(reason));
+                rootElement.AppendChild(reasonEl);
+            }
+            if (delivered.HasValue)
+            {
+                XmlElement del = doc.CreateElement("", "Delivered", "");
+                del.AppendChild(doc.CreateTextNode(delivered.Value.ToString()));
+                rootElement.AppendChild(del);
+            }
 
             return Util.DocToBytes(doc);
         }
