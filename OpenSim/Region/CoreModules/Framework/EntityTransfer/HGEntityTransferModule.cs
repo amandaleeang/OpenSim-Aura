@@ -673,6 +673,26 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
             }
         }
 
+        /// <summary>
+        /// False if the circuit has no usable AssetServerURI (missing, empty, or slash-only).
+        /// </summary>
+        private static bool TryGetAssetServerURI(AgentCircuitData aCircuit, out string url)
+        {
+            url = null;
+            if (aCircuit == null || aCircuit.ServiceURLs == null)
+                return false;
+            if (!aCircuit.ServiceURLs.TryGetValue("AssetServerURI", out object ourl) || ourl == null)
+                return false;
+
+            url = ourl.ToString();
+            if (string.IsNullOrWhiteSpace(url) || url.Trim('/').Length == 0)
+            {
+                url = null;
+                return false;
+            }
+            return true;
+        }
+
         public override bool HandleIncomingSceneObject(SceneObjectGroup so, Vector3 newPosition)
         {
             UUID OwnerID = so.OwnerID;
@@ -716,7 +736,7 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
                 return base.HandleIncomingSceneObject(so, newPosition);
             }
 
-            if (aCircuit.ServiceURLs == null || !aCircuit.ServiceURLs.ContainsKey("AssetServerURI"))
+            if (!TryGetAssetServerURI(aCircuit, out string url))
                 return base.HandleIncomingSceneObject(so, newPosition);
 
             SceneObjectGroup defso = so;
@@ -724,8 +744,6 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
                 string.Format("HG UUID Gather for attachment {0} for {1}", defso.Name, aCircuit.Name),
                 () =>
                 {
-                    string url = aCircuit.ServiceURLs["AssetServerURI"].ToString();
-
                     IDictionary<UUID, sbyte> ids = new Dictionary<UUID, sbyte>();
                     HGUuidGatherer uuidGatherer = new HGUuidGatherer(m_scene.AssetService, url, ids);
                     uuidGatherer.AddForInspection(defso);
@@ -786,7 +804,6 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
                     base.HandleIncomingSceneObject(defso, newPosition);
 
                     defso = null;
-                    aCircuit = null;
                     uuidGatherer = null;
                 },
                 OwnerID.ToString());
@@ -808,145 +825,138 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
             if (OwnerID.IsZero() || m_scene.UserManagementModule.IsLocalGridUser(OwnerID))
                 return base.HandleIncomingAttachments(sp, attachments);
 
-            // foreign user
             AgentCircuitData aCircuit = m_scene.AuthenticateHandler.GetAgentCircuitData(OwnerID);
-            if (aCircuit != null)
+            if (aCircuit == null || (aCircuit.teleportFlags & (uint)Constants.TeleportFlags.ViaHGLogin) == 0)
             {
-                if ((aCircuit.teleportFlags & (uint)Constants.TeleportFlags.ViaHGLogin) == 0)
+                // First region in local grid already pulled attachment assets, or no circuit.
+                return base.HandleIncomingAttachments(sp, attachments);
+            }
+
+            if (!TryGetAssetServerURI(aCircuit, out string url))
+                return base.HandleIncomingAttachments(sp, attachments);
+
+            ScenePresence defsp = sp;
+            List<SceneObjectGroup> deftatt = attachments;
+            List<SceneObjectGroup> toadd = new List<SceneObjectGroup>(deftatt.Count);
+            m_incomingSceneObjectEngine.QueueJob(
+                string.Format("HG UUID Gather attachments {0}", defsp.Name), () =>
                 {
-                    // first region in local grid did pull the necessary attachments from the source grid.
-                    base.HandleIncomingAttachments(sp, attachments);
-                }
-                else
-                {
-                    if (aCircuit.ServiceURLs != null && aCircuit.ServiceURLs.ContainsKey("AssetServerURI"))
+                    IDictionary<UUID, sbyte> ids = new Dictionary<UUID, sbyte>();
+                    HGUuidGatherer uuidGatherer = new HGUuidGatherer(m_scene.AssetService, url, ids);
+
+                    foreach (SceneObjectGroup defso in deftatt)
                     {
-                        ScenePresence defsp = sp;
-                        List<SceneObjectGroup> deftatt = attachments;
-                        List<SceneObjectGroup> toadd = new List<SceneObjectGroup>(deftatt.Count);
-                        m_incomingSceneObjectEngine.QueueJob(
-                            string.Format("HG UUID Gather attachments {0}", defsp.Name), () =>
+                        if(defso.OwnerID.NotEqual(defsp.UUID))
+                        {
+                            m_log.ErrorFormat(
+                                "[HG TRANSFER MODULE] attachment {0}({1} owner {2} does not match HG avatarID {3}",
+                                    defso.Name, defso.UUID, defso.OwnerID, defsp.UUID);
+                            continue;
+                        }
+                        uuidGatherer.AddForInspection(defso);
+                        toadd.Add(defso);
+                    }
+                    deftatt = null;
+
+                    if (sp.IsDeleted)
+                    {
+                        defsp = null;
+                        uuidGatherer = null;
+                        toadd = null;
+                        return;
+                    }
+
+                    int timeoutMs = m_gatherTimeoutSec * 1000;
+
+                    if (m_concurrentAssetGather)
+                    {
+                        uuidGatherer.GatherAllConcurrent(m_gatherConcurrent, timeoutMs);
+
+                        if (sp.IsDeleted)
+                        {
+                            defsp = null;
+                            uuidGatherer = null;
+                            toadd = null;
+                            return;
+                        }
+
+                        // Unreachable remote asset server: every request timed out and nothing was retrieved.
+                        if (uuidGatherer.FetchTimeouts > 0 && uuidGatherer.AssetGetCount == 0)
+                        {
+                            m_log.WarnFormat(
+                                "[HG ENTITY TRANSFER]: Aborting fetch attachments assets for HG user {0} from {1}: {2} timeouts and no assets retrieved",
+                                defsp.Name, url, uuidGatherer.FetchTimeouts);
+                            defsp = null;
+                            uuidGatherer = null;
+                            toadd = null;
+                            return;
+                        }
+                    }
+                    else
+                    {
+                        while (!uuidGatherer.Complete)
+                        {
+                            if (sp.IsDeleted)
                             {
-                                string url = aCircuit.ServiceURLs["AssetServerURI"].ToString();
-                                IDictionary<UUID, sbyte> ids = new Dictionary<UUID, sbyte>();
-                                HGUuidGatherer uuidGatherer = new HGUuidGatherer(m_scene.AssetService, url, ids);
-
-                                foreach (SceneObjectGroup defso in deftatt)
-                                {
-                                    if(defso.OwnerID.NotEqual(defsp.UUID))
-                                    {
-                                        m_log.ErrorFormat(
-                                            "[HG TRANSFER MODULE] attachment {0}({1} owner {2} does not match HG avatarID {3}",
-                                                defso.Name, defso.UUID, defso.OwnerID, defsp.UUID);
-                                        continue;
-                                    }
-                                    uuidGatherer.AddForInspection(defso);
-                                    toadd.Add(defso);
-                                }
-                                deftatt = null;
-
-                                if (sp.IsDeleted)
-                                {
-                                    defsp = null;
-                                    uuidGatherer = null;
-                                    toadd = null;
-                                    return;
-                                }
-
-                                int timeoutMs = m_gatherTimeoutSec * 1000;
-
-                                if (m_concurrentAssetGather)
-                                {
-                                    uuidGatherer.GatherAllConcurrent(m_gatherConcurrent, timeoutMs);
-
-                                    if (sp.IsDeleted)
-                                    {
-                                        defsp = null;
-                                        uuidGatherer = null;
-                                        toadd = null;
-                                        return;
-                                    }
-
-                                    // Unreachable remote asset server: every request timed out and nothing was retrieved.
-                                    if (uuidGatherer.FetchTimeouts > 0 && uuidGatherer.AssetGetCount == 0)
-                                    {
-                                        m_log.WarnFormat(
-                                            "[HG ENTITY TRANSFER]: Aborting fetch attachments assets for HG user {0} from {1}: {2} timeouts and no assets retrieved",
-                                            defsp.Name, url, uuidGatherer.FetchTimeouts);
-                                        defsp = null;
-                                        uuidGatherer = null;
-                                        toadd = null;
-                                        return;
-                                    }
-                                }
-                                else
-                                {
-                                    while (!uuidGatherer.Complete)
-                                    {
-                                        if (sp.IsDeleted)
-                                        {
-                                            defsp = null;
-                                            uuidGatherer = null;
-                                            toadd = null;
-                                            return;
-                                        }
-
-                                        int tickStart = Util.EnvironmentTickCount();
-                                        uuidGatherer.GatherNext();
-
-                                        int ticksElapsed = Util.EnvironmentTickCountSubtract(tickStart);
-                                        if (ticksElapsed > timeoutMs)
-                                        {
-                                            m_log.WarnFormat(
-                                                "[HG ENTITY TRANSFER]: Aborting fetch attachments assets for HG user {0} as gather from {1} took {2} ms to respond (> {3} ms)",
-                                                defsp.Name, url, ticksElapsed, timeoutMs);
-                                            defsp = null;
-                                            uuidGatherer = null;
-                                            toadd = null;
-                                            return;
-                                        }
-                                    }
-
-                                    foreach (UUID id in ids.Keys)
-                                    {
-                                        if (sp.IsDeleted)
-                                        {
-                                            defsp = null;
-                                            uuidGatherer = null;
-                                            toadd = null;
-                                            return;
-                                        }
-
-                                        if (uuidGatherer.IsFetched(id))
-                                            continue;
-
-                                        int tickStart = Util.EnvironmentTickCount();
-                                        uuidGatherer.FetchAsset(id);
-
-                                        int ticksElapsed = Util.EnvironmentTickCountSubtract(tickStart);
-                                        if (ticksElapsed > timeoutMs)
-                                        {
-                                            m_log.WarnFormat(
-                                                "[HG ENTITY TRANSFER]: Aborting fetch attachments assets for HG user {0} as fetch of {1} from {2} took {3} ms to respond (> {4} ms)",
-                                                defsp.Name, id, url, ticksElapsed, timeoutMs);
-                                            defsp = null;
-                                            uuidGatherer = null;
-                                            toadd = null;
-                                            return;
-                                        }
-                                    }
-                                }
-
-                                base.HandleIncomingAttachments(sp, toadd);
-
                                 defsp = null;
                                 uuidGatherer = null;
                                 toadd = null;
-                            },
-                            OwnerID.ToString());
+                                return;
+                            }
+
+                            int tickStart = Util.EnvironmentTickCount();
+                            uuidGatherer.GatherNext();
+
+                            int ticksElapsed = Util.EnvironmentTickCountSubtract(tickStart);
+                            if (ticksElapsed > timeoutMs)
+                            {
+                                m_log.WarnFormat(
+                                    "[HG ENTITY TRANSFER]: Aborting fetch attachments assets for HG user {0} as gather from {1} took {2} ms to respond (> {3} ms)",
+                                    defsp.Name, url, ticksElapsed, timeoutMs);
+                                defsp = null;
+                                uuidGatherer = null;
+                                toadd = null;
+                                return;
+                            }
+                        }
+
+                        foreach (UUID id in ids.Keys)
+                        {
+                            if (sp.IsDeleted)
+                            {
+                                defsp = null;
+                                uuidGatherer = null;
+                                toadd = null;
+                                return;
+                            }
+
+                            if (uuidGatherer.IsFetched(id))
+                                continue;
+
+                            int tickStart = Util.EnvironmentTickCount();
+                            uuidGatherer.FetchAsset(id);
+
+                            int ticksElapsed = Util.EnvironmentTickCountSubtract(tickStart);
+                            if (ticksElapsed > timeoutMs)
+                            {
+                                m_log.WarnFormat(
+                                    "[HG ENTITY TRANSFER]: Aborting fetch attachments assets for HG user {0} as fetch of {1} from {2} took {3} ms to respond (> {4} ms)",
+                                    defsp.Name, id, url, ticksElapsed, timeoutMs);
+                                defsp = null;
+                                uuidGatherer = null;
+                                toadd = null;
+                                return;
+                            }
+                        }
                     }
-                }
-            }
+
+                    base.HandleIncomingAttachments(sp, toadd);
+
+                    defsp = null;
+                    uuidGatherer = null;
+                    toadd = null;
+                },
+                OwnerID.ToString());
 
             return true;
         }
