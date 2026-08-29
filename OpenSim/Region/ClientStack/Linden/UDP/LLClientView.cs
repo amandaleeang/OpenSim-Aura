@@ -13003,11 +13003,8 @@ namespace OpenSim.Region.ClientStack.LindenUDP
                 IInventoryAccessModule inventoryAccessModule = Scene.RequestModuleInterface<IInventoryAccessModule>();
                 if (inventoryAccessModule.IsForeignUser(m_agentId, out string assetServerURL) && !string.IsNullOrEmpty(assetServerURL))
                 {
-                    if (!assetServerURL.EndsWith('/') && !assetServerURL.EndsWith('='))
-                        assetServerURL += "/";
-
-                    //m_log.DebugFormat("[LLCLIENTVIEW]: asset {0} not found in local storage. Trying user's storage.", assetServerURL + id);
-                    asset = m_scene.AssetService.Get(assetServerURL + id);
+                    // Viewer fetch only; do not persist to the local asset DB.
+                    asset = m_scene.AssetService.Get(id, assetServerURL, false);
                 }
 
                 if (asset is null)
