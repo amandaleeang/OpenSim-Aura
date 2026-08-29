@@ -150,14 +150,21 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
             if (request.TryGetValue("Message", out tmpo))
                 message = tmpo.ToString();
 
+            string fromName = string.Empty;
+            if (request.TryGetValue("FromName", out tmpo) && tmpo != null)
+                fromName = tmpo.ToString();
+
             UserAccount account = m_FriendsModule.UserAccountService.GetUserAccount(UUID.Zero, fromID);
-            string name = (account == null) ? "Unknown" : account.FirstName + " " + account.LastName;
+            string name = ResolveOffererName(fromName, account);
 
             GridInstantMessage im = new GridInstantMessage(m_FriendsModule.Scene, fromID, name, toID,
                 (byte)InstantMessageDialog.FriendshipOffered, message, false, Vector3.Zero);
 
             // !! HACK
             im.imSessionID = im.fromAgentID;
+
+            if (request.TryGetValue("from_agent_home_uri", out tmpo) && tmpo != null)
+                im.fromAgentHomeURI = tmpo.ToString();
 
             if (m_FriendsModule.LocalFriendshipOffered(toID, im))
                 return SuccessResult();
@@ -257,6 +264,17 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
                 return SuccessResult();
 
             return FailureResult();
+        }
+
+        /// <summary>
+        /// Prefer the name supplied by the offering sim (HG FromName). Local UserAccount
+        /// is null for foreigners and would otherwise become "Unknown".
+        /// </summary>
+        public static string ResolveOffererName(string fromName, UserAccount account)
+        {
+            if (!string.IsNullOrWhiteSpace(fromName))
+                return fromName;
+            return (account == null) ? "Unknown" : account.FirstName + " " + account.LastName;
         }
 
         #region Misc

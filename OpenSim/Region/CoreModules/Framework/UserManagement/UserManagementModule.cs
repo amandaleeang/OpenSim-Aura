@@ -840,7 +840,7 @@ namespace OpenSim.Region.CoreModules.Framework.UserManagement
                 }
                 // HomeURI is often already known from HG login even when ServiceURLs cache omits it.
                 // Standalone grids also serve IM on HomeURI.
-                if ((serverType == "HomeURI" || serverType == "IMServerURI") && !string.IsNullOrEmpty(userdata.HomeURL))
+                if ((serverType == "HomeURI" || serverType == "IMServerURI" || serverType == "FriendsServerURI") && !string.IsNullOrEmpty(userdata.HomeURL))
                 {
                     OSHHTPHost homeHost = new OSHHTPHost(userdata.HomeURL);
                     if (homeHost.IsValidHost)
@@ -884,7 +884,7 @@ namespace OpenSim.Region.CoreModules.Framework.UserManagement
                                 return otmp.URI;
                         }
                     }
-                    if (serverType == "HomeURI" || serverType == "IMServerURI")
+                    if (serverType == "HomeURI" || serverType == "IMServerURI" || serverType == "FriendsServerURI")
                     {
                         OSHHTPHost homeHost = new OSHHTPHost(userdata.HomeURL);
                         if (homeHost.IsValidHost)
@@ -930,7 +930,7 @@ namespace OpenSim.Region.CoreModules.Framework.UserManagement
                             return otmp.URI;
                     }
                 }
-                if ((serverType == "HomeURI" || serverType == "IMServerURI") && !string.IsNullOrEmpty(userdata.HomeURL))
+                if ((serverType == "HomeURI" || serverType == "IMServerURI" || serverType == "FriendsServerURI") && !string.IsNullOrEmpty(userdata.HomeURL))
                 {
                     OSHHTPHost homeHost = new OSHHTPHost(userdata.HomeURL);
                     if (homeHost.IsValidHost)
@@ -977,7 +977,7 @@ namespace OpenSim.Region.CoreModules.Framework.UserManagement
                                 return otmp.URI;
                         }
                     }
-                    if (serverType == "HomeURI" || serverType == "IMServerURI")
+                    if (serverType == "HomeURI" || serverType == "IMServerURI" || serverType == "FriendsServerURI")
                     {
                         OSHHTPHost homeHost = new OSHHTPHost(userdata.HomeURL);
                         if (homeHost.IsValidHost)

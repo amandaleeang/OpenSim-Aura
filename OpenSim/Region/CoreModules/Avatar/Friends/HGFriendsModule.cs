@@ -544,16 +544,25 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
             {
                 agentClientCircuit = ((Scene)(agentClient.Scene)).AuthenticateHandler.GetAgentCircuitData(agentClient.CircuitCode);
                 agentUUI = Util.ProduceUserUniversalIdentifier(agentClientCircuit);
-                agentFriendService = agentClientCircuit.ServiceURLs["FriendsServerURI"].ToString();
+                agentFriendService = FriendsServerUriFromCircuit(agentClientCircuit);
                 RecacheFriends(agentClient);
             }
             if (friendClient is not null)
             {
                 friendClientCircuit = ((Scene)(friendClient.Scene)).AuthenticateHandler.GetAgentCircuitData(friendClient.CircuitCode);
                 friendUUI = Util.ProduceUserUniversalIdentifier(friendClientCircuit);
-                friendFriendService = friendClientCircuit.ServiceURLs["FriendsServerURI"].ToString();
+                friendFriendService = FriendsServerUriFromCircuit(friendClientCircuit);
                 RecacheFriends(friendClient);
             }
+
+            if (string.IsNullOrEmpty(agentUUI) && UserManagementModule is not null)
+                agentUUI = UserManagementModule.GetUserUUI(agentID);
+            if (string.IsNullOrEmpty(friendUUI) && UserManagementModule is not null)
+                friendUUI = UserManagementModule.GetUserUUI(friendID);
+            if (string.IsNullOrEmpty(agentFriendService) && UserManagementModule is not null)
+                agentFriendService = UserManagementModule.GetUserServerURL(agentID, "FriendsServerURI");
+            if (string.IsNullOrEmpty(friendFriendService) && UserManagementModule is not null)
+                friendFriendService = UserManagementModule.GetUserServerURL(friendID, "FriendsServerURI");
 
             m_log.DebugFormat("[HGFRIENDS MODULE] HG Friendship! thisUUI={0}; friendUUI={1}; foreignThisFriendService={2}; foreignFriendFriendService={3}",
                     agentUUI, friendUUI, agentFriendService, friendFriendService);
@@ -618,13 +627,16 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
                 //if (!confirming)
                 //{
                     // store in the foreign friends service a reference to the local agent
-                    HGFriendsServicesConnector friendsConn = null;
-                    if (friendClientCircuit != null) // the friend is here, validate session
-                        friendsConn = new HGFriendsServicesConnector(friendFriendService, friendClientCircuit.SessionID, friendClientCircuit.ServiceSessionID);
-                    else // the friend is not here, he initiated the request in his home world
-                        friendsConn = new HGFriendsServicesConnector(friendFriendService);
+                    if (!string.IsNullOrEmpty(friendFriendService))
+                    {
+                        HGFriendsServicesConnector friendsConn = null;
+                        if (friendClientCircuit != null) // the friend is here, validate session
+                            friendsConn = new HGFriendsServicesConnector(friendFriendService, friendClientCircuit.SessionID, friendClientCircuit.ServiceSessionID);
+                        else // the friend is not here, he initiated the request in his home world
+                            friendsConn = new HGFriendsServicesConnector(friendFriendService);
 
-                    friendsConn.NewFriendship(friendID, agentUUID);
+                        friendsConn.NewFriendship(friendID, agentUUID);
+                    }
                 //}
             }
             else if (friendIsLocal) // 'friend' is local,  agent is foreigner
@@ -637,7 +649,7 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
                 // and also the converse
                 FriendsService.StoreFriend(agentUUI + ";" + secret, friendID.ToString(), 1);
 
-                if (agentClientCircuit is not null)
+                if (agentClientCircuit is not null && !string.IsNullOrEmpty(agentFriendService))
                 {
                     // store in the foreign friends service a reference to the local agent
                     HGFriendsServicesConnector friendsConn = new HGFriendsServicesConnector(agentFriendService, agentClientCircuit.SessionID, agentClientCircuit.ServiceSessionID);
@@ -647,18 +659,48 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
             else // They're both foreigners!
             {
                 HGFriendsServicesConnector friendsConn;
-                if (agentClientCircuit is not null)
+                if (!string.IsNullOrEmpty(agentFriendService) && IsFullUui(friendUUI))
                 {
-                    friendsConn = new HGFriendsServicesConnector(agentFriendService, agentClientCircuit.SessionID, agentClientCircuit.ServiceSessionID);
+                    if (agentClientCircuit is not null)
+                        friendsConn = new HGFriendsServicesConnector(agentFriendService, agentClientCircuit.SessionID, agentClientCircuit.ServiceSessionID);
+                    else
+                        friendsConn = new HGFriendsServicesConnector(agentFriendService);
                     friendsConn.NewFriendship(agentID, friendUUI + ";" + secret);
                 }
-                if (friendClientCircuit is not null)
+                if (!string.IsNullOrEmpty(friendFriendService) && IsFullUui(agentUUI))
                 {
-                    friendsConn = new HGFriendsServicesConnector(friendFriendService, friendClientCircuit.SessionID, friendClientCircuit.ServiceSessionID);
+                    if (friendClientCircuit is not null)
+                        friendsConn = new HGFriendsServicesConnector(friendFriendService, friendClientCircuit.SessionID, friendClientCircuit.ServiceSessionID);
+                    else
+                        friendsConn = new HGFriendsServicesConnector(friendFriendService);
                     friendsConn.NewFriendship(friendID, agentUUI + ";" + secret);
                 }
             }
             // my brain hurts now
+        }
+
+        static bool IsFullUui(string uui)
+        {
+            return !string.IsNullOrEmpty(uui) && Util.ParseFullUniversalUserIdentifier(uui, out UUID _);
+        }
+
+        static string FriendsServerUriFromCircuit(AgentCircuitData circuit)
+        {
+            if (circuit?.ServiceURLs is null)
+                return string.Empty;
+            if (circuit.ServiceURLs.TryGetValue("FriendsServerURI", out object fsu) && fsu != null)
+            {
+                string s = fsu.ToString();
+                if (!string.IsNullOrWhiteSpace(s))
+                    return s;
+            }
+            if (circuit.ServiceURLs.TryGetValue("HomeURI", out object hu) && hu != null)
+            {
+                string s = hu.ToString();
+                if (!string.IsNullOrWhiteSpace(s))
+                    return s;
+            }
+            return string.Empty;
         }
 
         private void DeletePreviousRelations(UUID a1, UUID a2)
@@ -690,7 +732,7 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
             }
         }
 
-        private void DeletePreviousHGRelations(UUID a1, UUID a2)
+        protected void DeletePreviousHGRelations(UUID a1, UUID a2)
         {
             // Delete any previous friendship relations
             FriendInfo[] finfos = GetFriendsFromCache(a1);
@@ -712,7 +754,7 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
                 }
             }
 
-            finfos = GetFriendsFromCache(a1);
+            finfos = GetFriendsFromCache(a2);
             if (finfos is not null)
             {
                 string a1str2 = a1.ToString();
@@ -827,7 +869,7 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
 
         private void Delete(UUID foreignUser, UUID localUser, string uui)
         {
-            if (Util.ParseFullUniversalUserIdentifier(uui, out UUID _, out string _, out string _, out string url, out string secret))
+            if (Util.ParseFullUniversalUserIdentifier(uui, out UUID _, out string url, out string _, out string _, out string secret))
             {
                 m_log.DebugFormat("[HGFRIENDS MODULE]: Deleting friendship from {0}", url);
                 HGFriendsServicesConnector friendConn = new HGFriendsServicesConnector(url);
@@ -893,18 +935,20 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
         {
             if (base.LocalFriendshipOffered(toID, im))
             {
-                if (im.fromAgentName.Contains("@"))
+                string home = GridInstantMessage.ResolveSenderHomeURI(im.fromAgentHomeURI, null, im.fromAgentName);
+                GridInstantMessage.SplitDisplayName(im.fromAgentName, out string first, out string last);
+                if (string.IsNullOrWhiteSpace(home) && im.fromAgentName.Contains('@'))
                 {
                     string[] parts = im.fromAgentName.Split(new char[] { '@' });
                     if (parts.Length == 2)
                     {
-                        string[] fl = parts[0].Trim().Split(Util.SplitDotArray);
-                        if (fl.Length == 2)
-                            m_uMan.AddUser(new UUID(im.fromAgentID), fl[0], fl[1], "http://" + parts[1]);
-                        else
-                            m_uMan.AddUser(new UUID(im.fromAgentID), fl[0], "", "http://" + parts[1]);
+                        OSHHTPHost host = new(parts[1].Trim());
+                        if (host.IsValidHost)
+                            home = host.URI;
                     }
                 }
+                if (!string.IsNullOrWhiteSpace(home))
+                    m_uMan.AddUser(new UUID(im.fromAgentID), first, last, home);
                 return true;
             }
             return false;

@@ -303,45 +303,56 @@ namespace OpenSim.Services.HypergridService
 
         #region Aux
 
+        /// <summary>
+        /// Home URI of an offerer from First.Last@host[:port]. Does not rewrite https to http.
+        /// Host without a scheme is parsed as given (OSHHTPHost defaults to http).
+        /// </summary>
+        public static bool TryResolveOffererHomeURI(string fromName, out string homeUri)
+        {
+            homeUri = string.Empty;
+            if (string.IsNullOrWhiteSpace(fromName) || !fromName.Contains('@'))
+                return false;
+
+            string[] parts = fromName.Split(new char[] { '@' });
+            if (parts.Length != 2)
+                return false;
+
+            string hostPart = parts[1].Trim();
+            if (hostPart.Length == 0)
+                return false;
+
+            OSHHTPHost parsed = new(hostPart);
+            if (!parsed.IsValidHost && !hostPart.StartsWith("http", StringComparison.OrdinalIgnoreCase))
+                parsed = new OSHHTPHost("https://" + hostPart);
+            if (!parsed.IsValidHost)
+                return false;
+
+            homeUri = parsed.URIwEndSlash;
+            return true;
+        }
+
         private void ProcessFriendshipOffered(UUID fromID, String fromName, UUID toID, String message)
         {
             // Great, it's a genuine request. Let's proceed.
             // But now we need to confirm that the requester is who he says he is
             // before we act on the friendship request.
 
-            if (!fromName.Contains('@'))
+            if (!TryResolveOffererHomeURI(fromName, out string uriStr))
+            {
+                m_log.DebugFormat("[HGFRIENDS SERVICE]: Malformed offerer name/home {0}", fromName);
                 return;
+            }
 
             string[] parts = fromName.Split(new char[] {'@'});
-            if (parts.Length != 2)
-                return;
 
-            string uriStr = "http://" + parts[1].ToLower();
-            string SSLuriStr = "https://" + parts[1].ToLower();
-            if(!Uri.TryCreate(uriStr, UriKind.Absolute, out _))
-            {
-                m_log.DebugFormat("[HGFRIENDS SERVICE]: Malformed address {0}", parts[1].ToLower());
-                return;
-            }
+            Dictionary<string, object> servers = TryGetServerURLs(fromID, ref uriStr);
+            string friendsServerURI = null;
+            if (servers != null && servers.TryGetValue("FriendsServerURI", out object fsu) && fsu != null)
+                friendsServerURI = fsu.ToString();
+            if (string.IsNullOrWhiteSpace(friendsServerURI))
+                friendsServerURI = uriStr;
 
-            UserAgentServiceConnector uasConn = new(uriStr);
-            // If fail to connect with http... try with https...
-            if (uasConn is null)
-            {
-                uasConn = new UserAgentServiceConnector(SSLuriStr);
-                if (uasConn is null)
-                {
-                    m_log.DebugFormat("[HGFRIENDS SERVICE]: UserAgentServiceConnector failed to connect to {0}", parts[1].ToLower());
-                    return;
-                }
-                uriStr = SSLuriStr;
-            }
-            
-            Dictionary<string, object> servers = uasConn.GetServerURLs(fromID);
-            if (!servers.TryGetValue("FriendsServerURI", out object friendsServerURI))
-                return;
-
-            HGFriendsServicesConnector friendsConn = new(friendsServerURI.ToString());
+            HGFriendsServicesConnector friendsConn = new(friendsServerURI);
             if (!friendsConn.ValidateFriendshipOffered(fromID, toID))
             {
                 m_log.WarnFormat("[HGFRIENDS SERVICE]: Friendship request from {0} to {1} is invalid. Impersonations?", fromID, toID);
@@ -351,6 +362,34 @@ namespace OpenSim.Services.HypergridService
             string fromUUI = Util.UniversalIdentifier(fromID, parts[0], "@" + parts[1], uriStr);
             // OK, we're good!
             ForwardToSim("FriendshipOffered", fromID, fromName, fromUUI, toID, message);
+        }
+
+        static Dictionary<string, object> TryGetServerURLs(UUID fromID, ref string uriStr)
+        {
+            List<string> candidates = new() { uriStr };
+            if (uriStr.StartsWith("http://", StringComparison.OrdinalIgnoreCase))
+                candidates.Add("https://" + uriStr.Substring("http://".Length));
+            else if (uriStr.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+                candidates.Add("http://" + uriStr.Substring("https://".Length));
+
+            foreach (string candidate in candidates)
+            {
+                try
+                {
+                    UserAgentServiceConnector uasConn = new(candidate);
+                    Dictionary<string, object> servers = uasConn.GetServerURLs(fromID);
+                    if (servers != null && servers.Count > 0)
+                    {
+                        uriStr = candidate;
+                        return servers;
+                    }
+                }
+                catch (Exception e)
+                {
+                    m_log.DebugFormat("[HGFRIENDS SERVICE]: GetServerURLs at {0} failed: {1}", candidate, e.Message);
+                }
+            }
+            return null;
         }
 
         private bool ForwardToSim(string op, UUID fromID, string name, String fromUUI, UUID toID, string message)

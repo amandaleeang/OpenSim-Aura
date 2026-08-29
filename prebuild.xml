@@ -2613,6 +2613,10 @@
       <Reference name="OpenSim.Region.ScriptEngine.Shared"/>
       <Reference name="OpenSim.Region.ScriptEngine.XEngine"/>
       <Reference name="OpenSim.Services.Interfaces"/>
+      <Reference name="OpenSim.Services.FriendsService"/>
+      <Reference name="OpenSim.Services.Connectors"/>
+      <Reference name="OpenSim.Services.HypergridService"/>
+      <Reference name="OpenSim.Server.Handlers"/>
 
       <Reference name="OpenSim.Tests.Common"/>
       <Reference name="Nini"/>
@@ -2946,9 +2950,13 @@
       <Reference name="OpenSim.Services.Interfaces"/>
       <Reference name="OpenSim.Services.UserAccountService"/>
       <Reference name="OpenSim.Tests.Common"/>
+      <Reference name="OpenSim.Services.Connectors"/>
 
       <Files>
         <Match path="Asset/Tests" pattern="*.cs" recurse="true">
+         <Exclude name="obj" pattern="obj"/>
+        </Match>
+        <Match path="Hypergrid/Tests" pattern="*.cs" recurse="true">
          <Exclude name="obj" pattern="obj"/>
         </Match>
       </Files>
