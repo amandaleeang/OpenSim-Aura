@@ -47,11 +47,7 @@ namespace OpenSim.Region.CoreModules.Framework.InventoryAccess
     {
         private static readonly ILog m_log = LogManager.GetLogger(MethodBase.GetCurrentMethod().DeclaringType);
 
-        private static HGAssetMapper m_assMapper;
-        public static HGAssetMapper AssetMapper
-        {
-            get { return m_assMapper; }
-        }
+        private HGAssetMapper m_assMapper;
 
         private bool m_OutboundPermission;
         private bool m_RestrictInventoryAccessAbroad;
