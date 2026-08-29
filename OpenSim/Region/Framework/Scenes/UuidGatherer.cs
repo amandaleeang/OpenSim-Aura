@@ -242,6 +242,12 @@ namespace OpenSim.Region.Framework.Scenes
         private bool verbose = true;
 
         /// <summary>
+        /// HG import: skip leaf blob GETs when AssetsExist says they are already on this grid.
+        /// Left false for OAR/IAR and Flotsam cache walks.
+        /// </summary>
+        protected virtual bool SkipLocalLeafGets => false;
+
+        /// <summary>
         /// In-flight GET that missed the wave Wait. Inspect runs on the drain
         /// thread when it completes so nested UUIDs still land in cache/DB.
         /// </summary>
@@ -569,6 +575,8 @@ namespace OpenSim.Region.Framework.Scenes
         public void FetchUnfetchedLeavesSequential()
         {
             List<UUID> leaves = CollectUnfetchedLeaves();
+            if (SkipLocalLeafGets)
+                OmitLeavesAlreadyOnThisGrid(leaves);
             for (int i = 0; i < leaves.Count; ++i)
             {
                 UUID id = leaves[i];
@@ -735,12 +743,54 @@ namespace OpenSim.Region.Framework.Scenes
         private void FetchUnfetchedLeaves()
         {
             List<UUID> leaves = CollectUnfetchedLeaves();
+            if (SkipLocalLeafGets)
+                OmitLeavesAlreadyOnThisGrid(leaves);
             if (leaves.Count == 0)
                 return;
 
             Queue<UUID> leafQueue = new Queue<UUID>(leaves);
             while (leafQueue.Count > 0)
                 FetchAssetWave(leafQueue, inspect: false);
+        }
+
+        /// <summary>
+        /// One AssetsExist for the leaf list. Hits are already on this grid (SQLite or Robust
+        /// metadata); skip the blob GET. Misses still FetchAsset from home.
+        /// </summary>
+        private void OmitLeavesAlreadyOnThisGrid(List<UUID> leaves)
+        {
+            if (leaves.Count == 0)
+                return;
+
+            string[] ids = new string[leaves.Count];
+            for (int i = 0; i < leaves.Count; i++)
+                ids[i] = leaves[i].ToString();
+
+            bool[] exist;
+            try
+            {
+                exist = m_assetService.AssetsExist(ids);
+            }
+            catch (Exception e)
+            {
+                if (verbose)
+                    m_log.Debug($"[UUID GATHERER]: AssetsExist failed; fetching all leaves: {e.Message}");
+                return;
+            }
+            if (exist == null)
+                return;
+
+            int skipped = 0;
+            for (int i = Math.Min(exist.Length, leaves.Count) - 1; i >= 0; i--)
+            {
+                if (!exist[i])
+                    continue;
+                m_fetched.Add(leaves[i]);
+                leaves.RemoveAt(i);
+                skipped++;
+            }
+            if (verbose && skipped > 0)
+                m_log.Debug($"[UUID GATHERER]: Skipped {skipped} leaf asset Get(s) already on this grid");
         }
 
         /// <summary>
@@ -1678,6 +1728,9 @@ namespace OpenSim.Region.Framework.Scenes
         {
             m_assetServerURL = assetServerURL;
         }
+
+        // Import from home: skip leaves already in this grid's DB. Post (empty URL) still fetches.
+        protected override bool SkipLocalLeafGets => !string.IsNullOrWhiteSpace(m_assetServerURL);
 
         protected override AssetBase GetAsset(UUID uuid)
         {
