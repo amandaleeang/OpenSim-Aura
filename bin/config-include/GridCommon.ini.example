@@ -218,12 +218,18 @@
     ; User level required to be able to send friendship invitations to foreign users
     ;LevelHGFriends = 0;
 
-    ; Home-canonical HG offers. Default false for one release: OpenSim HG is
-    ; mixed-version, and store_reverse_pending is unknown on old HomeA (outgoing
-    ; fail closed; A sees "Could not reach your home grid"). Old HomeB still
-    ; works via FromName. Incoming /hgfriends on Robust always understands new
-    ; fields and NewFriendship pending-upgrade regardless of this flag.
-    ; Set true when HomeA grids you offer into have been upgraded.
+    ; Home-canonical HG offers. Default false for one release.
+    ;
+    ; Rollout: this Robust first (incoming /hgfriends always persists pending
+    ; and upgrades on NewFriendship, even with the flag false), then sims,
+    ; then set true when HomeA grids you offer into know store_reverse_pending.
+    ; Old HomeA + flag true → A sees "Could not reach your home grid".
+    ; Old HomeB still works via FromName=First.Last@host.
+    ;
+    ; Diagnose "pending missing at home": grep OpenSim and Robust logs for
+    ; [HGFRIENDS] offer_start, reverse_pending, pending_stored / validate_failed.
+    ; Do not log KEY / ServiceSessionID / friendship secret at Info.
+    ;
     ;HomeCanonicalOffers = false
 
 [MapImageService]

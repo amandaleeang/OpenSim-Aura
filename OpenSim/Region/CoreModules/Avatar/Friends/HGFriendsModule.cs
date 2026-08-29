@@ -111,6 +111,7 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
                 m_levelHGFriends = friendsConfig.GetInt("LevelHGFriends", 0);
                 m_HomeCanonicalOffers = friendsConfig.GetBoolean("HomeCanonicalOffers", false);
             }
+            m_log.InfoFormat("[HGFRIENDS MODULE]: HomeCanonicalOffers={0}", m_HomeCanonicalOffers);
         }
 
         #endregion
@@ -221,6 +222,9 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
                 new HGFriendsServicesConnector(homeB).DropReversePending(friendID, client.AgentId);
             if (!string.IsNullOrEmpty(homeA))
                 new HGFriendsServicesConnector(homeA).DropReversePending(friendID, client.AgentId);
+            m_log.InfoFormat(
+                "[HGFRIENDS MODULE]: from={0} to={1} fromHome={2} toHome={3} result=ok reason=denied",
+                friendID, client.AgentId, homeA ?? string.Empty, homeB ?? string.Empty);
             RecacheFriends(client);
         }
 
@@ -1002,6 +1006,7 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
             if (!HGIdentity.TryResolveUUI(scene, um, agentID, friendID, out string friendUui)
                     && string.IsNullOrEmpty(HGIdentity.ResolveHomeURI(scene, um, friendID)))
             {
+                LogOffer(agentID, friendID, null, null, fail: true, "no_homeuri");
                 client.SendAgentAlertMessage("Unable to send friendship invitation. User identity could not be resolved.", false);
                 return false;
             }
@@ -1009,6 +1014,7 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
             AgentCircuitData aCircuit = HGIdentity.GetCircuit(scene, agentID);
             if (aCircuit is null || aCircuit.SessionID.IsZero())
             {
+                LogOffer(agentID, friendID, null, null, fail: true, "homea_unreachable");
                 client.SendAgentAlertMessage("Unable to send friendship invitation. Could not reach your home grid.", false);
                 return false;
             }
@@ -1017,8 +1023,12 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
             string friendsA = HGIdentity.ResolveFriendsServerURI(scene, um, agentID, aCircuit);
             string homeB = HGIdentity.ResolveHomeURI(scene, um, friendID);
             string friendsB = HGIdentity.ResolveFriendsServerURI(scene, um, friendID, HGIdentity.GetCircuit(scene, friendID));
+            m_log.InfoFormat(
+                "[HGFRIENDS MODULE]: from={0} to={1} fromHome={2} toHome={3} result=ok reason=offer_start session={4}",
+                agentID, friendID, homeA ?? string.Empty, homeB ?? friendsB ?? string.Empty, aCircuit.SessionID);
             if (string.IsNullOrWhiteSpace(homeB) && string.IsNullOrWhiteSpace(friendsB))
             {
+                LogOffer(agentID, friendID, homeA, null, fail: true, "no_homeuri");
                 client.SendAgentAlertMessage("Unable to send friendship invitation. User identity could not be resolved.", false);
                 return false;
             }
@@ -1031,6 +1041,7 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
 
             if (!aLocal && string.IsNullOrEmpty(aCircuit.ServiceSessionID))
             {
+                LogOffer(agentID, friendID, homeA, homeB, fail: true, "homea_unreachable");
                 client.SendAgentAlertMessage("Unable to send friendship invitation. Could not reach your home grid.", false);
                 return false;
             }
@@ -1038,17 +1049,22 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
             if (aLocal)
             {
                 FriendsService.StoreFriend(friendID.ToString(), agentID.ToString(), 0);
+                m_log.InfoFormat(
+                    "[HGFRIENDS MODULE]: from={0} to={1} fromHome={2} toHome={3} result=ok reason=reverse_pending",
+                    agentID, friendID, homeA ?? string.Empty, homeB ?? string.Empty);
             }
             else
             {
                 if (string.IsNullOrWhiteSpace(friendsA))
                 {
+                    LogOffer(agentID, friendID, homeA, homeB, fail: true, "homea_unreachable");
                     client.SendAgentAlertMessage("Unable to send friendship invitation. Could not reach your home grid.", false);
                     return false;
                 }
                 HGFriendsServicesConnector homeAConn = new(friendsA, aCircuit.SessionID, aCircuit.ServiceSessionID);
                 if (!homeAConn.StoreReversePending(agentID, friendID, agentID.ToString(), aCircuit.SessionID, aCircuit.ServiceSessionID))
                 {
+                    LogOffer(agentID, friendID, homeA, homeB, fail: true, "homea_unreachable");
                     client.SendAgentAlertMessage("Unable to send friendship invitation. Could not reach your home grid.", false);
                     return false;
                 }
@@ -1074,16 +1090,24 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
 
             if (!persistOk)
             {
+                bool dropped = true;
                 if (aLocal)
                     FriendsService.Delete(friendID, agentID.ToString());
                 else if (!string.IsNullOrWhiteSpace(friendsA))
-                    new HGFriendsServicesConnector(friendsA).DropReversePending(agentID, friendID);
+                    dropped = new HGFriendsServicesConnector(friendsA).DropReversePending(agentID, friendID);
+                LogOffer(agentID, friendID, homeA, homeB, fail: true, "homeb_unreachable",
+                    dropped ? null : "drop_failed=yes");
                 client.SendAgentAlertMessage("Unable to send friendship invitation. Could not reach the destination home grid.", false);
                 return false;
             }
 
-            if (!delivered)
-                LocalFriendshipOffered(friendID, im);
+            string deliveredVia = "none";
+            if (!delivered && LocalFriendshipOffered(friendID, im))
+                deliveredVia = "local_friends";
+            else if (delivered)
+                deliveredVia = "home";
+            LogOffer(agentID, friendID, homeA, homeB, fail: false, "pending_stored",
+                "delivered=" + deliveredVia);
 
             if (Util.ParseUniversalUserIdentifier(friendUui, out UUID fid, out string fhome, out string ffirst, out string flast, out _))
                 HGIdentity.RememberContact(scene, um, fid, ffirst, flast, fhome);
@@ -1100,6 +1124,7 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
             string homeB = HGIdentity.ResolveFriendsServerURI(scene, UserManagementModule, client.AgentId, circuit);
             if (string.IsNullOrWhiteSpace(homeB))
             {
+                LogOffer(friendID, client.AgentId, null, null, fail: true, "no_homeuri");
                 client.SendAgentAlertMessage("Unable to complete friendship. Could not reach your home grid.", false);
                 return false;
             }
@@ -1112,16 +1137,34 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
 
             if (!conn.NewFriendship(client.AgentId, friendID.ToString(), out string reason))
             {
+                string token = string.IsNullOrEmpty(reason) ? "homeb_unreachable" : reason;
+                LogOffer(friendID, client.AgentId, null, homeB, fail: true, token);
                 client.SendAgentAlertMessage("Unable to complete friendship.", false);
                 return false;
             }
             if (reason.Equals("no_pending", StringComparison.OrdinalIgnoreCase)
                     || reason.Equals("homea_failed", StringComparison.OrdinalIgnoreCase))
             {
+                LogOffer(friendID, client.AgentId, null, homeB, fail: true, reason);
                 client.SendAgentAlertMessage("Unable to complete friendship.", false);
                 return false;
             }
+            LogOffer(friendID, client.AgentId, null, homeB, fail: false,
+                string.IsNullOrEmpty(reason) ? "upgraded" : reason);
             return true;
+        }
+
+        void LogOffer(UUID from, UUID to, string fromHome, string toHome, bool fail, string reason, string extra = null)
+        {
+            string line = string.Format(
+                "[HGFRIENDS MODULE]: from={0} to={1} fromHome={2} toHome={3} result={4} reason={5}",
+                from, to, fromHome ?? string.Empty, toHome ?? string.Empty, fail ? "fail" : "ok", reason);
+            if (!string.IsNullOrEmpty(extra))
+                line += " " + extra;
+            if (fail)
+                m_log.Warn(line);
+            else
+                m_log.Info(line);
         }
 
         public override bool LocalFriendshipOffered(UUID toID, GridInstantMessage im)

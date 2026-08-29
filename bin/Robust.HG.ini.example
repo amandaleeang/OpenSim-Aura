@@ -834,11 +834,42 @@
 [HGFriendsService]
     LocalServiceModule = "OpenSim.Services.HypergridService.dll:HGFriendsService"
     ; Used to VerifyAgent (via the offerer's home) and LocateUser for traveler popups.
+    ; Traveler FriendshipOffered IM uses [Messaging] MessageKey (same as HG IM).
     UserAgentService = "OpenSim.Services.HypergridService.dll:UserAgentService"
     FriendsService = "OpenSim.Services.FriendsService.dll:FriendsService"
     UserAccountService = "OpenSim.Services.UserAccountService.dll:UserAccountService"
     GridService = "OpenSim.Services.GridService.dll:GridService"
     PresenceService = "OpenSim.Services.PresenceService.dll:PresenceService"
+
+    ; Incoming /hgfriends always persists pending and upgrades on NewFriendship.
+    ; Sim outgoing HomeCanonicalOffers is a separate flag (default false).
+    ;
+    ; Diagnose "pending missing at home": grep [HGFRIENDS] for
+    ;   offer_start, reverse_pending, pending_stored / validate_failed.
+    ; Fail tokens: no_homeuri, homea_unreachable, homeb_unreachable, verify_failed,
+    ;   validate_failed, host_mismatch, not_local_user, no_pending, homea_failed.
+    ; Success tokens: upgraded, already. Popup: delivered=local_friends|home_presence|im_locate|none.
+    ; Accept HomeA down after this call upgraded: reason=homea_failed rollback=yes.
+    ;
+    ; Manual check (HomeCanonicalOffers=true on the offering sim; A home HomeA, B home HomeB):
+    ;  1 Both visitors, same sim, accept → flags=1 both homes, same secret, no second confirm
+    ;  2 Offer, no accept, both go home → B pending, A reverse; B accepts at home → complete
+    ;  3 HomeB down at offer → A alerted, no local friend; reverse dropped (or drop_failed=yes)
+    ;  4 Same foreign grid, different sims → persist HomeB; popup via IM locate; Accept on sim2
+    ;  5 A at HomeA, B at HomeB → home-to-home ValidateFriendshipOffered + pending at HomeB
+    ;  6 A at HomeA, B visitor on HomeA → HomeB canonical; popup LocateUser + IM
+    ;  7 B visitor on HomeA offers to local A → pending on this Robust; secret minted here
+    ;  8 CreatorData B, A visitor Add Friend → UM seeds HomeURI; offer without B present
+    ;  9 HTTPS HomeURI → no http:// rewrite
+    ; 10 Missing SRV_FriendsServerURI → HomeURI fallback (standalone)
+    ; 11 Same home, both visiting elsewhere → local UUID friendship on return (DeletePreviousHGRelations)
+    ; 12 Unfriend HG friend → secret path works
+    ; 13 friendship_offered without valid session → new HomeB rejects (old FromName path still validates)
+    ; 14 Offer to already-friend → existing alert, no duplicate
+    ; 15 B offline at offer → pending at HomeB; login replay; Accept at home
+    ; 16 Deny pending → HomeB pending gone, HomeA reverse gone, no flags=1
+    ; 17 Accept while HomeA down → B alerted; HomeB still pending (rollback); retry succeeds
+    ; 18 Flag false (default) → this grid's outgoing old path; incoming still persist+upgrade
 
 
 [HGInstantMessageService]
@@ -851,6 +882,8 @@
 
 
 [Messaging]
+    ; Shared with HG IM and HG friends traveler popups (FriendshipOffered via LocateUser).
+    ;MessageKey =
     ; OfflineIM
     OfflineIMService = "OpenSim.Addons.OfflineIM.dll:OfflineIMService"
     ; maximum number of offline ims per user, default 25

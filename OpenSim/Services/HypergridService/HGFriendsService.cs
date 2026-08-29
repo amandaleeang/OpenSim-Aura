@@ -177,15 +177,21 @@ namespace OpenSim.Services.HypergridService
 
             FriendshipCompleteReason r = TryCompleteLocal(m_FriendsService, friend, out string pendingExact);
             reason = ReasonString(r);
-            m_log.DebugFormat("[HGFRIENDS SERVICE]: New friendship {0} {1} verified={2} reason={3}",
-                friend.PrincipalID, friend.Friend, verified, reason);
 
             if (r == FriendshipCompleteReason.NoPending)
+            {
+                m_log.WarnFormat(
+                    "[HGFRIENDS SERVICE]: from={0} to={1} verified={2} result=fail reason=no_pending",
+                    friend.PrincipalID, friend.Friend, verified ? "yes" : "no");
                 return false;
+            }
 
             // Unverified: this is HomeA completing from HomeB. Do not call back (loop).
             if (!verified)
             {
+                m_log.InfoFormat(
+                    "[HGFRIENDS SERVICE]: from={0} to={1} verified=no result=ok reason={2}",
+                    friend.PrincipalID, friend.Friend, reason);
                 if (Util.ParseUniversalUserIdentifier(pendingExact, out UUID otherId, out string url, out string first, out string last, out _))
                     ForwardToSim("ApproveFriendshipRequest", otherId,
                         Util.UniversalName(first, last, url), "", friend.PrincipalID, "");
@@ -195,6 +201,9 @@ namespace OpenSim.Services.HypergridService
             if (r == FriendshipCompleteReason.Already)
             {
                 NotifyOtherHome(friend, pendingExact, retry: false);
+                m_log.InfoFormat(
+                    "[HGFRIENDS SERVICE]: from={0} to={1} verified=yes result=ok reason=already rollback=no",
+                    friend.PrincipalID, friend.Friend);
                 return true;
             }
 
@@ -205,8 +214,14 @@ namespace OpenSim.Services.HypergridService
                 m_FriendsService.Delete(pendingExact, friend.PrincipalID.ToString());
                 m_FriendsService.StoreFriend(friend.PrincipalID.ToString(), pendingExact, 0);
                 reason = ReasonString(FriendshipCompleteReason.HomeAFailed);
+                m_log.WarnFormat(
+                    "[HGFRIENDS SERVICE]: from={0} to={1} verified=yes result=fail reason=homea_failed rollback=yes",
+                    friend.PrincipalID, friend.Friend);
                 return false;
             }
+            m_log.InfoFormat(
+                "[HGFRIENDS SERVICE]: from={0} to={1} verified=yes result=ok reason=upgraded rollback=no",
+                friend.PrincipalID, friend.Friend);
             return true;
         }
 
@@ -332,7 +347,12 @@ namespace OpenSim.Services.HypergridService
 
             UserAccount account = m_UserAccountService.GetUserAccount(UUID.Zero, offer.ToID);
             if (account == null)
+            {
+                m_log.WarnFormat(
+                    "[HGFRIENDS SERVICE]: from={0} to={1} fromHome={2} result=fail reason=not_local_user",
+                    offer.FromID, offer.ToID, offer.FromHomeURI ?? string.Empty);
                 return false;
+            }
 
             if (offer.HasSessionProof)
                 return ProcessFriendshipOfferedNew(offer, out delivered);
@@ -349,9 +369,18 @@ namespace OpenSim.Services.HypergridService
             foreach (FriendInfo fi in existing)
             {
                 if (fi.Friend != null && fi.Friend.StartsWith(fromId.ToString()))
+                {
+                    m_log.InfoFormat(
+                        "[HGFRIENDS SERVICE]: from={0} to={1} result=ok reason=reverse_pending",
+                        fromId, toId);
                     return true;
+                }
             }
-            return m_FriendsService.StoreFriend(toId.ToString(), friend, 0);
+            bool stored = m_FriendsService.StoreFriend(toId.ToString(), friend, 0);
+            m_log.InfoFormat(
+                "[HGFRIENDS SERVICE]: from={0} to={1} result={2} reason=reverse_pending",
+                fromId, toId, stored ? "ok" : "fail");
+            return stored;
         }
 
         public bool DropReversePending(UUID fromId, UUID toId)
@@ -508,8 +537,9 @@ namespace OpenSim.Services.HypergridService
             delivered = false;
             if (!HomeHostsMatch(offer.FromHomeURI, offer.FromName))
             {
-                m_log.WarnFormat("[HGFRIENDS SERVICE]: host mismatch FromName={0} FromHomeURI={1}",
-                    offer.FromName, offer.FromHomeURI);
+                m_log.WarnFormat(
+                    "[HGFRIENDS SERVICE]: from={0} to={1} fromHome={2} result=fail reason=host_mismatch",
+                    offer.FromID, offer.ToID, offer.FromHomeURI);
                 return false;
             }
 
@@ -518,14 +548,17 @@ namespace OpenSim.Services.HypergridService
                 UserAgentServiceConnector uas = new(offer.FromHomeURI);
                 if (!uas.VerifyAgent(offer.SessionID, offer.ServiceKey))
                 {
-                    m_log.WarnFormat("[HGFRIENDS SERVICE]: VerifyAgent failed for {0} at {1}",
-                        offer.FromID, offer.FromHomeURI);
+                    m_log.WarnFormat(
+                        "[HGFRIENDS SERVICE]: from={0} to={1} fromHome={2} result=fail reason=verify_failed session={3}",
+                        offer.FromID, offer.ToID, offer.FromHomeURI, offer.SessionID);
                     return false;
                 }
             }
             catch (Exception e)
             {
-                m_log.DebugFormat("[HGFRIENDS SERVICE]: VerifyAgent exception: {0}", e.Message);
+                m_log.WarnFormat(
+                    "[HGFRIENDS SERVICE]: from={0} to={1} fromHome={2} result=fail reason=verify_failed {3}",
+                    offer.FromID, offer.ToID, offer.FromHomeURI, e.Message);
                 return false;
             }
 
@@ -540,8 +573,9 @@ namespace OpenSim.Services.HypergridService
             HGFriendsServicesConnector friendsConn = new(friendsUri);
             if (!friendsConn.ValidateFriendshipOffered(offer.FromID, offer.ToID))
             {
-                m_log.WarnFormat("[HGFRIENDS SERVICE]: Friendship request from {0} to {1} is invalid. Impersonations?",
-                    offer.FromID, offer.ToID);
+                m_log.WarnFormat(
+                    "[HGFRIENDS SERVICE]: from={0} to={1} fromHome={2} result=fail reason=validate_failed",
+                    offer.FromID, offer.ToID, offer.FromHomeURI);
                 return false;
             }
 
@@ -577,8 +611,17 @@ namespace OpenSim.Services.HypergridService
                 string secret = UUID.Random().ToString().Substring(0, 8);
                 stored = fromUUI + ";" + secret;
                 if (!m_FriendsService.StoreFriend(toID.ToString(), stored, 0))
+                {
+                    m_log.WarnFormat(
+                        "[HGFRIENDS SERVICE]: from={0} to={1} fromHome={2} result=fail reason=pending_store_failed",
+                        fromID, toID, fromHomeURI ?? string.Empty);
                     return false;
+                }
             }
+
+            m_log.InfoFormat(
+                "[HGFRIENDS SERVICE]: from={0} to={1} fromHome={2} result=ok reason=pending_stored home={3} principal={4}",
+                fromID, toID, fromHomeURI ?? string.Empty, m_HomeURI ?? string.Empty, toID);
 
             delivered = DeliverOfferPopup(fromID, fromName, toID, message, fromHomeURI);
             return true;
@@ -598,13 +641,24 @@ namespace OpenSim.Services.HypergridService
             {
                 GridRegion region = m_GridService.GetRegionByUUID(UUID.Zero, sessions[0].RegionID);
                 if (m_FriendsLocalSimConnector != null)
-                    return m_FriendsLocalSimConnector.LocalFriendshipOffered(toID, im);
+                {
+                    bool local = m_FriendsLocalSimConnector.LocalFriendshipOffered(toID, im);
+                    LogDelivered(fromID, toID, local ? "local_friends" : "none");
+                    return local;
+                }
                 if (region != null)
-                    return m_FriendsSimConnector.FriendshipOffered(region, fromID, toID, message ?? string.Empty, fromName, fromHomeURI);
+                {
+                    bool posted = m_FriendsSimConnector.FriendshipOffered(region, fromID, toID, message ?? string.Empty, fromName, fromHomeURI);
+                    LogDelivered(fromID, toID, posted ? "home_presence" : "none");
+                    return posted;
+                }
             }
 
             if (m_UserAgentService is null)
+            {
+                LogDelivered(fromID, toID, "none");
                 return false;
+            }
             string locate;
             try
             {
@@ -613,11 +667,24 @@ namespace OpenSim.Services.HypergridService
             catch (Exception e)
             {
                 m_log.DebugFormat("[HGFRIENDS SERVICE]: LocateUser failed: {0}", e.Message);
+                LogDelivered(fromID, toID, "none");
                 return false;
             }
             if (string.IsNullOrWhiteSpace(locate))
+            {
+                LogDelivered(fromID, toID, "none");
                 return false;
-            return InstantMessageServiceConnector.SendInstantMessage(locate, im, m_MessageKey, 2000);
+            }
+            bool imOk = InstantMessageServiceConnector.SendInstantMessage(locate, im, m_MessageKey, 2000);
+            LogDelivered(fromID, toID, imOk ? "im_locate" : "none");
+            return imOk;
+        }
+
+        static void LogDelivered(UUID fromID, UUID toID, string via)
+        {
+            m_log.InfoFormat(
+                "[HGFRIENDS SERVICE]: from={0} to={1} result=ok reason=popup delivered={2}",
+                fromID, toID, via);
         }
 
         static bool IsThisHome(string url)
@@ -689,7 +756,9 @@ namespace OpenSim.Services.HypergridService
             delivered = false;
             if (!TryResolveOffererHomeURI(fromName, out string uriStr))
             {
-                m_log.DebugFormat("[HGFRIENDS SERVICE]: Malformed offerer name/home {0}", fromName);
+                m_log.WarnFormat(
+                    "[HGFRIENDS SERVICE]: from={0} to={1} result=fail reason=no_homeuri",
+                    fromID, toID);
                 return false;
             }
 
@@ -705,7 +774,9 @@ namespace OpenSim.Services.HypergridService
             HGFriendsServicesConnector friendsConn = new(friendsServerURI);
             if (!friendsConn.ValidateFriendshipOffered(fromID, toID))
             {
-                m_log.WarnFormat("[HGFRIENDS SERVICE]: Friendship request from {0} to {1} is invalid. Impersonations?", fromID, toID);
+                m_log.WarnFormat(
+                    "[HGFRIENDS SERVICE]: from={0} to={1} fromHome={2} result=fail reason=validate_failed",
+                    fromID, toID, uriStr);
                 return false;
             }
 

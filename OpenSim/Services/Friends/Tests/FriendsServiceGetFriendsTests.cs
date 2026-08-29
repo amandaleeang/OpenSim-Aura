@@ -221,6 +221,15 @@ namespace OpenSim.Services.Friends.Tests
         }
 
         [Test]
+        public void ReasonString_StableTokens()
+        {
+            Assert.That(HGFriendsService.ReasonString(FriendshipCompleteReason.Upgraded), Is.EqualTo("upgraded"));
+            Assert.That(HGFriendsService.ReasonString(FriendshipCompleteReason.Already), Is.EqualTo("already"));
+            Assert.That(HGFriendsService.ReasonString(FriendshipCompleteReason.NoPending), Is.EqualTo("no_pending"));
+            Assert.That(HGFriendsService.ReasonString(FriendshipCompleteReason.HomeAFailed), Is.EqualTo("homea_failed"));
+        }
+
+        [Test]
         public void HomeHostsMatch_HttpsDefaultPortVsFromName()
         {
             Assert.That(HGFriendsService.HomeHostsMatch("https://grid.example/", "First.Last@grid.example"), Is.True);

@@ -399,7 +399,11 @@
     ; Home-canonical HG offers. Default false for one release. Incoming /hgfriends
     ; on this process always upgrades pending. Set true when HomeA grids you offer
     ; into understand store_reverse_pending. Old HomeA + flag true → "Could not
-    ; reach your home grid".
+    ; reach your home grid". Old HomeB still works via FromName.
+    ;
+    ; Diagnose "pending missing at home": grep [HGFRIENDS] for offer_start,
+    ; reverse_pending, pending_stored / validate_failed.
+    ;
     ;HomeCanonicalOffers = false
 
 [Messaging]
