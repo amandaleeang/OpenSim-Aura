@@ -477,6 +477,12 @@
       <Reference name="Nini"/>
       <Reference name="log4net"/>
 
+      <Files>
+        <Match pattern="*.cs" recurse="true">
+          <Exclude name="obj" pattern="obj"/>
+          <Exclude name="Tests" pattern="Tests"/>
+        </Match>
+      </Files>
     </Project>
 
     <Project name="OpenSim.Services.Connectors" path="OpenSim/Services/Connectors" type="Library">
