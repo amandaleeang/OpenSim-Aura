@@ -169,15 +169,12 @@ namespace OpenSim.Server.Handlers.Hypergrid
 
             bool success = m_TheService.NewFriendship(friend, verified);
 
-            if (success)
-                return SuccessResult();
-            else
-                return FailureResult();
+            return BoolResult(success);
         }
 
         byte[] DeleteFriendship(Dictionary<string, object> request)
         {
-            if (request.TryGetValue("SECRET", out object tmpObj) || tmpObj is null)
+            if (!request.TryGetValue("SECRET", out object tmpObj) || tmpObj is null)
                 return BoolResult(false);
 
             string secret = tmpObj.ToString();

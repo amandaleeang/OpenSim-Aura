@@ -38,9 +38,11 @@ using OpenMetaverse;
 using OpenSim.Framework;
 using OpenSim.Region.Framework.Interfaces;
 using OpenSim.Region.Framework.Scenes;
+using OpenSim.Region.CoreModules.Framework.UserManagement;
 using OpenSim.Services.Interfaces;
 using OpenSim.Services.Connectors.Friends;
 using OpenSim.Services.Connectors.Hypergrid;
+using OpenSim.Services.Connectors.InstantMessage;
 using FriendInfo = OpenSim.Services.Interfaces.FriendInfo;
 using PresenceInfo = OpenSim.Services.Interfaces.PresenceInfo;
 using GridRegion = OpenSim.Services.Interfaces.GridRegion;
@@ -53,6 +55,7 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
         private static readonly ILog m_log = LogManager.GetLogger(MethodBase.GetCurrentMethod().DeclaringType);
 
         private int m_levelHGFriends = 0;
+        private string m_MessageKey = string.Empty;
 
         IUserManagement m_uMan;
         public IUserManagement UserManagementModule
@@ -80,6 +83,7 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
 
             base.AddRegion(scene);
             scene.RegisterModuleInterface<IFriendsSimConnector>(this);
+            scene.EventManager.OnIncomingInstantMessage += OnIncomingFriendshipIM;
         }
 
         public override void RegionLoaded(Scene scene)
@@ -88,6 +92,13 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
                 return;
             if (m_StatusNotifier == null)
                 m_StatusNotifier = new HGStatusNotifier(this);
+        }
+
+        public override void RemoveRegion(Scene scene)
+        {
+            if (m_Enabled)
+                scene.EventManager.OnIncomingInstantMessage -= OnIncomingFriendshipIM;
+            base.RemoveRegion(scene);
         }
 
         protected override void InitModule(IConfigSource config)
@@ -103,6 +114,9 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
                 // TODO: read in all config variables pertaining to
                 // HG friendship permissions
             }
+            IConfig messaging = config.Configs["Messaging"];
+            if (messaging is not null)
+                m_MessageKey = messaging.GetString("MessageKey", string.Empty);
         }
 
         #endregion
@@ -391,15 +405,8 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
 
             try
             {
-                string friendsUri = null;
-                if (agentClientCircuit.ServiceURLs is not null)
-                {
-                    if (agentClientCircuit.ServiceURLs.TryGetValue("FriendsServerURI", out object fsu) && fsu != null)
-                        friendsUri = fsu.ToString();
-                    if (string.IsNullOrWhiteSpace(friendsUri)
-                            && agentClientCircuit.ServiceURLs.TryGetValue("HomeURI", out object hu) && hu != null)
-                        friendsUri = hu.ToString();
-                }
+                string friendsUri = HGIdentity.ResolveFriendsServerURI(
+                    (Scene)client.Scene, UserManagementModule, client.AgentId, agentClientCircuit);
 
                 if (!string.IsNullOrWhiteSpace(friendsUri))
                 {
@@ -487,30 +494,33 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
 
         protected override void StoreBackwards(UUID friendID, UUID agentID)
         {
-            bool agentIsLocal = true;
-            //bool friendIsLocal = true;
+            bool askerLocal = UserManagementModule is null || UserManagementModule.IsLocalGridUser(agentID);
+            bool recipientLocal = UserManagementModule is null || UserManagementModule.IsLocalGridUser(friendID);
 
-            if (UserManagementModule != null)
+            if (askerLocal)
             {
-                agentIsLocal = UserManagementModule.IsLocalGridUser(agentID);
-                //friendIsLocal = UserManagementModule.IsLocalGridUser(friendID);
-            }
-
-            // Is the requester a local user?
-            if (agentIsLocal)
-            {
-                // local grid users
                 m_log.DebugFormat("[HGFRIENDS MODULE]: Friendship requester is local. Storing backwards.");
-
                 base.StoreBackwards(friendID, agentID);
                 return;
             }
 
-            // no provision for this temporary friendship state when user is not local
-            //FriendsService.StoreFriend(friendID.ToString(), agentID.ToString(), 0);
+            if (recipientLocal)
+            {
+                // Visitor asked our local user. We are the recipient home — park pending here.
+                string from = agentID.ToString();
+                AgentCircuitData circuit = FindCircuit(agentID);
+                if (circuit is not null)
+                {
+                    string uui = Util.ProduceUserUniversalIdentifier(circuit);
+                    if (IsFullUui(uui))
+                        from = uui;
+                }
+                FriendsService.StoreFriend(friendID.ToString(), from, 0);
+                m_log.DebugFormat("[HGFRIENDS MODULE]: Stored pending for local {0} from visitor {1}", friendID, from);
+            }
         }
 
-        protected override void StoreFriendships(UUID agentID, UUID friendID)
+        protected override bool StoreFriendships(UUID agentID, UUID friendID)
         {
             bool agentIsLocal = true;
             bool friendIsLocal = true;
@@ -520,145 +530,259 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
                 friendIsLocal = UserManagementModule.IsLocalGridUser(friendID);
             }
 
-            // Are they both local users?
             if (agentIsLocal && friendIsLocal)
             {
-                // local grid users
                 m_log.DebugFormat("[HGFRIENDS MODULE]: Users are both local");
                 DeletePreviousHGRelations(agentID, friendID);
-                base.StoreFriendships(agentID, friendID);
-                return;
+                return base.StoreFriendships(agentID, friendID);
             }
 
-            // ok, at least one of them is foreigner, let's get their data
             IClientAPI agentClient = LocateClientObject(agentID);
             IClientAPI friendClient = LocateClientObject(friendID);
-            AgentCircuitData agentClientCircuit = null;
-            AgentCircuitData friendClientCircuit = null;
-            string agentUUI = string.Empty;
-            string friendUUI = string.Empty;
-            string agentFriendService = string.Empty;
-            string friendFriendService = string.Empty;
+            AgentCircuitData agentClientCircuit = FindCircuit(agentID);
+            AgentCircuitData friendClientCircuit = FindCircuit(friendID);
 
+            Scene scene = m_Scenes.Count > 0 ? m_Scenes[0] : null;
             if (agentClient is not null)
             {
-                agentClientCircuit = ((Scene)(agentClient.Scene)).AuthenticateHandler.GetAgentCircuitData(agentClient.CircuitCode);
-                agentUUI = Util.ProduceUserUniversalIdentifier(agentClientCircuit);
-                agentFriendService = agentClientCircuit.ServiceURLs["FriendsServerURI"].ToString();
+                scene = (Scene)agentClient.Scene;
                 RecacheFriends(agentClient);
             }
             if (friendClient is not null)
             {
-                friendClientCircuit = ((Scene)(friendClient.Scene)).AuthenticateHandler.GetAgentCircuitData(friendClient.CircuitCode);
-                friendUUI = Util.ProduceUserUniversalIdentifier(friendClientCircuit);
-                friendFriendService = friendClientCircuit.ServiceURLs["FriendsServerURI"].ToString();
+                scene ??= (Scene)friendClient.Scene;
                 RecacheFriends(friendClient);
             }
+
+            IUserManagement um = UserManagementModule;
+            string agentUUI = CircuitUui(agentClientCircuit);
+            string friendUUI = CircuitUui(friendClientCircuit);
+            string agentFriendService = HGIdentity.ResolveFriendsServerURI(scene, um, agentID, agentClientCircuit);
+            string friendFriendService = HGIdentity.ResolveFriendsServerURI(scene, um, friendID, friendClientCircuit);
 
             m_log.DebugFormat("[HGFRIENDS MODULE] HG Friendship! thisUUI={0}; friendUUI={1}; foreignThisFriendService={2}; foreignFriendFriendService={3}",
                     agentUUI, friendUUI, agentFriendService, friendFriendService);
 
-            // Generate a random 8-character hex number that will sign this friendship
             string secret = UUID.Random().ToString().Substring(0, 8);
 
-            string theFriendUUID = friendUUI + ";" + secret;
-            string agentUUID = agentUUI + ";" + secret;
-
-            if (agentIsLocal) // agent is local, 'friend' is foreigner
+            if (agentIsLocal)
             {
-                // This may happen when the agent returned home, in which case the friend is not there
-                // We need to look for its information in the friends list itself
-                FriendInfo[] finfos = null;
-                bool confirming = false;
-                if (friendUUI.Length == 0)
+                agentUUI = EnsureUui(agentUUI, agentID, true, UUID.Zero);
+                friendUUI = EnsureUui(friendUUI, friendID, false, agentID);
+                if (!IsFullUui(agentUUI) || !IsFullUui(friendUUI))
                 {
-                    finfos = GetFriendsFromCache(agentID);
-                    foreach (FriendInfo finfo in finfos)
-                    {
-                        if (finfo.TheirFlags == -1)
-                        {
-                            if (finfo.Friend.StartsWith(friendID.ToString()))
-                            {
-                                friendUUI = finfo.Friend;
-                                theFriendUUID = friendUUI;
-
-                                // If it's confirming the friendship, we already have the full UUI with the secret
-                                if (Util.ParseFullUniversalUserIdentifier(theFriendUUID, out UUID utmp, out string url,
-                                            out string first, out string last))
-                                {
-                                    agentUUID = agentUUI + ";" + secret;
-                                    m_uMan.AddUser(utmp, first, last, url);
-                                }
-                                confirming = true;
-                                break;
-                            }
-                        }
-                    }
-                    if (!confirming)
-                    {
-                        friendUUI = m_uMan.GetUserUUI(friendID);
-                        theFriendUUID = friendUUI + ";" + secret;
-                    }
-
-                    friendFriendService = m_uMan.GetUserServerURL(friendID, "FriendsServerURI");
-
-                    //m_log.DebugFormat("[HGFRIENDS MODULE] HG Friendship! thisUUI={0}; friendUUI={1}; foreignThisFriendService={2}; foreignFriendFriendService={3}",
-                    //    agentUUI, friendUUI, agentFriendService, friendFriendService);
-
+                    m_log.WarnFormat("[HGFRIENDS MODULE]: Accept failed: missing UUI agent={0} friend={1}", agentUUI, friendUUI);
+                    return false;
                 }
-
-                // Delete any previous friendship relations
-                DeletePreviousRelations(agentID, friendID);
-
-                // store in the local friends service a reference to the foreign friend
-                FriendsService.StoreFriend(agentID.ToString(), theFriendUUID, 1);
-                // and also the converse
-                FriendsService.StoreFriend(theFriendUUID, agentID.ToString(), 1);
-
-                //if (!confirming)
-                //{
-                    // store in the foreign friends service a reference to the local agent
-                    HGFriendsServicesConnector friendsConn = null;
-                    if (friendClientCircuit != null) // the friend is here, validate session
-                        friendsConn = new HGFriendsServicesConnector(friendFriendService, friendClientCircuit.SessionID, friendClientCircuit.ServiceSessionID);
-                    else // the friend is not here, he initiated the request in his home world
-                        friendsConn = new HGFriendsServicesConnector(friendFriendService);
-
-                    friendsConn.NewFriendship(friendID, agentUUID);
-                //}
+                // Session if B is on this grid; else phase 4 unverified to HomeB.
+                if (!InformHome(friendID, friendClientCircuit, friendFriendService, agentUUI + ";" + secret, true))
+                    return false;
+                return StoreAcceptedLocal(agentID, friendID, friendUUI + ";" + secret);
             }
-            else if (friendIsLocal) // 'friend' is local,  agent is foreigner
+
+            if (friendIsLocal)
             {
-                // Delete any previous friendship relations
-                DeletePreviousRelations(agentID, friendID);
-
-                // store in the local friends service a reference to the foreign agent
-                FriendsService.StoreFriend(friendID.ToString(), agentUUI + ";" + secret, 1);
-                // and also the converse
-                FriendsService.StoreFriend(agentUUI + ";" + secret, friendID.ToString(), 1);
-
-                if (agentClientCircuit is not null)
+                // Visitor acceptor. They must have a session on this grid.
+                friendUUI = EnsureUui(friendUUI, friendID, true, UUID.Zero);
+                agentUUI = EnsureUui(agentUUI, agentID, false, friendID);
+                if (!IsFullUui(agentUUI) || !IsFullUui(friendUUI))
                 {
-                    // store in the foreign friends service a reference to the local agent
-                    HGFriendsServicesConnector friendsConn = new HGFriendsServicesConnector(agentFriendService, agentClientCircuit.SessionID, agentClientCircuit.ServiceSessionID);
-                    friendsConn.NewFriendship(agentID, friendUUI + ";" + secret);
+                    m_log.WarnFormat("[HGFRIENDS MODULE]: Accept failed: missing UUI agent={0} friend={1}", agentUUI, friendUUI);
+                    return false;
                 }
+                if (!InformHome(agentID, agentClientCircuit, agentFriendService, friendUUI + ";" + secret, false))
+                    return false;
+                return StoreAcceptedLocal(friendID, agentID, agentUUI + ";" + secret);
             }
-            else // They're both foreigners!
+
+            // Both foreigners. Acceptor must be here with a session.
+            // C → A's home. If B is also here, tell HomeB; if not, A's home fans out (phase 3).
+            if (!HasLiveVisitorSession(agentClientCircuit))
             {
-                HGFriendsServicesConnector friendsConn;
-                if (agentClientCircuit is not null)
-                {
-                    friendsConn = new HGFriendsServicesConnector(agentFriendService, agentClientCircuit.SessionID, agentClientCircuit.ServiceSessionID);
-                    friendsConn.NewFriendship(agentID, friendUUI + ";" + secret);
-                }
-                if (friendClientCircuit is not null)
-                {
-                    friendsConn = new HGFriendsServicesConnector(friendFriendService, friendClientCircuit.SessionID, friendClientCircuit.ServiceSessionID);
-                    friendsConn.NewFriendship(friendID, agentUUI + ";" + secret);
-                }
+                m_log.WarnFormat("[HGFRIENDS MODULE]: Accept failed: acceptor {0} has no circuit/session", agentID);
+                return false;
             }
-            // my brain hurts now
+            agentUUI = EnsureUui(agentUUI, agentID, false, UUID.Zero);
+            friendUUI = EnsureUui(friendUUI, friendID, false, UUID.Zero);
+            if (!IsFullUui(agentUUI) || !IsFullUui(friendUUI))
+            {
+                m_log.WarnFormat("[HGFRIENDS MODULE]: Accept failed: missing UUI agent={0} friend={1}", agentUUI, friendUUI);
+                return false;
+            }
+            if (!NotifyVisitorHome(agentFriendService, agentClientCircuit, agentID, friendUUI + ";" + secret))
+                return false;
+            if (HasLiveVisitorSession(friendClientCircuit)
+                    && !NotifyVisitorHome(friendFriendService, friendClientCircuit, friendID, agentUUI + ";" + secret))
+                return false;
+            return true;
+        }
+
+        AgentCircuitData FindCircuit(UUID userId)
+        {
+            foreach (Scene s in m_Scenes)
+            {
+                AgentCircuitData circuit = HGIdentity.GetCircuit(s, userId);
+                if (circuit is not null)
+                    return circuit;
+            }
+            return null;
+        }
+
+        static string CircuitUui(AgentCircuitData circuit)
+        {
+            if (circuit is null)
+                return string.Empty;
+            string uui = Util.ProduceUserUniversalIdentifier(circuit);
+            return IsFullUui(uui) ? uui : string.Empty;
+        }
+
+        string EnsureUui(string uui, UUID userId, bool local, UUID pendingPeer)
+        {
+            uui = HGIdentity.WithoutSecret(uui);
+            if (IsFullUui(uui))
+                return uui;
+            if (local)
+                return LocalUserUui(userId);
+            if (pendingPeer.IsNotZero())
+            {
+                string pending = HGIdentity.WithoutSecret(GetUUI(pendingPeer, userId));
+                if (IsFullUui(pending))
+                    return pending;
+            }
+            if (UserManagementModule is not null)
+            {
+                string fromUm = HGIdentity.WithoutSecret(UserManagementModule.GetUserUUI(userId));
+                if (IsFullUui(fromUm))
+                    return fromUm;
+            }
+            return uui ?? string.Empty;
+        }
+
+        string LocalUserUui(UUID userId)
+        {
+            UserAccount account = UserAccountService.GetUserAccount(UUID.Zero, userId);
+            Scene scene = m_Scenes.Count > 0 ? m_Scenes[0] : null;
+            string home = HGIdentity.ResolveHomeURI(scene, UserManagementModule, userId);
+            if (account is null || string.IsNullOrEmpty(home))
+                return string.Empty;
+            return GridInstantMessage.BuildUUI(userId, account.FirstName + " " + account.LastName, home);
+        }
+
+        bool StoreAcceptedLocal(UUID localId, UUID otherId, string otherUuiWithSecret)
+        {
+            DeletePreviousRelations(localId, otherId);
+            FriendsService.StoreFriend(localId.ToString(), otherUuiWithSecret, 1);
+            FriendsService.StoreFriend(otherUuiWithSecret, localId.ToString(), 1);
+            return true;
+        }
+
+        static bool HasLiveVisitorSession(AgentCircuitData circuit)
+        {
+            return circuit is not null
+                && circuit.SessionID.IsNotZero()
+                && !string.IsNullOrEmpty(circuit.ServiceSessionID);
+        }
+
+        /// <summary>
+        /// Session here → verified NewFriendship. On this grid without a local circuit →
+        /// that region POSTs with their session. Not on this grid → unverified only if allowed (phase 4).
+        /// </summary>
+        bool InformHome(UUID userId, AgentCircuitData circuit, string friendsUri, string otherUuiWithSecret, bool allowUnverified)
+        {
+            if (HasLiveVisitorSession(circuit))
+                return NotifyVisitorHome(friendsUri, circuit, userId, otherUuiWithSecret);
+
+            if (VisitorPresentOnThisGrid(userId))
+                return NotifyVisitorHomeViaPresence(userId, otherUuiWithSecret);
+
+            if (allowUnverified)
+            {
+                if (string.IsNullOrEmpty(friendsUri) && m_Scenes.Count > 0)
+                    friendsUri = HGIdentity.ResolveFriendsServerURI(m_Scenes[0], UserManagementModule, userId, null);
+                return NotifyHomeUnverified(friendsUri, userId, otherUuiWithSecret);
+            }
+
+            m_log.WarnFormat("[HGFRIENDS MODULE]: Accept failed: HG visitor {0} has no circuit/session on this grid", userId);
+            return false;
+        }
+
+        bool NotifyVisitorHome(string friendsUri, AgentCircuitData circuit, UUID visitorId, string otherUuiWithSecret)
+        {
+            if (string.IsNullOrEmpty(friendsUri) || !HasLiveVisitorSession(circuit))
+            {
+                m_log.WarnFormat("[HGFRIENDS MODULE]: Accept failed: HG visitor {0} has no FriendsServerURI or session", visitorId);
+                return false;
+            }
+
+            HGFriendsServicesConnector conn = new(friendsUri, circuit.SessionID, circuit.ServiceSessionID);
+            bool ok = conn.NewFriendship(visitorId, otherUuiWithSecret);
+            if (!ok)
+                m_log.WarnFormat("[HGFRIENDS MODULE]: Home NewFriendship failed for visitor {0} at {1}", visitorId, friendsUri);
+            else
+                m_log.InfoFormat("[HGFRIENDS MODULE]: Informed home of visitor {0} at {1} session={2}",
+                    visitorId, friendsUri, circuit.SessionID);
+            return ok;
+        }
+
+        bool VisitorPresentOnThisGrid(UUID userId)
+        {
+            if (FindCircuit(userId) is not null)
+                return true;
+            PresenceInfo[] sessions = PresenceService?.GetAgents(new string[] { userId.ToString() });
+            return sessions is not null && sessions.Length > 0 && sessions[0] is not null
+                && !sessions[0].RegionID.IsZero();
+        }
+
+        bool NotifyHomeUnverified(string friendsUri, UUID homeUserId, string otherUuiWithSecret)
+        {
+            if (string.IsNullOrEmpty(friendsUri) || !IsFullUui(HGIdentity.WithoutSecret(otherUuiWithSecret)))
+            {
+                m_log.WarnFormat("[HGFRIENDS MODULE]: Phase 4 accept failed: no FriendsServerURI or UUI for {0}", homeUserId);
+                return false;
+            }
+
+            HGFriendsServicesConnector conn = new(friendsUri);
+            bool ok = conn.NewFriendship(homeUserId, otherUuiWithSecret);
+            if (!ok)
+                m_log.WarnFormat("[HGFRIENDS MODULE]: Unverified NewFriendship failed for {0} at {1}", homeUserId, friendsUri);
+            else
+                m_log.InfoFormat("[HGFRIENDS MODULE]: Informed home {0} of {1} (no session, reverse pending)",
+                    friendsUri, homeUserId);
+            return ok;
+        }
+
+        bool NotifyVisitorHomeViaPresence(UUID visitorId, string otherUuiWithSecret)
+        {
+            PresenceInfo[] sessions = PresenceService?.GetAgents(new string[] { visitorId.ToString() });
+            if (sessions is null || sessions.Length == 0 || sessions[0] is null || sessions[0].RegionID.IsZero())
+                return false;
+
+            GridRegion region = GridService.GetRegionByUUID(m_Scenes[0].RegionInfo.ScopeID, sessions[0].RegionID);
+            if (region is null)
+                return false;
+
+            m_log.InfoFormat("[HGFRIENDS MODULE]: Asking region {0} to complete visitor {1} home friendship",
+                region.RegionName, visitorId);
+            return m_FriendsSimConnector.CompleteVisitorFriendship(region, visitorId, otherUuiWithSecret);
+        }
+
+        public override bool CompleteVisitorHomeFriendship(UUID visitorId, string otherUuiWithSecret)
+        {
+            AgentCircuitData circuit = FindCircuit(visitorId);
+            if (!HasLiveVisitorSession(circuit))
+            {
+                m_log.WarnFormat("[HGFRIENDS MODULE]: complete_visitor_friendship: no circuit/session for {0}", visitorId);
+                return false;
+            }
+
+            Scene scene = m_Scenes.Count > 0 ? m_Scenes[0] : null;
+            string friendsUri = HGIdentity.ResolveFriendsServerURI(scene, UserManagementModule, visitorId, circuit);
+            return NotifyVisitorHome(friendsUri, circuit, visitorId, otherUuiWithSecret);
+        }
+
+        static bool IsFullUui(string uui)
+        {
+            return HGIdentity.IsFullUui(uui);
         }
 
         private void DeletePreviousRelations(UUID a1, UUID a2)
@@ -690,7 +814,7 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
             }
         }
 
-        private void DeletePreviousHGRelations(UUID a1, UUID a2)
+        protected void DeletePreviousHGRelations(UUID a1, UUID a2)
         {
             // Delete any previous friendship relations
             FriendInfo[] finfos = GetFriendsFromCache(a1);
@@ -712,7 +836,7 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
                 }
             }
 
-            finfos = GetFriendsFromCache(a1);
+            finfos = GetFriendsFromCache(a2);
             if (finfos is not null)
             {
                 string a1str2 = a1.ToString();
@@ -827,7 +951,7 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
 
         private void Delete(UUID foreignUser, UUID localUser, string uui)
         {
-            if (Util.ParseFullUniversalUserIdentifier(uui, out UUID _, out string _, out string _, out string url, out string secret))
+            if (Util.ParseFullUniversalUserIdentifier(uui, out UUID _, out string url, out string _, out string _, out string secret))
             {
                 m_log.DebugFormat("[HGFRIENDS MODULE]: Deleting friendship from {0}", url);
                 HGFriendsServicesConnector friendConn = new HGFriendsServicesConnector(url);
@@ -840,10 +964,15 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
             if (base.ForwardFriendshipOffer(agentID, friendID, im))
                 return true;
 
-            // OK, that didn't work, so let's try to find this user somewhere
-            if (!m_uMan.IsLocalGridUser(friendID))
+            // Local recipient not on this sim: pending is already stored. If they are traveling, IM them.
+            if (m_uMan is not null && m_uMan.IsLocalGridUser(friendID))
+                return DeliverOfferToLocalTraveler(agentID, friendID, im);
+
+            // Foreign recipient not here: friendship_offered to their home.
+            if (m_uMan is not null && !m_uMan.IsLocalGridUser(friendID))
             {
-                string friendsURL = m_uMan.GetUserServerURL(friendID, "FriendsServerURI");
+                Scene scene = m_Scenes.Count > 0 ? m_Scenes[0] : null;
+                string friendsURL = HGIdentity.ResolveFriendsServerURI(scene, m_uMan, friendID, null);
                 if (!string.IsNullOrEmpty(friendsURL))
                 {
                     m_log.DebugFormat("[HGFRIENDS MODULE]: Forwading friendship from {0} to {1} @ {2}", agentID, friendID, friendsURL);
@@ -853,25 +982,17 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
                     string name = im.fromAgentName;
                     if (m_uMan.IsLocalGridUser(agentID))
                     {
-                        IClientAPI agentClient = LocateClientObject(agentID);
-                        AgentCircuitData agentClientCircuit = ((Scene)(agentClient.Scene)).AuthenticateHandler.GetAgentCircuitData(agentClient.CircuitCode);
-                        string agentHomeService = string.Empty;
+                        string agentHomeService = HGIdentity.ResolveHomeURI(scene, m_uMan, agentID);
+                        if (string.IsNullOrWhiteSpace(agentHomeService))
+                        {
+                            m_log.DebugFormat("[HGFRIENDS MODULE]: No HomeURI for local user {0}", agentID);
+                            return false;
+                        }
                         try
                         {
-                            agentHomeService = agentClientCircuit.ServiceURLs["HomeURI"].ToString();
                             string lastname = "@" + new Uri(agentHomeService).Authority;
                             string firstname = im.fromAgentName.Replace(" ", ".");
                             name = firstname + lastname;
-                        }
-                        catch (KeyNotFoundException)
-                        {
-                            m_log.DebugFormat("[HGFRIENDS MODULE]: Key HomeURI not found for user {0}", agentID);
-                            return false;
-                        }
-                        catch (NullReferenceException)
-                        {
-                            m_log.DebugFormat("[HGFRIENDS MODULE]: Null HomeUri for local user {0}", agentID);
-                            return false;
                         }
                         catch (UriFormatException)
                         {
@@ -881,7 +1002,6 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
                     }
 
                     m_HGFriendsConnector.FriendshipOffered(region, agentID, friendID, im.message, name);
-
                     return true;
                 }
             }
@@ -889,25 +1009,63 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
             return false;
         }
 
+        bool DeliverOfferToLocalTraveler(UUID fromID, UUID toID, GridInstantMessage im)
+        {
+            IUserAgentService uas = m_Scenes.Count > 0
+                ? m_Scenes[0].RequestModuleInterface<IUserAgentService>()
+                : null;
+            if (uas is null)
+            {
+                m_log.DebugFormat("[HGFRIENDS MODULE]: No UserAgentService to locate local traveler {0}", toID);
+                return false;
+            }
+
+            string locate;
+            try
+            {
+                locate = uas.LocateUser(toID);
+            }
+            catch (Exception e)
+            {
+                m_log.DebugFormat("[HGFRIENDS MODULE]: LocateUser failed for {0}: {1}", toID, e.Message);
+                return false;
+            }
+            if (string.IsNullOrWhiteSpace(locate))
+                return false;
+
+            AgentCircuitData fromCircuit = FindCircuit(fromID);
+            Scene scene = m_Scenes.Count > 0 ? m_Scenes[0] : null;
+            string home = HGIdentity.ResolveHomeURI(scene, m_uMan, fromID, fromCircuit);
+            if (!string.IsNullOrWhiteSpace(home))
+                im.fromAgentHomeURI = home;
+
+            bool ok = InstantMessageServiceConnector.SendInstantMessage(locate, im, m_MessageKey);
+            m_log.InfoFormat("[HGFRIENDS MODULE]: Traveler offer to local {0} via {1} delivered={2}", toID, locate, ok);
+            return ok;
+        }
+
+        void OnIncomingFriendshipIM(GridInstantMessage im)
+        {
+            if (im is null || im.fromGroup)
+                return;
+            if ((InstantMessageDialog)im.dialog != InstantMessageDialog.FriendshipOffered)
+                return;
+            LocalFriendshipOffered(new UUID(im.toAgentID), im);
+        }
+
         public override bool LocalFriendshipOffered(UUID toID, GridInstantMessage im)
         {
-            if (base.LocalFriendshipOffered(toID, im))
+            if (!base.LocalFriendshipOffered(toID, im))
+                return false;
+
+            string home = GridInstantMessage.ResolveSenderHomeURI(im.fromAgentHomeURI, null, im.fromAgentName);
+            if (!string.IsNullOrWhiteSpace(home))
             {
-                if (im.fromAgentName.Contains("@"))
-                {
-                    string[] parts = im.fromAgentName.Split(new char[] { '@' });
-                    if (parts.Length == 2)
-                    {
-                        string[] fl = parts[0].Trim().Split(Util.SplitDotArray);
-                        if (fl.Length == 2)
-                            m_uMan.AddUser(new UUID(im.fromAgentID), fl[0], fl[1], "http://" + parts[1]);
-                        else
-                            m_uMan.AddUser(new UUID(im.fromAgentID), fl[0], "", "http://" + parts[1]);
-                    }
-                }
-                return true;
+                GridInstantMessage.SplitDisplayName(im.fromAgentName, out string first, out string last);
+                Scene scene = m_Scenes.Count > 0 ? m_Scenes[0] : null;
+                HGIdentity.RememberContact(scene, m_uMan, new UUID(im.fromAgentID), first, last, home);
             }
-            return false;
+            return true;
         }
     }
 }
