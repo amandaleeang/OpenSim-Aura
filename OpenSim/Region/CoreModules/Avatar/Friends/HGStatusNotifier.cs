@@ -41,31 +41,63 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
                 if (ids.Count == 0)
                     continue; // no one to notify. caller don't do this
 
-                //m_log.DebugFormat("[HG STATUS NOTIFIER]: Notifying {0} friends in {1}", ids.Count, kvp.Key);
                 // ASSUMPTION: we assume that all users for one home domain
                 // have exactly the same set of service URLs.
-                // If this is ever not true, we need to change this.
+                List<UUID> friendsOnline = new();
                 if (Util.ParseUniversalUserIdentifier(ids[0], out UUID friendID))
                 {
                     string friendsServerURI = m_FriendsModule.UserManagementModule.GetUserServerURL(friendID, "FriendsServerURI");
                     if (!string.IsNullOrEmpty(friendsServerURI))
                     {
                         HGFriendsServicesConnector fConn = new(friendsServerURI);
-
-                        List<UUID> friendsOnline = fConn.StatusNotification(ids, userID, online);
-                        if (friendsOnline.Count > 0)
-                        {
-                            IClientAPI client = m_FriendsModule.LocateClientObject(userID);
-                            if(client is not null)
-                            {
-                                m_FriendsModule.CacheFriendsOnline(userID, friendsOnline, online);
-                                if(online)
-                                    client?.SendAgentOnline(friendsOnline.ToArray());
-                                else
-                                    client?.SendAgentOffline(friendsOnline.ToArray());
-                            }
-                        }
+                        List<UUID> reported = fConn.StatusNotification(ids, userID, online);
+                        if (reported is not null)
+                            friendsOnline = reported;
                     }
+                }
+
+                // Stock homes skip travelers (presence RegionID zero). LocateUser is the travel table.
+                if (online)
+                    AddTravelingFriends(kvp.Value, friendsOnline);
+
+                if (friendsOnline.Count == 0)
+                    continue;
+
+                IClientAPI client = m_FriendsModule.LocateClientObject(userID);
+                if (client is not null)
+                {
+                    m_FriendsModule.CacheFriendsOnline(userID, friendsOnline, online);
+                    if (online)
+                        client.SendAgentOnline(friendsOnline.ToArray());
+                    else
+                        client.SendAgentOffline(friendsOnline.ToArray());
+                }
+            }
+        }
+
+        static void AddTravelingFriends(List<FriendInfo> friends, List<UUID> online)
+        {
+            HashSet<UUID> have = new(online);
+            foreach (FriendInfo f in friends)
+            {
+                if (f?.Friend is null)
+                    continue;
+                if (!Util.ParseUniversalUserIdentifier(f.Friend, out UUID fid, out string home, out _, out _, out _))
+                    continue;
+                if (fid.IsZero() || have.Contains(fid) || string.IsNullOrWhiteSpace(home))
+                    continue;
+                try
+                {
+                    UserAgentServiceConnector uas = new(home);
+                    if (string.IsNullOrWhiteSpace(uas.LocateUser(fid)))
+                        continue;
+                    online.Add(fid);
+                    have.Add(fid);
+                    m_log.DebugFormat("[HG STATUS NOTIFIER]: Friend {0} is online (traveling) via {1}", fid, home);
+                }
+                catch (Exception e)
+                {
+                    m_log.DebugFormat("[HG STATUS NOTIFIER]: LocateUser {0} at {1} failed: {2}", fid, home, e.Message);
                 }
             }
         }
