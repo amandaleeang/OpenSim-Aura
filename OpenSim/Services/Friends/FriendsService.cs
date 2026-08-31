@@ -71,12 +71,23 @@ namespace OpenSim.Services.Friends
             foreach (FriendsData d in data)
             {
                 FriendInfo i = new FriendInfo();
-
-                if (!Util.ParseUniversalUserIdentifier(i.Friend, out UUID friendID))
-                    continue; // junk entry
                 i.Friend = d.Friend;
+                // UUID-only (len 36) is valid; empty / unparseable Friend is junk.
+                if (string.IsNullOrEmpty(i.Friend)
+                        || !Util.ParseUniversalUserIdentifier(i.Friend, out UUID _))
+                    continue;
+
+                // LIKE uuid% can return PrincipalID as a full UUI; never new UUID(full UUI).
+                if (d.PrincipalID != null && d.PrincipalID.Length >= 36
+                        && UUID.TryParse(d.PrincipalID.Substring(0, 36), out UUID pid))
+                    i.PrincipalID = pid;
+
                 i.MyFlags = Convert.ToInt32(d.Data["Flags"]);
-                i.TheirFlags = Convert.ToInt32(d.Data["TheirFlags"]);
+                if (d.Data != null && d.Data.TryGetValue("TheirFlags", out string tf)
+                        && int.TryParse(tf, out int their))
+                    i.TheirFlags = their;
+                else
+                    i.TheirFlags = -1;
 
                 info.Add(i);
             }
