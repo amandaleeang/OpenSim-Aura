@@ -43,6 +43,7 @@ using OpenSim.Services.Interfaces;
 using OpenSim.Services.Connectors.InstantMessage;
 using OpenSim.Services.Connectors.Hypergrid;
 using OpenSim.Server.Handlers.Hypergrid;
+using OpenSim.Region.CoreModules.Framework.UserManagement;
 
 namespace OpenSim.Region.CoreModules.Avatar.InstantMessage
 {
@@ -267,29 +268,9 @@ namespace OpenSim.Region.CoreModules.Avatar.InstantMessage
 
         private string TryGetRecipientUUI(UUID fromAgent, UUID toAgent)
         {
-            // Sender home get_uui: local accounts, friends, and GridUser IM contacts.
-            string uasURL = null;
-            AgentCircuitData circuit = m_Scenes[0].AuthenticateHandler.GetAgentCircuitData(fromAgent);
-            if (circuit?.ServiceURLs is not null && circuit.ServiceURLs.ContainsKey("HomeURI"))
-                uasURL = circuit.ServiceURLs["HomeURI"]?.ToString();
-            if (string.IsNullOrWhiteSpace(uasURL) && UserManagementModule is not null)
-                uasURL = UserManagementModule.GetUserHomeURL(fromAgent);
-            if (string.IsNullOrWhiteSpace(uasURL) && m_Scenes.Count > 0)
-                uasURL = m_Scenes[0].SceneGridInfo?.GateKeeperURL;
-            if (string.IsNullOrWhiteSpace(uasURL))
-                return string.Empty;
-
-            m_log.DebugFormat("[HG MESSAGE TRANSFER]: getting UUI of user {0} from {1}", toAgent, uasURL);
-            try
-            {
-                UserAgentServiceConnector uasConn = new(uasURL);
-                return uasConn.GetUUI(fromAgent, toAgent) ?? string.Empty;
-            }
-            catch (Exception e)
-            {
-                m_log.Debug("[HG MESSAGE TRANSFER]: GetUUI call failed ", e);
-                return string.Empty;
-            }
+            if (HGIdentity.TryResolveUUI(m_Scenes[0], UserManagementModule, fromAgent, toAgent, out string uui))
+                return uui;
+            return string.Empty;
         }
 
         /// <summary>
@@ -333,27 +314,7 @@ namespace OpenSim.Region.CoreModules.Avatar.InstantMessage
                 return;
 
             if (string.IsNullOrWhiteSpace(im.fromAgentHomeURI))
-            {
-                try
-                {
-                    AgentCircuitData circuit = m_Scenes[0].AuthenticateHandler?.GetAgentCircuitData(fromId);
-                    if (circuit?.ServiceURLs is not null
-                            && circuit.ServiceURLs.TryGetValue("HomeURI", out object hobj) && hobj != null
-                            && !string.IsNullOrWhiteSpace(hobj.ToString()))
-                        im.fromAgentHomeURI = hobj.ToString();
-                }
-                catch (Exception e)
-                {
-                    m_log.Debug($"[HG MESSAGE TRANSFER]: StampSenderUUI circuit lookup failed: {e.Message}");
-                }
-            }
-
-            if (string.IsNullOrWhiteSpace(im.fromAgentHomeURI) && UserManagementModule is not null)
-                im.fromAgentHomeURI = UserManagementModule.GetUserHomeURL(fromId);
-
-            if (string.IsNullOrWhiteSpace(im.fromAgentHomeURI)
-                    && UserManagementModule is not null && UserManagementModule.IsLocalGridUser(fromId))
-                im.fromAgentHomeURI = m_Scenes[0].SceneGridInfo?.GateKeeperURL ?? string.Empty;
+                im.fromAgentHomeURI = HGIdentity.ResolveHomeURI(m_Scenes[0], UserManagementModule, fromId);
         }
 
         void RememberIMContactFromMessage(GridInstantMessage im)
@@ -419,27 +380,7 @@ namespace OpenSim.Region.CoreModules.Avatar.InstantMessage
             if (string.IsNullOrWhiteSpace(last) || last.StartsWith('@'))
                 last = "User";
 
-            UserManagementModule.AddUser(userId, first, last, home);
-
-            try
-            {
-                IGridUserService gridUser = m_Scenes[0].GridUserService;
-                if (gridUser is null)
-                    return;
-                GridUserInfo existing = gridUser.GetGridUserInfo(userId.ToString());
-                if (existing is not null && !string.IsNullOrEmpty(existing.UserID) && existing.UserID.Length > 36)
-                    return;
-
-                string uui = GridInstantMessage.BuildUUI(userId, first + " " + last, home);
-                if (string.IsNullOrEmpty(uui))
-                    return;
-                gridUser.SetLastPosition(uui, UUID.Zero, UUID.Zero, Vector3.Zero, Vector3.Zero);
-                m_log.DebugFormat("[HG MESSAGE TRANSFER]: Remembered IM contact {0} {1} @ {2}", first, last, home);
-            }
-            catch (Exception e)
-            {
-                m_log.Debug($"[HG MESSAGE TRANSFER]: Failed to persist IM contact {userId}: {e.Message}");
-            }
+            HGIdentity.RememberContact(m_Scenes[0], UserManagementModule, userId, first, last, home);
         }
 
     }

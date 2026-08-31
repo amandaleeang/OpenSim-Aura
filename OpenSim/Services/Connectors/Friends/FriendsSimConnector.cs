@@ -142,6 +142,21 @@ namespace OpenSim.Services.Connectors.Friends
             return Call(region, sendData);
         }
 
+        /// <summary>
+        /// Ask the region that has the visitor's circuit to POST NewFriendship to their home. Waits for RESULT.
+        /// </summary>
+        public bool CompleteVisitorFriendship(GridRegion region, UUID visitorId, string otherUuiWithSecret)
+        {
+            if (region is null || visitorId.IsZero() || string.IsNullOrEmpty(otherUuiWithSecret))
+                return false;
+
+            Dictionary<string, object> sendData = new Dictionary<string, object>();
+            sendData["METHOD"] = "complete_visitor_friendship";
+            sendData["VisitorID"] = visitorId.ToString();
+            sendData["FriendUUI"] = otherUuiWithSecret;
+            return CallSync(region, sendData);
+        }
+
         private bool Call(GridRegion region, Dictionary<string, object> sendData)
         {
             Util.FireAndForget(x => {
@@ -186,6 +201,34 @@ namespace OpenSim.Services.Connectors.Friends
             });
 
             return true;
+        }
+
+        private bool CallSync(GridRegion region, Dictionary<string, object> sendData)
+        {
+            if (region is null)
+                return false;
+
+            string path = ServicePath();
+            if (!region.ServerURI.EndsWith("/"))
+                path = "/" + path;
+            string uri = region.ServerURI + path;
+            try
+            {
+                string reply = SynchronousRestFormsRequester.MakeRequest(
+                    "POST", uri, ServerUtils.BuildQueryString(sendData), 15, null, false);
+                if (string.IsNullOrEmpty(reply))
+                    return false;
+                Dictionary<string, object> replyData = ServerUtils.ParseXmlResponse(reply);
+                if (replyData is null || !replyData.TryGetValue("RESULT", out object result) || result is null)
+                    return false;
+                return bool.TryParse(result.ToString(), out bool ok) && ok;
+            }
+            catch (Exception e)
+            {
+                m_log.DebugFormat("[FRIENDS SIM CONNECTOR]: Exception when contacting remote sim at {0}: {1}",
+                    uri, e.Message);
+                return false;
+            }
         }
     }
 }

@@ -124,6 +124,9 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
                     case "status":
                         httpResponse.RawBuffer = StatusNotification(request);
                         return;
+                    case "complete_visitor_friendship":
+                        httpResponse.RawBuffer = CompleteVisitorFriendship(request);
+                        return;
                 }
             }
             catch (Exception e)
@@ -150,8 +153,14 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
             if (request.TryGetValue("Message", out tmpo))
                 message = tmpo.ToString();
 
+            string fromName = string.Empty;
+            if (request.TryGetValue("FromName", out tmpo) && tmpo != null)
+                fromName = tmpo.ToString();
+
             UserAccount account = m_FriendsModule.UserAccountService.GetUserAccount(UUID.Zero, fromID);
-            string name = (account == null) ? "Unknown" : account.FirstName + " " + account.LastName;
+            string name = !string.IsNullOrWhiteSpace(fromName)
+                ? fromName
+                : (account == null) ? "Unknown" : account.FirstName + " " + account.LastName;
 
             GridInstantMessage im = new GridInstantMessage(m_FriendsModule.Scene, fromID, name, toID,
                 (byte)InstantMessageDialog.FriendshipOffered, message, false, Vector3.Zero);
@@ -257,6 +266,17 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
                 return SuccessResult();
 
             return FailureResult();
+        }
+
+        byte[] CompleteVisitorFriendship(Dictionary<string, object> request)
+        {
+            if (!request.TryGetValue("VisitorID", out object vid) || !UUID.TryParse(vid.ToString(), out UUID visitorId))
+                return FailureResult();
+            if (!request.TryGetValue("FriendUUI", out object fuui) || fuui is null || string.IsNullOrEmpty(fuui.ToString()))
+                return FailureResult();
+
+            bool ok = m_FriendsModule.CompleteVisitorHomeFriendship(visitorId, fuui.ToString());
+            return BoolResult(ok);
         }
 
         #region Misc
