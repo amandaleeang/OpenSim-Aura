@@ -452,48 +452,37 @@ namespace OpenSim.Services.HypergridService
             // Now, let's send the notifications
             m_log.DebugFormat("[USER AGENT SERVICE]: Status notification: user has {0} local friends", usersToBeNotified.Count);
 
-            // First, let's send notifications to local users who are online in the home grid
+            HashSet<string> reported = new();
             PresenceInfo[] friendSessions = m_PresenceService.GetAgents(usersToBeNotified.ToArray());
-            if (friendSessions != null && friendSessions.Length > 0)
+            if (friendSessions != null)
             {
-                PresenceInfo friendSession = null;
                 foreach (PresenceInfo pinfo in friendSessions)
                 {
-                    if (pinfo.RegionID.IsNotZero()) // let's guard against traveling agents
-                    {
-                        friendSession = pinfo;
-                        break;
-                    }
-                }
-                if (friendSession is not null)
-                {
-                    ForwardStatusNotificationToSim(friendSession.RegionID, foreignUserID, friendSession.UserID, online);
-                    usersToBeNotified.Remove(friendSession.UserID.ToString());
-                    if (UUID.TryParse(friendSession.UserID, out UUID id))
+                    if (pinfo is null || pinfo.RegionID.IsZero())
+                        continue;
+                    if (!reported.Add(pinfo.UserID))
+                        continue;
+                    ForwardStatusNotificationToSim(pinfo.RegionID, foreignUserID, pinfo.UserID, online);
+                    if (UUID.TryParse(pinfo.UserID, out UUID id))
                         localFriendsOnline.Add(id);
-
                 }
             }
 
-            //// Lastly, let's notify the rest who may be online somewhere else
-            //foreach (string user in usersToBeNotified)
-            //{
-            //    UUID id = new UUID(user);
-            //    if (m_Database.ContainsKey(id) && m_Database[id].GridExternalName != m_GridName)
-            //    {
-            //        string url = m_Database[id].GridExternalName;
-            //        // forward
-            //        m_log.WarnFormat("[USER AGENT SERVICE]: User {0} is visiting {1}. HG Status notifications still not implemented.", user, url);
-            //    }
-            //}
-
-            // and finally, let's send the online friends
             if (online)
             {
+                foreach (string user in usersToBeNotified)
+                {
+                    if (reported.Contains(user) || !UUID.TryParse(user, out UUID uid))
+                        continue;
+                    if (string.IsNullOrWhiteSpace(LocateUser(uid)))
+                        continue;
+                    localFriendsOnline.Add(uid);
+                    m_log.DebugFormat("[USER AGENT SERVICE]: Local friend {0} is online (traveling)", uid);
+                }
                 return localFriendsOnline;
             }
-            else
-                return new List<UUID>();
+
+            return new List<UUID>();
         }
 
         [Obsolete]
@@ -553,15 +542,27 @@ namespace OpenSim.Services.HypergridService
             // Now, let's find out their status
             m_log.DebugFormat("[USER AGENT SERVICE]: GetOnlineFriends: user has {0} local friends with status rights", usersToBeNotified.Count);
 
-            // First, let's send notifications to local users who are online in the home grid
+            HashSet<UUID> seen = new();
             PresenceInfo[] friendSessions = m_PresenceService.GetAgents(usersToBeNotified.ToArray());
-            if (friendSessions is not null && friendSessions.Length > 0)
+            if (friendSessions is not null)
             {
                 foreach (PresenceInfo pi in friendSessions)
                 {
-                    if (UUID.TryParse(pi.UserID, out UUID presenceID))
+                    if (pi is null || !UUID.TryParse(pi.UserID, out UUID presenceID))
+                        continue;
+                    if (seen.Add(presenceID))
                         online.Add(presenceID);
                 }
+            }
+
+            foreach (string user in usersToBeNotified)
+            {
+                if (!UUID.TryParse(user, out UUID uid) || seen.Contains(uid))
+                    continue;
+                if (string.IsNullOrWhiteSpace(LocateUser(uid)))
+                    continue;
+                online.Add(uid);
+                seen.Add(uid);
             }
 
             return online;
