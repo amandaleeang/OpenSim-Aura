@@ -220,7 +220,7 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
 
         public virtual void RegionLoaded(Scene scene) {}
 
-        public void RemoveRegion(Scene scene)
+        public virtual void RemoveRegion(Scene scene)
         {
             if (!m_Enabled)
                 return;
@@ -731,7 +731,11 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
 
         public void AddFriendship(IClientAPI client, UUID friendID)
         {
-            StoreFriendships(client.AgentId, friendID);
+            if (!StoreFriendships(client.AgentId, friendID))
+            {
+                client.SendAgentAlertMessage("Unable to complete friendship.", false);
+                return;
+            }
 
             ICallingCardModule ccm = client.Scene.RequestModuleInterface<ICallingCardModule>();
             ccm?.CreateCallingCard(client.AgentId, friendID, UUID.Zero);
@@ -1133,10 +1137,19 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
             FriendsService.StoreFriend(friendID.ToString(), agentID.ToString(), 0);
         }
 
-        protected virtual void StoreFriendships(UUID agentID, UUID friendID)
+        protected virtual bool StoreFriendships(UUID agentID, UUID friendID)
         {
             FriendsService.StoreFriend(agentID.ToString(), friendID.ToString(), (int)FriendRights.CanSeeOnline);
             FriendsService.StoreFriend(friendID.ToString(), agentID.ToString(), (int)FriendRights.CanSeeOnline);
+            return true;
+        }
+
+        /// <summary>
+        /// Region that holds an HG visitor's circuit: NewFriendship to their home with that session.
+        /// </summary>
+        public virtual bool CompleteVisitorHomeFriendship(UUID visitorId, string otherUuiWithSecret)
+        {
+            return false;
         }
 
         protected virtual bool DeleteFriendship(UUID agentID, UUID exfriendID)

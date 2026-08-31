@@ -146,21 +146,48 @@ namespace OpenSim.Services.Connectors.Hypergrid
             {
                 Dictionary<string, object> replyData = ServerUtils.ParseXmlResponse(reply);
 
-                if ((replyData != null) && replyData.ContainsKey("Result") && (replyData["Result"] != null))
-                {
-                    bool success = false;
-                    Boolean.TryParse(replyData["Result"].ToString(), out success);
+                if (TryParseSuccess(replyData, out bool success))
                     return success;
-                }
-                else
-                    m_log.DebugFormat("[HGFRIENDS CONNECTOR]: StoreFriend {0} {1} received null response",
-                        PrincipalID, Friend);
+
+                m_log.DebugFormat("[HGFRIENDS CONNECTOR]: StoreFriend {0} {1} received null response",
+                    PrincipalID, Friend);
             }
             else
                 m_log.DebugFormat("[HGFRIENDS CONNECTOR]: StoreFriend received null reply");
 
             return false;
 
+        }
+
+        /// <summary>
+        /// Parse /hgfriends XML replies. Handler BoolResult uses RESULT=True/False;
+        /// legacy SuccessResult used Result=Success.
+        /// </summary>
+        public static bool TryParseSuccess(Dictionary<string, object> replyData, out bool success)
+        {
+            success = false;
+            if (replyData is null)
+                return false;
+
+            if (!replyData.TryGetValue("RESULT", out object val) && !replyData.TryGetValue("Result", out val))
+                return false;
+            if (val is null)
+                return false;
+
+            string s = val.ToString();
+            if (bool.TryParse(s, out success))
+                return true;
+            if (s.Equals("Success", StringComparison.OrdinalIgnoreCase))
+            {
+                success = true;
+                return true;
+            }
+            if (s.Equals("Failure", StringComparison.OrdinalIgnoreCase))
+            {
+                success = false;
+                return true;
+            }
+            return false;
         }
 
         public bool DeleteFriendship(UUID PrincipalID, UUID Friend, string secret)
