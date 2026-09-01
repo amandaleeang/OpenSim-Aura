@@ -228,15 +228,16 @@ namespace OpenSim.Server.Handlers.Hypergrid
                 return FailureResult();
             }
 
+            // Collect every friend_N field. Indices may be gapped or out of order.
             List<string> friends = [];
-            // order is irrelevant
             foreach (KeyValuePair<string, object> kvp in request)
             {
-                if (kvp.Key.StartsWith("friend_"))
-                    friends.Add(kvp.Value.ToString());
+                if (kvp.Value is null || !kvp.Key.StartsWith("friend_"))
+                    continue;
+                friends.Add(kvp.Value.ToString());
             }
 
-            List<UUID> onlineFriends = friends.Count > 0 ? 
+            List<UUID> onlineFriends = friends.Count > 0 ?
                         m_TheService.StatusNotification(friends, principalID, online):
                         null;
 
@@ -245,11 +246,11 @@ namespace OpenSim.Server.Handlers.Hypergrid
                 result["RESULT"] = "NULL";
             else
             {
-                int i = 0;
+                int n = 0;
                 foreach (UUID f in onlineFriends)
                 {
-                    result["friend_" + i.ToString()] = f.ToString();
-                    i++;
+                    result["friend_" + n] = f.ToString();
+                    n++;
                 }
             }
 
