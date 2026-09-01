@@ -174,11 +174,7 @@ namespace OpenSim.Services.HypergridService
             }
 
             if (existing != null && existing.MyFlags != 0 && existing.TheirFlags != -1)
-            {
-                m_log.InfoFormat("[HGFRIENDS SERVICE]: New friendship {0} {1} already accepted",
-                    friend.PrincipalID, friend.Friend);
-                return true;
-            }
+                return KeepOrReplaceAcceptedSecret(friend, existing, verified, secret);
 
             FriendInfo[] theirs = m_FriendsService.GetFriends(friendID);
             FriendInfo reverse = null;
@@ -195,9 +191,16 @@ namespace OpenSim.Services.HypergridService
             if (!myPending && reverse is null && !verified)
                 return false;
 
-            string uui = existing != null && existing.Friend.Length > 36
-                ? existing.Friend
-                : (friend.Friend.Length > 36 ? friend.Friend : reverse?.Friend);
+            // Verified accept carries the secret the other home will match on status notify.
+            string uui = null;
+            if (verified && friend.Friend.Length > 36 && !string.IsNullOrEmpty(secret))
+                uui = friend.Friend;
+            else if (existing != null && existing.Friend.Length > 36)
+                uui = existing.Friend;
+            else if (friend.Friend.Length > 36)
+                uui = friend.Friend;
+            else
+                uui = reverse?.Friend;
             if (string.IsNullOrEmpty(uui) || uui.Length <= 36)
             {
                 m_log.WarnFormat("[HGFRIENDS SERVICE]: NewFriendship missing UUI for {0} {1}",
@@ -275,21 +278,38 @@ namespace OpenSim.Services.HypergridService
 
         public bool DeleteFriendship(FriendInfo friend, string secret)
         {
+            if (friend is null || string.IsNullOrEmpty(friend.Friend))
+                return false;
+
+            string uuidPrefix = friend.Friend.Length >= 36 ? friend.Friend.Substring(0, 36) : friend.Friend;
+            FriendInfo secretHit = null;
+            FriendInfo uuidHit = null;
+            int uuidHits = 0;
+
             FriendInfo[] finfos = m_FriendsService.GetFriends(friend.PrincipalID);
             foreach (FriendInfo finfo in finfos)
             {
-                // We check the secret here. Or if the friendship request was initiated here, and was declined
-                if (finfo.Friend.StartsWith(friend.Friend) && finfo.Friend.EndsWith(secret))
-                {
-                    m_log.DebugFormat("[HGFRIENDS SERVICE]: Delete friendship {0} {1}", friend.PrincipalID, friend.Friend);
-                    m_FriendsService.Delete(friend.PrincipalID, finfo.Friend);
-                    m_FriendsService.Delete(finfo.Friend, friend.PrincipalID.ToString());
-
-                    return true;
-                }
+                if (finfo.Friend is null || !finfo.Friend.StartsWith(uuidPrefix))
+                    continue;
+                uuidHits++;
+                uuidHit = finfo;
+                if (!string.IsNullOrEmpty(secret) && finfo.Friend.EndsWith(secret))
+                    secretHit = finfo;
             }
 
-            return false;
+            FriendInfo victim = secretHit ?? (uuidHits == 1 ? uuidHit : null);
+            if (victim is null)
+                return false;
+
+            if (secretHit is null)
+                m_log.WarnFormat("[HGFRIENDS SERVICE]: Delete friendship {0} {1} secret mismatch, removing by UUID",
+                    friend.PrincipalID, victim.Friend);
+            else
+                m_log.DebugFormat("[HGFRIENDS SERVICE]: Delete friendship {0} {1}", friend.PrincipalID, victim.Friend);
+
+            m_FriendsService.Delete(friend.PrincipalID, victim.Friend);
+            m_FriendsService.Delete(victim.Friend, friend.PrincipalID.ToString());
+            return true;
         }
 
         public bool FriendshipOffered(UUID fromID, string fromName, UUID toID, string message)
@@ -406,6 +426,36 @@ namespace OpenSim.Services.HypergridService
         #endregion IHGFriendsService
 
         #region Aux
+
+        /// <summary>
+        /// Already-accepted friendship. A verified repeat with a different secret replaces
+        /// the stored UUI; status notify matches on EndsWith(secret).
+        /// </summary>
+        bool KeepOrReplaceAcceptedSecret(FriendInfo friend, FriendInfo existing, bool verified, string secret)
+        {
+            Util.ParseUniversalUserIdentifier(existing.Friend, out _, out _, out _, out _, out string oldSecret);
+            if (!verified || string.IsNullOrEmpty(secret) || string.IsNullOrEmpty(friend.Friend)
+                    || friend.Friend.Length <= 36
+                    || string.Equals(oldSecret, secret, StringComparison.Ordinal))
+            {
+                m_log.InfoFormat("[HGFRIENDS SERVICE]: New friendship {0} {1} already accepted",
+                    friend.PrincipalID, friend.Friend);
+                return true;
+            }
+
+            string principal = friend.PrincipalID.ToString();
+            m_FriendsService.Delete(principal, existing.Friend);
+            m_FriendsService.Delete(existing.Friend, principal);
+
+            int myFlags = existing.MyFlags != 0 ? existing.MyFlags : 1;
+            int theirFlags = existing.TheirFlags > 0 ? existing.TheirFlags : 1;
+            m_FriendsService.StoreFriend(principal, friend.Friend, myFlags);
+            m_FriendsService.StoreFriend(friend.Friend, principal, theirFlags);
+
+            m_log.InfoFormat("[HGFRIENDS SERVICE]: Replaced friendship secret for {0} {1} ({2} -> {3})",
+                friend.PrincipalID, friend.Friend, oldSecret, secret);
+            return true;
+        }
 
         /// <summary>
         /// Home URI of an offerer from First.Last@host[:port]. Does not rewrite https to http.
