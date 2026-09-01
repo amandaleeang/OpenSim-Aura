@@ -955,7 +955,9 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
             {
                 m_log.DebugFormat("[HGFRIENDS MODULE]: Deleting friendship from {0}", url);
                 HGFriendsServicesConnector friendConn = new HGFriendsServicesConnector(url);
-                friendConn.DeleteFriendship(foreignUser, localUser, secret);
+                if (!friendConn.DeleteFriendship(foreignUser, localUser, secret))
+                    m_log.WarnFormat("[HGFRIENDS MODULE]: Remote delete failed for {0} at {1} (secret mismatch?)",
+                        foreignUser, url);
             }
         }
 
