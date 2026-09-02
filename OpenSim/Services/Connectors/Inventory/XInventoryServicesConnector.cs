@@ -540,31 +540,33 @@ namespace OpenSim.Services.Connectors
 
             InventoryItemBase[] itemArr = new InventoryItemBase[itemIDs.Length];
 
-            // Try to get them from the cache
+            // result[i] corresponds to itemIDs[i], including nulls. Place cache hits
+            // at their request index; item_N in the reply indexes the uncached ITEMS
+            // list, not the original request, and dictionary iteration is unordered.
             InventoryItemBase item;
-            int i = 0;
-            int pending = 0;
+            List<int> pendingIdx = new(itemIDs.Length);
 
             StringBuilder sb = new(4096);
             sb.Append($"METHOD=GETMULTIPLEITEMS&PRINCIPAL={principalID}&ITEMS=");
-            foreach (UUID id in itemIDs.AsSpan())
+            for (int i = 0; i < itemIDs.Length; i++)
             {
+                UUID id = itemIDs[i];
                 if (m_ItemCache.TryGetValue(id, out item))
-                    itemArr[i++] = item;
+                    itemArr[i] = item;
                 else
                 {
                     sb.Append(id.ToString());
                     sb.Append(',');
-                    pending++;
+                    pendingIdx.Add(i);
                 }
             }
-            if(pending == 0)
+            if (pendingIdx.Count == 0)
             {
                 return itemArr;
             }
 
             sb.Remove(sb.Length - 1, 1);
-            sb.Append($"&COUNT={pending}");
+            sb.Append($"&COUNT={pendingIdx.Count}");
 
             try
             {
@@ -572,22 +574,21 @@ namespace OpenSim.Services.Connectors
 
                 if (!CheckReturn(resultSet))
                 {
-                    return i == 0 ? null : itemArr;
+                    return pendingIdx.Count == itemIDs.Length ? null : itemArr;
                 }
 
-                // carry over index i where we left above
                 foreach (KeyValuePair<string, object> kvp in resultSet)
                 {
-                    if (kvp.Key.StartsWith("item_"))
+                    if (!kvp.Key.StartsWith("item_") ||
+                        !int.TryParse(kvp.Key.AsSpan(5), out int n) ||
+                        n < 0 || n >= pendingIdx.Count)
+                        continue;
+
+                    if (kvp.Value is Dictionary<string, object> dic)
                     {
-                        if (kvp.Value is Dictionary<string, object> dic)
-                        {
-                            item = BuildItem(dic);
-                            m_ItemCache.AddOrUpdate(item.ID, item, CACHE_EXPIRATION_SECONDS);
-                            itemArr[i++] = item;
-                        }
-                        else
-                            itemArr[i++] = null;
+                        item = BuildItem(dic);
+                        m_ItemCache.AddOrUpdate(item.ID, item, CACHE_EXPIRATION_SECONDS);
+                        itemArr[pendingIdx[n]] = item;
                     }
                 }
             }
