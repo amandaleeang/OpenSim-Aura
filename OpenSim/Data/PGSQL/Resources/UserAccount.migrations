@@ -55,3 +55,12 @@ BEGIN TRANSACTION;
 ALTER TABLE UserAccounts ADD "active" integer NOT NULL DEFAULT 1;
 
 COMMIT;
+
+:VERSION 6
+
+BEGIN TRANSACTION;
+
+ALTER TABLE UserAccounts ADD "DisplayName" varchar(64) NOT NULL DEFAULT '';
+ALTER TABLE UserAccounts ADD "DisplayNameNextUpdate" integer NOT NULL DEFAULT 0;
+
+COMMIT;

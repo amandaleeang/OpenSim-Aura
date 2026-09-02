@@ -770,8 +770,11 @@
     Cap_GetTexture = "localhost"
     Cap_GetMesh = "localhost"
     Cap_AvatarPickerSearch = "localhost"
-    Cap_GetDisplayNames = "localhost"
 
+;[DisplayNames]
+    ;; Optional. Days to wait after setting or resetting a display name.
+    ;; Omitted or missing = 0 (no cooldown).
+    ;ChangeCooldownDays = 7
 
 [SimulatorFeatures]
     ;# {SearchServerURI} {} {URL of the search server} {}

@@ -1839,6 +1839,10 @@ namespace OpenSim.Region.ClientStack.LindenUDP
                 lastname = m_lastName
             };
 
+            AgentCircuitData stored = m_scene.AuthenticateHandler?.GetAgentCircuitData(m_circuitCode);
+            if (stored != null)
+                agentData.displayname = stored.displayname;
+
             ICapabilitiesModule capsModule = m_scene.RequestModuleInterface<ICapabilitiesModule>();
             if (capsModule is not null) // can happen when shutting down.
             {

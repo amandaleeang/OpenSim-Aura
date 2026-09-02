@@ -71,5 +71,79 @@ namespace OpenSim.Region.CoreModules.Framework.UserManagement.Tests
             string name = hgumm.GetUserName(userId);
             Assert.That(name, Is.EqualTo(string.Format("{0}.{1} @{2}", firstName, lastName, homeUri)));
         }
+
+        /// <summary>
+        /// HG circuit display_name is cached so GetDisplayNames can show it without a home-grid round trip.
+        /// </summary>
+        [Test]
+        public void TestCachedDisplayNameForNewAgent()
+        {
+            TestHelpers.InMethod();
+
+            HGUserManagementModule hgumm = new HGUserManagementModule();
+            UUID userId = TestHelpers.ParseStem("11");
+            string firstName = "Fred";
+            string lastName = "Astaire";
+            string homeUri = "example.com:8002";
+            string displayName = "Ginger";
+
+            IConfigSource config = new IniConfigSource();
+            config.AddConfig("Modules");
+            config.Configs["Modules"].Set("UserManagementModule", hgumm.Name);
+
+            SceneHelpers sceneHelpers = new SceneHelpers();
+            TestScene scene = sceneHelpers.SetupScene();
+            SceneHelpers.SetupSceneModules(scene, config, hgumm);
+
+            AgentCircuitData acd = SceneHelpers.GenerateAgentData(userId);
+            acd.firstname = firstName;
+            acd.lastname = lastName;
+            acd.displayname = displayName;
+            acd.ServiceURLs["HomeURI"] = "http://" + homeUri;
+
+            SceneHelpers.AddScenePresence(scene, acd);
+
+            UserData ud = hgumm.GetUserData(userId);
+            Assert.That(ud, Is.Not.Null);
+            Assert.That(ud.DisplayName, Is.EqualTo(displayName));
+            Assert.That(ud.EffectiveDisplayName, Is.EqualTo(displayName));
+            Assert.That(ud.IsDisplayNameDefault, Is.False);
+            Assert.That(ud.LegacyName, Is.EqualTo(string.Format("{0}.{1} @{2}", firstName, lastName, homeUri)));
+        }
+
+        /// <summary>
+        /// Older homes that omit display_name keep First.Last @host as both username and display name.
+        /// </summary>
+        [Test]
+        public void TestDefaultDisplayNameForStockHome()
+        {
+            TestHelpers.InMethod();
+
+            HGUserManagementModule hgumm = new HGUserManagementModule();
+            UUID userId = TestHelpers.ParseStem("12");
+            string firstName = "Fred";
+            string lastName = "Astaire";
+            string homeUri = "example.com:8002";
+
+            IConfigSource config = new IniConfigSource();
+            config.AddConfig("Modules");
+            config.Configs["Modules"].Set("UserManagementModule", hgumm.Name);
+
+            SceneHelpers sceneHelpers = new SceneHelpers();
+            TestScene scene = sceneHelpers.SetupScene();
+            SceneHelpers.SetupSceneModules(scene, config, hgumm);
+
+            AgentCircuitData acd = SceneHelpers.GenerateAgentData(userId);
+            acd.firstname = firstName;
+            acd.lastname = lastName;
+            acd.ServiceURLs["HomeURI"] = "http://" + homeUri;
+
+            SceneHelpers.AddScenePresence(scene, acd);
+
+            UserData ud = hgumm.GetUserData(userId);
+            Assert.That(ud, Is.Not.Null);
+            Assert.That(ud.IsDisplayNameDefault, Is.True);
+            Assert.That(ud.EffectiveDisplayName, Is.EqualTo(ud.LegacyName));
+        }
     }
 }
