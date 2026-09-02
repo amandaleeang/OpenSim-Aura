@@ -61,6 +61,9 @@ namespace OpenSim.Region.ClientStack.Linden
         public bool AllowCapLandResources = true;
         public bool AllowCapAttachmentResources = true;
 
+        /// <summary>Days a viewer must wait after SetDisplayName or reset. 0 = no cooldown.</summary>
+        public int DisplayNameChangeCooldownDays = 0;
+
         public UUID testAssetsCreatorID = UUID.Zero;
     }
 
@@ -146,6 +149,14 @@ namespace OpenSim.Region.ClientStack.Linden
 
                     string AttachmentResourcesUrl = CapsConfig.GetString("Cap_AttachmentResources", "localhost");
                     ConfigOptions.AllowCapAttachmentResources = !string.IsNullOrEmpty(AttachmentResourcesUrl);
+                }
+
+                IConfig displayNamesConfig = config.Configs["DisplayNames"];
+                if (displayNamesConfig is not null)
+                {
+                    ConfigOptions.DisplayNameChangeCooldownDays = displayNamesConfig.GetInt("ChangeCooldownDays", 0);
+                    if (ConfigOptions.DisplayNameChangeCooldownDays < 0)
+                        ConfigOptions.DisplayNameChangeCooldownDays = 0;
                 }
 
                 m_Scene.EventManager.OnRegisterCaps += OnRegisterCaps;

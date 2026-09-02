@@ -683,6 +683,10 @@ namespace OpenSim.Tests.Common
             agentData.firstname = m_firstName;
             agentData.lastname = m_lastName;
 
+            AgentCircuitData stored = m_scene?.AuthenticateHandler?.GetAgentCircuitData(m_circuitCode);
+            if (stored != null)
+                agentData.displayname = stored.displayname;
+
             ICapabilitiesModule capsModule = m_scene.RequestModuleInterface<ICapabilitiesModule>();
             if (capsModule != null)
             {

@@ -3242,7 +3242,7 @@ namespace OpenSim.Region.Framework.Scenes
                         }
                     }
 
-                    UserManagementModule.AddUser(aCircuit.AgentID, first, last, homeURL);
+                    UserManagementModule.AddUser(aCircuit.AgentID, first, last, homeURL, aCircuit.displayname);
                 }
             }
         }

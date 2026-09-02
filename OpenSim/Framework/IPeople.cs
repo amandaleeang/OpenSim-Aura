@@ -36,6 +36,25 @@ namespace OpenSim.Framework
         public UUID Id;
         public string FirstName;
         public string LastName;
+        /// <summary>
+        /// Stored display name. Empty means use FirstName + LastName.
+        /// </summary>
+        public string DisplayName = string.Empty;
+
+        public string LegacyName
+        {
+            get { return FirstName + " " + LastName; }
+        }
+
+        public bool IsDisplayNameDefault
+        {
+            get { return string.IsNullOrEmpty(DisplayName) || DisplayName == LegacyName; }
+        }
+
+        public string EffectiveDisplayName
+        {
+            get { return IsDisplayNameDefault ? LegacyName : DisplayName; }
+        }
         public string HomeURL;
         public Dictionary<string, object> ServerURLs;
         public bool IsUnknownUser;

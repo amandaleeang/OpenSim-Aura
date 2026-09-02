@@ -142,6 +142,18 @@ namespace OpenSim.Services.UserAccountService
                             HandleSetUserLevel);
 
                     MainConsole.Instance.Commands.AddCommand("Users", false,
+                            "set user displayname",
+                            "set user displayname [<first> [<last> [<name>]]]",
+                            "Set a user's display name. The name is not unique. Max 31 characters.",
+                            HandleSetUserDisplayName);
+
+                    MainConsole.Instance.Commands.AddCommand("Users", false,
+                            "reset user displayname",
+                            "reset user displayname [<first> [<last>]]",
+                            "Reset a user's display name to the login name (First Last)",
+                            HandleResetUserDisplayName);
+
+                    MainConsole.Instance.Commands.AddCommand("Users", false,
                             "show account",
                             "show account <first> <last>",
                             "Show account details for the given user", HandleShowAccount);
@@ -211,6 +223,12 @@ namespace OpenSim.Services.UserAccountService
                 u.UserCountry = valueuc;
             else
                 u.UserCountry = string.Empty;
+            if (d.Data.TryGetValue("DisplayName", out string valuedn) && valuedn != null)
+                u.DisplayName = valuedn;
+            else
+                u.DisplayName = string.Empty;
+            if (d.Data.TryGetValue("DisplayNameNextUpdate", out string valuednu) && valuednu != null)
+                int.TryParse(valuednu, out u.DisplayNameNextUpdate);
 
             u.ServiceURLs = new Dictionary<string, object>();
             if (d.Data.TryGetValue("ServiceURLs", out string ServiceURLsvalue) && !string.IsNullOrEmpty(ServiceURLsvalue))
@@ -318,6 +336,9 @@ namespace OpenSim.Services.UserAccountService
                 d.Data["UserTitle"] = data.UserTitle;
             if (!string.IsNullOrEmpty(data.UserCountry))
                 d.Data["UserCountry"] = data.UserCountry;
+            // Always persist, including empty. Omitting the column on REPLACE would reset it.
+            d.Data["DisplayName"] = data.DisplayName ?? string.Empty;
+            d.Data["DisplayNameNextUpdate"] = data.DisplayNameNextUpdate.ToString();
 
             if(data.ServiceURLs.Count > 0)
             { 
@@ -459,6 +480,7 @@ namespace OpenSim.Services.UserAccountService
 
             MainConsole.Instance.Output("Name:    {0}", ua.Name);
             MainConsole.Instance.Output("ID:      {0}", ua.PrincipalID);
+            MainConsole.Instance.Output("Display: {0}", ua.EffectiveDisplayName);
             MainConsole.Instance.Output("Title:   {0}", ua.UserTitle);
             MainConsole.Instance.Output("E-mail:  {0}", ua.Email);
             MainConsole.Instance.Output("Created: {0}", Utils.UnixTimeToDateTime(ua.Created));
@@ -577,6 +599,86 @@ namespace OpenSim.Services.UserAccountService
                 MainConsole.Instance.Output("Unable to set user level for account {0} {1}.", firstName, lastName);
             else
                 MainConsole.Instance.Output("User level set for user {0} {1} to {2}", firstName, lastName, level);
+        }
+
+        protected void HandleSetUserDisplayName(string module, string[] cmdparams)
+        {
+            string firstName;
+            string lastName;
+            string displayName;
+
+            if (cmdparams.Length < 4)
+                firstName = MainConsole.Instance.Prompt("First name");
+            else firstName = cmdparams[3];
+
+            if (cmdparams.Length < 5)
+                lastName = MainConsole.Instance.Prompt("Last name");
+            else lastName = cmdparams[4];
+
+            UserAccount account = GetUserAccount(UUID.Zero, firstName, lastName);
+            if (account == null)
+            {
+                MainConsole.Instance.Output("No such user as {0} {1}", firstName, lastName);
+                return;
+            }
+
+            if (cmdparams.Length < 6)
+                displayName = MainConsole.Instance.Prompt("Display name");
+            else
+                displayName = string.Join(" ", cmdparams, 5, cmdparams.Length - 5);
+
+            if (displayName != null)
+                displayName = displayName.Trim();
+
+            if (string.IsNullOrEmpty(displayName))
+            {
+                account.DisplayName = string.Empty;
+                account.DisplayNameNextUpdate = 0;
+            }
+            else if (displayName.Length > UserAccount.MaxDisplayNameLength)
+            {
+                MainConsole.Instance.Output("Display name must be {0} characters or fewer", UserAccount.MaxDisplayNameLength);
+                return;
+            }
+            else
+            {
+                account.DisplayName = displayName;
+                account.DisplayNameNextUpdate = 0;
+            }
+
+            if (!StoreUserAccount(account))
+                MainConsole.Instance.Output("Unable to set display name for account {0} {1}.", firstName, lastName);
+            else
+                MainConsole.Instance.Output("Display name set for user {0} {1} to {2}", firstName, lastName, account.EffectiveDisplayName);
+        }
+
+        protected void HandleResetUserDisplayName(string module, string[] cmdparams)
+        {
+            string firstName;
+            string lastName;
+
+            if (cmdparams.Length < 4)
+                firstName = MainConsole.Instance.Prompt("First name");
+            else firstName = cmdparams[3];
+
+            if (cmdparams.Length < 5)
+                lastName = MainConsole.Instance.Prompt("Last name");
+            else lastName = cmdparams[4];
+
+            UserAccount account = GetUserAccount(UUID.Zero, firstName, lastName);
+            if (account == null)
+            {
+                MainConsole.Instance.Output("No such user as {0} {1}", firstName, lastName);
+                return;
+            }
+
+            account.DisplayName = string.Empty;
+            account.DisplayNameNextUpdate = 0;
+
+            if (!StoreUserAccount(account))
+                MainConsole.Instance.Output("Unable to reset display name for account {0} {1}.", firstName, lastName);
+            else
+                MainConsole.Instance.Output("Display name reset for user {0} {1} to {2}", firstName, lastName, account.Name);
         }
 
         #endregion

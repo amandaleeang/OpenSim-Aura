@@ -1917,8 +1917,35 @@ namespace OpenSim.Region.CoreModules.Avatar.UserProfiles
                     account.UserTitle = info["user_title"].ToString();
                 else
                     account.UserTitle = "HG Visitor";
+
+                ApplyForeignDisplayName(userID, account, info);
                 return true;
             }
+        }
+
+        /// <summary>
+        /// Apply home-grid display name from get_user_info onto the ephemeral
+        /// UserAccount and the UserManagement cache. Missing keys (stock OpenSim)
+        /// leave DisplayName empty so GetDisplayNames falls back to First.Last @host.
+        /// </summary>
+        void ApplyForeignDisplayName(UUID userID, UserAccount account, Dictionary<string, object> info)
+        {
+            account.DisplayName = string.Empty;
+            if (info.TryGetValue("user_display_name", out object dnObj) && dnObj != null)
+                account.DisplayName = dnObj.ToString();
+
+            if (info.TryGetValue("user_display_name_default", out object defObj) && defObj != null)
+            {
+                string defStr = defObj.ToString();
+                if (defStr.Equals("true", StringComparison.OrdinalIgnoreCase) || defStr == "1")
+                    account.DisplayName = string.Empty;
+            }
+
+            if (m_userManagementModule is null)
+                return;
+            UserData cached = m_userManagementModule.GetUserData(userID);
+            if (cached != null)
+                cached.DisplayName = account.DisplayName ?? string.Empty;
         }
 
         /// <summary>

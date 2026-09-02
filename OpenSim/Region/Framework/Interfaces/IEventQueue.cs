@@ -114,5 +114,17 @@ namespace OpenSim.Region.Framework.Interfaces
         void SendLargeGenericMessage(UUID avatarID, UUID? transationID, UUID? sessionID,
                 string method, UUID invoice, List<string> message);
         byte[] EndEventToBytes(osUTF8 sb);
+
+        /// <summary>
+        /// Reply to the requesting viewer after SetDisplayName. status 200 on success,
+        /// 409 if the posted old name is stale (viewer flushes cache and refetches).
+        /// </summary>
+        void SetDisplayNameReply(UUID avatarID, int status, string reason, OSDMap content);
+
+        /// <summary>
+        /// Push a display-name change to a viewer so nametags / cache update without relog.
+        /// agentRecord is the same map as a GetDisplayNames agent entry.
+        /// </summary>
+        void DisplayNameUpdate(UUID avatarID, UUID agentID, string oldDisplayName, OSDMap agentRecord);
     }
 }
