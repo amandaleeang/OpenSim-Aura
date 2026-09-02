@@ -95,6 +95,19 @@ namespace OpenSim.Services.Interfaces
         public string UserCountry;
         public bool LocalToGrid = true;
 
+        /// <summary>
+        /// Viewer-facing display name. Empty means the legacy login name is used.
+        /// Not unique. Viewer max is 31 characters.
+        /// </summary>
+        public string DisplayName = string.Empty;
+
+        /// <summary>
+        /// Unix time when the viewer may change the display name again. 0 = already allowed (epoch).
+        /// </summary>
+        public int DisplayNameNextUpdate;
+
+        public const int MaxDisplayNameLength = 31;
+
         public Dictionary<string, object> ServiceURLs;
 
         public int Created;
@@ -102,6 +115,29 @@ namespace OpenSim.Services.Interfaces
         public string Name
         {
             get { return FirstName + " " + LastName; }
+        }
+
+        public bool IsDisplayNameDefault
+        {
+            get { return string.IsNullOrEmpty(DisplayName) || DisplayName == Name; }
+        }
+
+        public string EffectiveDisplayName
+        {
+            get { return IsDisplayNameDefault ? Name : DisplayName; }
+        }
+
+        public DateTime DisplayNameNextUpdateUtc
+        {
+            get
+            {
+                if (DisplayNameNextUpdate <= 0)
+                    return Util.UnixEpoch;
+                DateTime when = Util.ToDateTime(DisplayNameNextUpdate);
+                if (when <= DateTime.UtcNow)
+                    return Util.UnixEpoch;
+                return when;
+            }
         }
 
         public UserAccount(Dictionary<string, object> kvp)
@@ -125,6 +161,10 @@ namespace OpenSim.Services.Interfaces
                 UserTitle = otmp.ToString();
             if (kvp.TryGetValue("UserCountry", out otmp))
                 UserCountry = otmp.ToString();
+            if (kvp.TryGetValue("DisplayName", out otmp) && otmp != null)
+                DisplayName = otmp.ToString();
+            if (kvp.TryGetValue("DisplayNameNextUpdate", out otmp) && otmp != null)
+                int.TryParse(otmp.ToString(), out DisplayNameNextUpdate);
             if (kvp.TryGetValue("LocalToGrid", out otmp))
                 _ = bool.TryParse(otmp.ToString(), out LocalToGrid);
 
@@ -160,6 +200,8 @@ namespace OpenSim.Services.Interfaces
                 ["UserFlags"] = UserFlags.ToString(),
                 ["UserTitle"] = UserTitle,
                 ["UserCountry"] = UserCountry,
+                ["DisplayName"] = DisplayName ?? string.Empty,
+                ["DisplayNameNextUpdate"] = DisplayNameNextUpdate.ToString(),
                 ["LocalToGrid"] = LocalToGrid.ToString()
             };
 

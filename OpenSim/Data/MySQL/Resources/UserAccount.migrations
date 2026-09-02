@@ -29,3 +29,12 @@ BEGIN;
 ALTER TABLE `UserAccounts` ADD `active` INT NOT NULL DEFAULT '1';
 
 COMMIT;
+
+:VERSION 7		# -------------------------
+
+BEGIN;
+
+ALTER TABLE `UserAccounts` ADD `DisplayName` varchar(64) CHARACTER SET utf8 NOT NULL DEFAULT '';
+ALTER TABLE `UserAccounts` ADD `DisplayNameNextUpdate` int(11) NOT NULL DEFAULT '0';
+
+COMMIT;

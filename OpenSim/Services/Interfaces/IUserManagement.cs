@@ -89,7 +89,8 @@ namespace OpenSim.Framework
         /// <param name="uuid"></param>
         /// <param name="firstName"></param>
         /// <param name="homeURL"></param>
-        void AddUser(UUID uuid, string firstName, string lastName, string homeURL);
+        /// <param name="displayName">Home display name. null = leave cached value; empty = default (HG username).</param>
+        void AddUser(UUID uuid, string firstName, string lastName, string homeURL, string displayName = null);
         bool RemoveUser(UUID uuid);
         bool IsLocalGridUser(UUID uuid);
     }

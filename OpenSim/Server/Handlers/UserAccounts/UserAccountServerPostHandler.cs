@@ -298,6 +298,13 @@ namespace OpenSim.Server.Handlers.UserAccounts
             if (request.TryGetValue("UserTitle", out otmp))
                 existingAccount.UserTitle = otmp.ToString();
 
+            if (request.TryGetValue("DisplayName", out otmp))
+                existingAccount.DisplayName = otmp != null ? otmp.ToString() : string.Empty;
+
+            if (request.TryGetValue("DisplayNameNextUpdate", out otmp) && otmp != null
+                    && int.TryParse(otmp.ToString(), out int nextUpdate))
+                existingAccount.DisplayNameNextUpdate = nextUpdate;
+
             if (!m_UserAccountService.StoreUserAccount(existingAccount))
             {
                 m_log.ErrorFormat(

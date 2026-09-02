@@ -812,14 +812,7 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
             agentCircuit.Appearance = new() { AvatarHeight = sp.Appearance.AvatarHeight };
 
             if (currentAgentCircuit is not null)
-            {
-                agentCircuit.ServiceURLs = currentAgentCircuit.ServiceURLs;
-                agentCircuit.IPAddress = currentAgentCircuit.IPAddress;
-                agentCircuit.Viewer = currentAgentCircuit.Viewer;
-                agentCircuit.Channel = currentAgentCircuit.Channel;
-                agentCircuit.Mac = currentAgentCircuit.Mac;
-                agentCircuit.Id0 = currentAgentCircuit.Id0;
-            }
+                agentCircuit.CopySessionFieldsFrom(currentAgentCircuit);
 
             Util.RegionHandleToRegionLoc(destinationHandle, out uint newRegionX, out uint newRegionY);
             int oldSizeX = (int)m_sceneRegionInfo.RegionSizeX;
@@ -1690,14 +1683,7 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
             agentCircuit.Appearance = new() { AvatarHeight = agent.Appearance.AvatarHeight };
 
             if (currentAgentCircuit is not null)
-            {
-                agentCircuit.ServiceURLs = currentAgentCircuit.ServiceURLs;
-                agentCircuit.IPAddress = currentAgentCircuit.IPAddress;
-                agentCircuit.Viewer = currentAgentCircuit.Viewer;
-                agentCircuit.Channel = currentAgentCircuit.Channel;
-                agentCircuit.Mac = currentAgentCircuit.Mac;
-                agentCircuit.Id0 = currentAgentCircuit.Id0;
-            }
+                agentCircuit.CopySessionFieldsFrom(currentAgentCircuit);
 
             agentCircuit.CapsPath = CapsUtil.GetRandomCapsObjectPath();
             agent.AddNeighbourRegion(neighbourRegion, agentCircuit.CapsPath);
@@ -1987,14 +1973,7 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
             sp.AddNeighbourRegionSizeInfo(region);
 
             if (currentAgentCircuit != null)
-            {
-                agent.ServiceURLs = currentAgentCircuit.ServiceURLs;
-                agent.IPAddress = currentAgentCircuit.IPAddress;
-                agent.Viewer = currentAgentCircuit.Viewer;
-                agent.Channel = currentAgentCircuit.Channel;
-                agent.Mac = currentAgentCircuit.Mac;
-                agent.Id0 = currentAgentCircuit.Id0;
-            }
+                agent.CopySessionFieldsFrom(currentAgentCircuit);
 
             IPEndPoint external = region.ExternalEndPoint;
             if (external != null)
@@ -2154,14 +2133,7 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
                 agent.Appearance = new AvatarAppearance { AvatarHeight = sp.Appearance.AvatarHeight };
                 agent.startfar = sp.DrawDistance;
                 if (currentAgentCircuit is not null)
-                {
-                    agent.ServiceURLs = currentAgentCircuit.ServiceURLs;
-                    agent.IPAddress = currentAgentCircuit.IPAddress;
-                    agent.Viewer = currentAgentCircuit.Viewer;
-                    agent.Channel = currentAgentCircuit.Channel;
-                    agent.Mac = currentAgentCircuit.Mac;
-                    agent.Id0 = currentAgentCircuit.Id0;
-                }
+                    agent.CopySessionFieldsFrom(currentAgentCircuit);
 
                 newneighbours.Add(handler);
                 agent.CapsPath = CapsUtil.GetRandomCapsObjectPath();
@@ -2293,14 +2265,7 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
                 agent.Appearance = new AvatarAppearance { AvatarHeight = sp.Appearance.AvatarHeight };
                 agent.startfar = sp.DrawDistance;
                 if (currentAgentCircuit is not null)
-                {
-                    agent.ServiceURLs = currentAgentCircuit.ServiceURLs;
-                    agent.IPAddress = currentAgentCircuit.IPAddress;
-                    agent.Viewer = currentAgentCircuit.Viewer;
-                    agent.Channel = currentAgentCircuit.Channel;
-                    agent.Mac = currentAgentCircuit.Mac;
-                    agent.Id0 = currentAgentCircuit.Id0;
-                }
+                    agent.CopySessionFieldsFrom(currentAgentCircuit);
 
                 newneighbours.Add(neighbour);
                 agent.CapsPath = CapsUtil.GetRandomCapsObjectPath();

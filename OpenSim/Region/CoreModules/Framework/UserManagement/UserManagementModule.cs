@@ -300,6 +300,7 @@ namespace OpenSim.Region.CoreModules.Framework.UserManagement
                         UserData ud = new UserData();
                         ud.FirstName = acc.FirstName;
                         ud.LastName = acc.LastName;
+                        ud.DisplayName = acc.DisplayName ?? string.Empty;
                         ud.Id = id;
                         ud.HasGridUserTried = true;
                         ud.IsUnknownUser = false;
@@ -464,6 +465,7 @@ namespace OpenSim.Region.CoreModules.Framework.UserManagement
                         userdata.Id = id;
                         userdata.FirstName = uac.FirstName;
                         userdata.LastName = uac.LastName;
+                        userdata.DisplayName = uac.DisplayName ?? string.Empty;
                         userdata.HomeURL = string.Empty;
                         userdata.IsUnknownUser = false;
                         userdata.IsLocal = true;
@@ -510,6 +512,7 @@ namespace OpenSim.Region.CoreModules.Framework.UserManagement
                                 }
                                 userdata.IsUnknownUser = false;
                                 userdata.HasGridUserTried = true;
+                                CopyCachedDisplayName(u, userdata, untried);
                                 m_userCacheByID.Add(u, userdata, 1800000);
 
                                 ret[u] = userdata.FirstName + " " + userdata.LastName;
@@ -595,6 +598,7 @@ namespace OpenSim.Region.CoreModules.Framework.UserManagement
                         userdata.Id = id;
                         userdata.FirstName = uac.FirstName;
                         userdata.LastName = uac.LastName;
+                        userdata.DisplayName = uac.DisplayName ?? string.Empty;
                         userdata.HomeURL = string.Empty;
                         userdata.IsUnknownUser = false;
                         userdata.IsLocal = true;
@@ -643,6 +647,7 @@ namespace OpenSim.Region.CoreModules.Framework.UserManagement
 
                                 userdata.IsUnknownUser = false;
                                 userdata.HasGridUserTried = true;
+                                CopyCachedDisplayName(uuid, userdata, untried);
                                 m_userCacheByID.Add(uuid, userdata, 1800000);
 
                                 string name = userdata.FirstName + " " + userdata.LastName;
@@ -712,6 +717,7 @@ namespace OpenSim.Region.CoreModules.Framework.UserManagement
                         userdata.Id = id;
                         userdata.FirstName = uac.FirstName;
                         userdata.LastName = uac.LastName;
+                        userdata.DisplayName = uac.DisplayName ?? string.Empty;
                         userdata.HomeURL = string.Empty;
                         userdata.IsUnknownUser = false;
                         userdata.IsLocal = true;
@@ -760,6 +766,7 @@ namespace OpenSim.Region.CoreModules.Framework.UserManagement
 
                                 userdata.IsUnknownUser = false;
                                 userdata.HasGridUserTried = true;
+                                CopyCachedDisplayName(uuid, userdata, untried);
                                 m_userCacheByID.Add(uuid, userdata, 1800000);
 
                                 untried.Remove(uuid);
@@ -1056,6 +1063,7 @@ namespace OpenSim.Region.CoreModules.Framework.UserManagement
                 {
                     userdata.FirstName = account.FirstName;
                     userdata.LastName = account.LastName;
+                    userdata.DisplayName = account.DisplayName ?? string.Empty;
                     userdata.HomeURL = string.Empty;
                     userdata.IsUnknownUser = false;
                     userdata.IsLocal = true;
@@ -1116,6 +1124,7 @@ namespace OpenSim.Region.CoreModules.Framework.UserManagement
             user.Id = id;
             user.FirstName = account.FirstName;
             user.LastName = account.LastName;
+            user.DisplayName = account.DisplayName ?? string.Empty;
             user.HomeURL = string.Empty;
             user.IsUnknownUser = false;
             user.HasGridUserTried = true;
@@ -1153,7 +1162,24 @@ namespace OpenSim.Region.CoreModules.Framework.UserManagement
             m_userCacheByID.Add(uuid, user, NOEXPIRE);
         }
 
-        public virtual void AddUser(UUID uuid, string first, string last, string homeURL)
+        /// <summary>
+        /// GridUserInfo rebuilds UserData without a display name. Keep one already
+        /// learned from the HG circuit or get_user_info.
+        /// </summary>
+        private void CopyCachedDisplayName(UUID id, UserData dest, Dictionary<UUID, UserData> untried)
+        {
+            if (untried != null && untried.TryGetValue(id, out UserData existing) && existing != null
+                    && !string.IsNullOrEmpty(existing.DisplayName))
+            {
+                dest.DisplayName = existing.DisplayName;
+                return;
+            }
+            if (m_userCacheByID.TryGetValue(id, out existing) && existing != null
+                    && !string.IsNullOrEmpty(existing.DisplayName))
+                dest.DisplayName = existing.DisplayName;
+        }
+
+        public virtual void AddUser(UUID uuid, string first, string last, string homeURL, string displayName = null)
         {
             //m_log.DebugFormat("[USER MANAGEMENT MODULE]: Adding user with id {0}, first {1}, last {2}, url {3}", uuid, first, last, homeURL);
 
@@ -1167,7 +1193,9 @@ namespace OpenSim.Region.CoreModules.Framework.UserManagement
                         m_log.DebugFormat("[USER MANAGEMENT MODULE]: Different HomeURI for {0} {1} ({2}): {3} and {4}",
                             first, last, uuid.ToString(), homeURL, oldUser.HomeURL);
                     }
-                    /* no update needed */
+                    // Refresh display name from circuit / get_user_info even when the user is already known.
+                    if (displayName != null)
+                        oldUser.DisplayName = displayName;
                     return;
                 }
             }
@@ -1176,6 +1204,7 @@ namespace OpenSim.Region.CoreModules.Framework.UserManagement
             oldUser.Id = uuid;
             oldUser.HasGridUserTried = false;
             oldUser.IsUnknownUser = false;
+            oldUser.DisplayName = displayName ?? string.Empty;
 
             bool local;
             if (CheckUrl(homeURL, out local, out OSHHTPHost host))

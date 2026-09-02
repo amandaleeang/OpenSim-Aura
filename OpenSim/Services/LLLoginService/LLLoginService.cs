@@ -1030,6 +1030,7 @@ namespace OpenSim.Services.LLLoginService
             aCircuit.firstname = account.FirstName;
             //aCircuit.InventoryFolder = irrelevant
             aCircuit.lastname = account.LastName;
+            aCircuit.displayname = account.IsDisplayNameDefault ? string.Empty : (account.DisplayName ?? string.Empty);
             aCircuit.SecureSessionID = secureSession;
             aCircuit.SessionID = session;
             aCircuit.startpos = position;
