@@ -243,6 +243,10 @@ namespace OpenSim.Services.HypergridService
                 return false;
             }
 
+            // Refresh from the home account so a SetDisplayName (or console set)
+            // after login is what the destination sees, not a stale login-time circuit.
+            agentCircuit.displayname = account.IsDisplayNameDefault ? string.Empty : (account.DisplayName ?? string.Empty);
+
             // Is this user allowed to go there?
             if (m_GridName != gridName)
             {
@@ -587,6 +591,12 @@ namespace OpenSim.Services.HypergridService
                 info.Add("user_firstname", account.FirstName);
                 info.Add("user_lastname", account.LastName);
                 info.Add("result", "success");
+                // Public nametag data — not gated on ShowUserDetailsInHGProfile.
+                // Send the stored name (empty when default) so destinations fall back
+                // to First.Last @host:port instead of treating "First Last" as custom.
+                info.Add("user_display_name", account.IsDisplayNameDefault ? string.Empty : (account.DisplayName ?? string.Empty));
+                info.Add("user_display_name_default", account.IsDisplayNameDefault ? "true" : "false");
+                info.Add("user_display_name_next_update", account.DisplayNameNextUpdate.ToString());
 
                 if (m_ShowDetails)
                 {

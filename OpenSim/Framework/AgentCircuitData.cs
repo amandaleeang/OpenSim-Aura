@@ -95,6 +95,12 @@ namespace OpenSim.Framework
         public string lastname;
 
         /// <summary>
+        /// Home-grid display name. Empty/null means the destination should use the
+        /// HG username (First.Last @host:port). Optional on the wire.
+        /// </summary>
+        public string displayname;
+
+        /// <summary>
         /// Agent's full name.
         /// </summary>
         public string Name { get { return $"{firstname} {lastname}"; } }
@@ -207,6 +213,8 @@ namespace OpenSim.Framework
             args["circuit_code"] = OSD.FromString(circuitcode.ToString());
             args["first_name"] = OSD.FromString(firstname);
             args["last_name"] = OSD.FromString(lastname);
+            if (!string.IsNullOrEmpty(displayname))
+                args["display_name"] = OSD.FromString(displayname);
             args["inventory_folder"] = OSD.FromUUID(InventoryFolder);
             args["secure_session_id"] = OSD.FromUUID(SecureSessionID);
             args["session_id"] = OSD.FromUUID(SessionID);
@@ -311,6 +319,8 @@ namespace OpenSim.Framework
                 firstname = tmpOSD.AsString();
             if (args.TryGetValue("last_name", out tmpOSD))
                 lastname = tmpOSD.AsString();
+            if (args.TryGetValue("display_name", out tmpOSD))
+                displayname = tmpOSD.AsString();
             if (args.TryGetValue("inventory_folder", out tmpOSD))
                 InventoryFolder = tmpOSD.AsUUID();
             if (args.TryGetValue("secure_session_id", out tmpOSD))
@@ -390,6 +400,23 @@ namespace OpenSim.Framework
                     //System.Console.WriteLine("XXX " + urls[i * 2].AsString() + "=" + urls[(i * 2) + 1].AsString());
                 }
             }
+        }
+
+        /// <summary>
+        /// Copy session-scoped fields that RequestClientInfo does not rebuild
+        /// (ServiceURLs, client identifiers, display name).
+        /// </summary>
+        public void CopySessionFieldsFrom(AgentCircuitData source)
+        {
+            if (source is null)
+                return;
+            ServiceURLs = source.ServiceURLs;
+            IPAddress = source.IPAddress;
+            Viewer = source.Viewer;
+            Channel = source.Channel;
+            Mac = source.Mac;
+            Id0 = source.Id0;
+            displayname = source.displayname;
         }
     }
 }

@@ -15877,9 +15877,7 @@ namespace OpenSim.Region.ScriptEngine.Shared.Api
             {
                 ScenePresence presence = World.GetScenePresence(key);
                 if (presence != null)
-                {
-                    return presence.Name;
-                }
+                    return ResolveDisplayName(key, presence.Name);
             }
             return LSL_String.Empty;
         }
@@ -15892,7 +15890,7 @@ namespace OpenSim.Region.ScriptEngine.Shared.Api
             ScenePresence lpresence = World.GetScenePresence(key);
             if (lpresence != null)
             {
-                string lname = lpresence.Name;
+                string lname = ResolveDisplayName(key, lpresence.Name);
                 string ftid = m_AsyncCommands.DataserverPlugin.RequestWithImediatePost(m_host.LocalId,
                                                                    m_item.ItemID, lname);
                 return ftid;
@@ -15904,7 +15902,7 @@ namespace OpenSim.Region.ScriptEngine.Shared.Api
                 ScenePresence presence = World.GetScenePresence(key);
                 if (presence is not null)
                 {
-                    name = presence.Name;
+                    name = ResolveDisplayName(key, presence.Name);
                 }
                 else if (World.TryGetSceneObjectPart(key, out SceneObjectPart sop))
                 {
@@ -15912,17 +15910,27 @@ namespace OpenSim.Region.ScriptEngine.Shared.Api
                 }
                 else
                 {
-                    UserAccount account = m_userAccountService.GetUserAccount(RegionScopeID, key);
-                    if (account is not null)
-                    {
-                        name = account.FirstName + " " + account.LastName;
-                    }
+                    name = ResolveDisplayName(key, string.Empty);
                 }
                 m_AsyncCommands.DataserverPlugin.DataserverReply(eventID, name);
             }
 
             UUID rq = m_AsyncCommands.DataserverPlugin.RegisterRequest(m_host.LocalId, m_item.ItemID, act);
             return rq.ToString();
+        }
+
+        private string ResolveDisplayName(UUID key, string fallback)
+        {
+            IUserManagement um = World.RequestModuleInterface<IUserManagement>();
+            UserData ud = um?.GetUserData(key);
+            if (ud != null && !ud.IsUnknownUser)
+                return ud.EffectiveDisplayName;
+
+            UserAccount account = m_userAccountService?.GetUserAccount(RegionScopeID, key);
+            if (account is not null)
+                return account.EffectiveDisplayName;
+
+            return fallback;
         }
 
         private struct Tri
