@@ -301,6 +301,7 @@ namespace OpenSim.Framework.Tests
            Agent1Data.firstname = firstname;
            Agent1Data.InventoryFolder = BaseFolder;
            Agent1Data.lastname = lastname;
+           Agent1Data.displayname = "Shown Name";
            Agent1Data.SecureSessionID = SecureSessionId;
            Agent1Data.SessionID = SessionId;
            Agent1Data.startpos = StartPos;
@@ -335,6 +336,7 @@ namespace OpenSim.Framework.Tests
            Assert.That((Agent1Data.firstname == Agent2Data.firstname));
            Assert.That((Agent1Data.InventoryFolder == Agent2Data.InventoryFolder));
            Assert.That((Agent1Data.lastname == Agent2Data.lastname));
+           Assert.That((Agent1Data.displayname == Agent2Data.displayname));
            Assert.That((Agent1Data.SecureSessionID == Agent2Data.SecureSessionID));
            Assert.That((Agent1Data.SessionID == Agent2Data.SessionID));
            Assert.That((Agent1Data.startpos == Agent2Data.startpos));
