@@ -537,5 +537,27 @@ namespace OpenSim.Region.ClientStack.Linden
 
             return Util.UTF8NBGetbytes(OSDParser.SerializeLLSDInnerXmlString(llsdEvent));
         }
+
+        public void SetDisplayNameReply(UUID avatarID, int status, string reason, OSDMap content)
+        {
+            OSDMap body = new(3)
+            {
+                ["status"] = status,
+                ["reason"] = reason ?? string.Empty,
+                ["content"] = content ?? new OSDMap()
+            };
+            Enqueue(BuildEvent("SetDisplayNameReply", body), avatarID);
+        }
+
+        public void DisplayNameUpdate(UUID avatarID, UUID agentID, string oldDisplayName, OSDMap agentRecord)
+        {
+            OSDMap body = new(3)
+            {
+                ["agent_id"] = agentID,
+                ["old_display_name"] = oldDisplayName ?? string.Empty,
+                ["agent"] = agentRecord ?? new OSDMap()
+            };
+            Enqueue(BuildEvent("DisplayNameUpdate", body), avatarID);
+        }
     }
 }

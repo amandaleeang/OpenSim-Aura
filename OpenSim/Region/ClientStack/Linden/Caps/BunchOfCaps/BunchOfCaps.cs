@@ -283,6 +283,8 @@ namespace OpenSim.Region.ClientStack.Linden
                 {
                     m_HostCapsObj.RegisterSimpleHandler("GetDisplayNames",
                         new SimpleStreamHandler(GetNewCapPath(), GetDisplayNames));
+                    m_HostCapsObj.RegisterSimpleHandler("SetDisplayName",
+                        new SimpleOSDMapHandler("POST", GetNewCapPath(), SetDisplayName));
                 }
             }
             catch (Exception e)
@@ -2239,22 +2241,37 @@ namespace OpenSim.Region.ClientStack.Linden
                 {
                     LLSDxmlEncode2.AddArray("agents", lsl);
 
+                    // next_update only matters for the requesting viewer (Save button).
+                    // Everyone else's display name comes from the UserData cache.
+                    UserAccount requesterAccount = m_userAccountService?.GetUserAccount(m_scopeID, m_AgentID);
+
                     foreach (UserData ud in names)
                     {
                         // dont tell about unknown users, we can't send them back on Bad either
                         if (string.IsNullOrEmpty(ud.FirstName) || ud.FirstName.Equals("Unknown"))
                             continue;
 
-                        string fullname = ud.FirstName + " " + ud.LastName;
+                        string displayName = ud.EffectiveDisplayName;
+                        bool isDefault = ud.IsDisplayNameDefault;
+                        DateTime nextUpdate = Util.UnixEpoch;
+
+                        if (ud.Id == m_AgentID && requesterAccount != null)
+                        {
+                            displayName = requesterAccount.EffectiveDisplayName;
+                            isDefault = requesterAccount.IsDisplayNameDefault;
+                            nextUpdate = ViewerDisplayNameNextUpdate(requesterAccount);
+                            ud.DisplayName = requesterAccount.DisplayName ?? string.Empty;
+                        }
+
                         LLSDxmlEncode2.AddMap(lsl);
-                        LLSDxmlEncode2.AddElem("username", fullname, lsl);
-                        LLSDxmlEncode2.AddElem("display_name", fullname, lsl);
-                        LLSDxmlEncode2.AddElem("display_name_next_update", DateTime.UtcNow.AddDays(8), lsl);
+                        LLSDxmlEncode2.AddElem("username", ud.LegacyName, lsl);
+                        LLSDxmlEncode2.AddElem("display_name", displayName, lsl);
+                        LLSDxmlEncode2.AddElem("display_name_next_update", nextUpdate, lsl);
                         LLSDxmlEncode2.AddElem("display_name_expires", DateTime.UtcNow.AddMonths(1), lsl);
                         LLSDxmlEncode2.AddElem("legacy_first_name", ud.FirstName, lsl);
                         LLSDxmlEncode2.AddElem("legacy_last_name", ud.LastName, lsl);
                         LLSDxmlEncode2.AddElem("id", ud.Id, lsl);
-                        LLSDxmlEncode2.AddElem("is_display_name_default", true, lsl);
+                        LLSDxmlEncode2.AddElem("is_display_name_default", isDefault, lsl);
                         LLSDxmlEncode2.AddEndMap(lsl);
                     }
                     LLSDxmlEncode2.AddEndArray(lsl);
@@ -2265,6 +2282,169 @@ namespace OpenSim.Region.ClientStack.Linden
             httpResponse.RawBuffer = LLSDxmlEncode2.EndToNBBytes(lsl);
             httpResponse.ContentType = "application/llsd+xml";
             httpResponse.StatusCode = (int)HttpStatusCode.OK;
+        }
+
+        /// <summary>
+        /// Viewer POST SetDisplayName. HTTP reply is undef; result is EventQueue
+        /// SetDisplayNameReply plus DisplayNameUpdate.
+        /// </summary>
+        public void SetDisplayName(IOSHttpRequest httpRequest, IOSHttpResponse httpResponse, OSDMap args)
+        {
+            IEventQueue eq = m_Scene.RequestModuleInterface<IEventQueue>();
+
+            ScenePresence sp = m_Scene.GetScenePresence(m_AgentID);
+            if (sp == null || sp.IsDeleted)
+            {
+                httpResponse.StatusCode = (int)HttpStatusCode.Gone;
+                return;
+            }
+            if (sp.IsChildAgent || sp.IsNPC)
+            {
+                ReplySetDisplayName(httpResponse, eq, 403, "not_allowed", null);
+                return;
+            }
+            if (sp.IsInTransit && !sp.IsInLocalTransit)
+            {
+                httpResponse.StatusCode = (int)HttpStatusCode.ServiceUnavailable;
+                httpResponse.AddHeader("Retry-After", "30");
+                return;
+            }
+
+            if (m_userAccountService == null)
+            {
+                ReplySetDisplayName(httpResponse, eq, 500, "service_unavailable", null);
+                return;
+            }
+
+            // No local account means HG visitor; they change the name at home.
+            UserAccount account = m_userAccountService.GetUserAccount(m_scopeID, m_AgentID);
+            if (account == null)
+            {
+                ReplySetDisplayName(httpResponse, eq, 403, "foreign_grid", null);
+                return;
+            }
+
+            if (args == null || !args.TryGetValue("display_name", out OSD namesOsd) || namesOsd is not OSDArray names || names.Count < 2)
+            {
+                httpResponse.StatusCode = (int)HttpStatusCode.BadRequest;
+                return;
+            }
+
+            string oldPosted = names[0].AsString() ?? string.Empty;
+            string newPosted = (names[1].AsString() ?? string.Empty).Trim();
+            string currentDisplayName = account.EffectiveDisplayName;
+
+            if (!string.Equals(oldPosted, currentDisplayName, StringComparison.Ordinal))
+            {
+                ReplySetDisplayName(httpResponse, eq, 409, "conflict", BuildDisplayNameAgentRecord(account));
+                return;
+            }
+
+            bool reset = string.IsNullOrEmpty(newPosted) || newPosted == account.Name;
+            if (!reset && newPosted.Length > UserAccount.MaxDisplayNameLength)
+            {
+                ReplySetDisplayName(httpResponse, eq, 400, "too_long", BuildDisplayNameAgentRecord(account));
+                return;
+            }
+
+            if ((reset && account.IsDisplayNameDefault) || (!reset && newPosted == currentDisplayName))
+            {
+                ReplySetDisplayName(httpResponse, eq, 200, "OK", BuildDisplayNameAgentRecord(account));
+                return;
+            }
+
+            int cooldownDays = ConfigOptions.DisplayNameChangeCooldownDays;
+            int now = Util.UnixTimeSinceEpoch();
+            if (cooldownDays > 0 && account.DisplayNameNextUpdate > now)
+            {
+                ReplySetDisplayName(httpResponse, eq, 400, "cooldown", BuildDisplayNameAgentRecord(account));
+                return;
+            }
+
+            string oldDisplayName = currentDisplayName;
+            if (reset)
+                account.DisplayName = string.Empty;
+            else
+                account.DisplayName = newPosted;
+
+            if (cooldownDays > 0)
+            {
+                long next = (long)now + (long)cooldownDays * 86400L;
+                account.DisplayNameNextUpdate = next > int.MaxValue ? int.MaxValue : (int)next;
+            }
+            else
+                account.DisplayNameNextUpdate = 0;
+
+            if (!m_userAccountService.StoreUserAccount(account))
+            {
+                ReplySetDisplayName(httpResponse, eq, 500, "store_failed", null);
+                return;
+            }
+
+            UserData cached = m_UserManager?.GetUserData(m_AgentID);
+            if (cached != null)
+                cached.DisplayName = account.DisplayName ?? string.Empty;
+
+            AgentCircuitData circuit = m_Scene.AuthenticateHandler?.GetAgentCircuitData(m_AgentID);
+            if (circuit != null)
+                circuit.displayname = account.IsDisplayNameDefault ? string.Empty : (account.DisplayName ?? string.Empty);
+
+            OSDMap agentRecord = BuildDisplayNameAgentRecord(account);
+            ReplySetDisplayName(httpResponse, eq, 200, "OK", agentRecord);
+            BroadcastDisplayNameUpdate(oldDisplayName, agentRecord);
+        }
+
+        private void ReplySetDisplayName(IOSHttpResponse httpResponse, IEventQueue eq, int status, string reason, OSDMap content)
+        {
+            eq?.SetDisplayNameReply(m_AgentID, status, reason ?? string.Empty, content ?? new OSDMap());
+            // POST body is not the viewer-visible result; EQ carries it. HTTP 409 would
+            // abort Firestorm's coroutine before the EQ 409 handler can flush the cache.
+            httpResponse.RawBuffer = Util.UTF8NBGetbytes(OSDParser.SerializeLLSDXmlString(new OSDString("undef")));
+            httpResponse.ContentType = "application/llsd+xml";
+            httpResponse.StatusCode = (int)HttpStatusCode.OK;
+        }
+
+        private DateTime ViewerDisplayNameNextUpdate(UserAccount account)
+        {
+            if (ConfigOptions.DisplayNameChangeCooldownDays <= 0)
+                return Util.UnixEpoch;
+            return account.DisplayNameNextUpdateUtc;
+        }
+
+        private OSDMap BuildDisplayNameAgentRecord(UserAccount account)
+        {
+            return new OSDMap(8)
+            {
+                ["username"] = account.Name,
+                ["display_name"] = account.EffectiveDisplayName,
+                ["display_name_next_update"] = ViewerDisplayNameNextUpdate(account),
+                ["display_name_expires"] = DateTime.UtcNow.AddMonths(1),
+                ["legacy_first_name"] = account.FirstName ?? string.Empty,
+                ["legacy_last_name"] = account.LastName ?? string.Empty,
+                ["id"] = account.PrincipalID,
+                ["is_display_name_default"] = account.IsDisplayNameDefault
+            };
+        }
+
+        private void BroadcastDisplayNameUpdate(string oldDisplayName, OSDMap agentRecord)
+        {
+            if (agentRecord == null || SceneManager.Instance == null)
+                return;
+
+            SceneManager.Instance.ForEachScene(scene =>
+            {
+                if (scene == null)
+                    return;
+                IEventQueue sceneEq = scene.RequestModuleInterface<IEventQueue>();
+                if (sceneEq == null)
+                    return;
+                scene.ForEachScenePresence(presence =>
+                {
+                    if (presence == null || presence.IsDeleted || presence.IsNPC)
+                        return;
+                    sceneEq.DisplayNameUpdate(presence.UUID, m_AgentID, oldDisplayName, agentRecord);
+                });
+            });
         }
 
         public class AssetUploader

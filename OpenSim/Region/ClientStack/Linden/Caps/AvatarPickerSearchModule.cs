@@ -179,13 +179,13 @@ namespace OpenSim.Region.ClientStack.Linden
             LLSDPerson p = new LLSDPerson();
             p.legacy_first_name = user.FirstName;
             p.legacy_last_name = user.LastName;
-            p.display_name = user.FirstName + " " + user.LastName;
+            p.display_name = user.EffectiveDisplayName;
             if (user.LastName.StartsWith("@"))
                 p.username = user.FirstName.ToLower() + user.LastName.ToLower();
             else
                 p.username = user.FirstName.ToLower() + "." + user.LastName.ToLower();
             p.id = user.Id;
-            p.is_display_name_default = false;
+            p.is_display_name_default = user.IsDisplayNameDefault;
             return p;
         }
     }
