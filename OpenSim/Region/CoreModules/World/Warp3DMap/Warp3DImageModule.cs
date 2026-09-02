@@ -408,12 +408,13 @@ namespace OpenSim.Region.CoreModules.World.Warp3DMap
             renderer.Scene.addObject("Terrain", obj);
 
             OpenSim.Framework.RegionSettings regionInfo = m_scene.RegionInfo.RegionSettings;
+            // PBR viewers update TerrainPBRn only, leaving TerrainTextureN stale.
             UUID[] textureIDs = new UUID[4]
             {
-                regionInfo.TerrainTexture1,
-                regionInfo.TerrainTexture2,
-                regionInfo.TerrainTexture3,
-                regionInfo.TerrainTexture4,
+                regionInfo.TerrainPBR1.IsNotZero() ? regionInfo.TerrainPBR1 : regionInfo.TerrainTexture1,
+                regionInfo.TerrainPBR2.IsNotZero() ? regionInfo.TerrainPBR2 : regionInfo.TerrainTexture2,
+                regionInfo.TerrainPBR3.IsNotZero() ? regionInfo.TerrainPBR3 : regionInfo.TerrainTexture3,
+                regionInfo.TerrainPBR4.IsNotZero() ? regionInfo.TerrainPBR4 : regionInfo.TerrainTexture4,
             };
 
             float[] startHeights = new float[4]
