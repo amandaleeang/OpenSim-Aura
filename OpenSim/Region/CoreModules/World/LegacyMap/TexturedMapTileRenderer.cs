@@ -304,11 +304,17 @@ namespace OpenSim.Region.CoreModules.World.LegacyMap
             // be recreated.
             RegionSettings settings = m_scene.RegionInfo.RegionSettings;
 
+            // PBR viewers update TerrainPBRn only, leaving TerrainTextureN stale.
+            UUID tex1 = settings.TerrainPBR1.IsNotZero() ? settings.TerrainPBR1 : settings.TerrainTexture1;
+            UUID tex2 = settings.TerrainPBR2.IsNotZero() ? settings.TerrainPBR2 : settings.TerrainTexture2;
+            UUID tex3 = settings.TerrainPBR3.IsNotZero() ? settings.TerrainPBR3 : settings.TerrainTexture3;
+            UUID tex4 = settings.TerrainPBR4.IsNotZero() ? settings.TerrainPBR4 : settings.TerrainTexture4;
+
             // the four terrain colors as HSVs for interpolation
-            HSV hsv1 = new HSV(computeAverageColor(settings.TerrainTexture1, m_color_1));
-            HSV hsv2 = new HSV(computeAverageColor(settings.TerrainTexture2, m_color_2));
-            HSV hsv3 = new HSV(computeAverageColor(settings.TerrainTexture3, m_color_3));
-            HSV hsv4 = new HSV(computeAverageColor(settings.TerrainTexture4, m_color_4));
+            HSV hsv1 = new HSV(computeAverageColor(tex1, m_color_1));
+            HSV hsv2 = new HSV(computeAverageColor(tex2, m_color_2));
+            HSV hsv3 = new HSV(computeAverageColor(tex3, m_color_3));
+            HSV hsv4 = new HSV(computeAverageColor(tex4, m_color_4));
 
             float levelNElow = (float)settings.Elevation1NE;
             float levelNEhigh = (float)settings.Elevation2NE;
