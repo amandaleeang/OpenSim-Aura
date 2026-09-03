@@ -1428,7 +1428,7 @@ namespace OpenSim.Region.CoreModules.World.Land
                     {
                         curByte = LandChannel.LAND_TYPE_OWNED_BY_GROUP;
                     }
-                    else if (currentParcelLandData.SalePrice > 0 &&
+                    else if ((currentParcelLandData.Flags & (uint)ParcelFlags.ForSale) != 0 &&
                                 (currentParcelLandData.AuthBuyerID.IsZero() ||
                                 currentParcelLandData.AuthBuyerID.Equals(remote_client.AgentId)))
                     {
