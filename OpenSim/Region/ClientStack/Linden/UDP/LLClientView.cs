@@ -849,8 +849,10 @@ namespace OpenSim.Region.ClientStack.LindenUDP
                 flags |= RegionFlags.RestrictPushObject;
             if (Scene.RegionInfo.EstateSettings.DenyAnonymous)
                 flags |= RegionFlags.DenyAnonymous;
-            //DenyIdentified  unused
-            //DenyTransacted  unused
+            if (Scene.RegionInfo.EstateSettings.DenyIdentified)
+                flags |= RegionFlags.DenyIdentified;
+            if (Scene.RegionInfo.EstateSettings.DenyTransacted)
+                flags |= RegionFlags.DenyTransacted;
             if (Scene.RegionInfo.RegionSettings.AllowLandJoinDivide)
                 flags |= RegionFlags.AllowParcelChanges;
             //AbuseEmailToEstateOwner -> block flyover
@@ -6551,8 +6553,8 @@ namespace OpenSim.Region.ClientStack.LindenUDP
             LLSDxmlEncode2.AddElem("PassPrice", landData.PassPrice, sb);
             LLSDxmlEncode2.AddElem("PublicCount", (int)0, sb); //TODO
             LLSDxmlEncode2.AddElem("RegionDenyAnonymous", (regionFlags & (uint)RegionFlags.DenyAnonymous) != 0, sb);
-            LLSDxmlEncode2.AddElem("RegionDenyIdentified", false, sb);
-            LLSDxmlEncode2.AddElem("RegionDenyTransacted", false, sb);
+            LLSDxmlEncode2.AddElem("RegionDenyIdentified", (regionFlags & (uint)RegionFlags.DenyIdentified) != 0, sb);
+            LLSDxmlEncode2.AddElem("RegionDenyTransacted", (regionFlags & (uint)RegionFlags.DenyTransacted) != 0, sb);
             LLSDxmlEncode2.AddElem("RegionPushOverride", (regionFlags & (uint)RegionFlags.RestrictPushObject) != 0, sb);
             LLSDxmlEncode2.AddElem("RentPrice", (int) 0, sb);
             LLSDxmlEncode2.AddElem("RequestResult", request_result, sb);
