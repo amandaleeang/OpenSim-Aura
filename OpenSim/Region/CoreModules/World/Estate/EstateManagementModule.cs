@@ -1997,9 +1997,9 @@ namespace OpenSim.Region.CoreModules.World.Estate
 
             if (Scene.RegionInfo.EstateSettings.DenyAnonymous)
                 flags |= RegionFlags.DenyAnonymous;
-            if (Scene.RegionInfo.EstateSettings.DenyIdentified) // unused?
+            if (Scene.RegionInfo.EstateSettings.DenyIdentified)
                 flags |= RegionFlags.DenyIdentified;
-            if (Scene.RegionInfo.EstateSettings.DenyTransacted) // unused?
+            if (Scene.RegionInfo.EstateSettings.DenyTransacted)
                 flags |= RegionFlags.DenyTransacted;
             if (Scene.RegionInfo.EstateSettings.AllowParcelChanges)
                 flags |= RegionFlags.AllowParcelChanges;
