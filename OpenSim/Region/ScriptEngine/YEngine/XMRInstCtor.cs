@@ -1134,10 +1134,17 @@ namespace OpenSim.Region.ScriptEngine.Yengine
         private void MigrateInEventHandler(Stream stream)
         {
             int mv = stream.ReadByte();
-            if(mv != migrationVersion)
-                throw new Exception("incoming migration version " + mv + " but accept only " + migrationVersion);
-
             stream.ReadByte();  // ignored
+
+            bool versionMismatch = mv != migrationVersion;
+            if(versionMismatch)
+            {
+                // Snapshot values are tagged, so a version-byte bump often still
+                // deserializes. Try restore first; LoadInitialState only resets
+                // if this throws.
+                m_log.WarnFormat("[YEngine]: state snapshot migration version mismatch for {0}: incoming={1}, current={2}; attempting best-effort restore",
+                    m_ItemID, mv, migrationVersion);
+            }
 
             /*
              * Restore script variables and stack and other state from stream.
@@ -1148,10 +1155,30 @@ namespace OpenSim.Region.ScriptEngine.Yengine
             lock(m_RunLock)
             {
                 BinaryReader br = new BinaryReader(stream);
-                this.MigrateIn(br);
+                try
+                {
+                    this.MigrateIn(br);
+                }
+                catch(Exception e)
+                {
+                    if(versionMismatch)
+                    {
+                        m_log.WarnFormat("[YEngine]: failed to restore snapshot after migration version mismatch for {0} (incoming={1}, current={2}): {3}",
+                            m_ItemID, mv, migrationVersion, e.Message);
+                        throw new Exception("failed to restore snapshot after migration version mismatch (incoming " + mv +
+                            ", current " + migrationVersion + "): " + e.Message, e);
+                    }
+                    throw;
+                }
 
                 //m_RunOnePhase = "MigrateInEventHandler finished";
                 //CheckRunLockInvariants(true);
+            }
+
+            if(versionMismatch)
+            {
+                m_log.InfoFormat("[YEngine]: state snapshot for {0} successfully restored despite migration version mismatch (incoming={1}, current={2})",
+                    m_ItemID, mv, migrationVersion);
             }
         }
     }
