@@ -31,7 +31,7 @@ namespace OpenSim.Region.ClientStack.Linden
                 return;
             }
 
-            if(map == map.Count < 3)
+            if (map == null || map.Count < 3)
             {
                 response.StatusCode = (int)HttpStatusCode.BadRequest;
                 return;
