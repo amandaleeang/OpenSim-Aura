@@ -63,6 +63,8 @@ namespace OpenSim.Services.FSAssetService
         protected IAssetService m_FallbackService;
         protected Thread m_WriterThread;
         protected Thread m_StatsThread;
+        // Starts signaled so leftover spool files are drained on boot.
+        private static readonly AutoResetEvent m_spoolReady = new AutoResetEvent(true);
         protected string m_SpoolDirectory;
         protected object m_readLock = new object();
         protected object m_statsLock = new object();
@@ -73,6 +75,13 @@ namespace OpenSim.Services.FSAssetService
         protected string m_FSBase;
         protected bool m_useOsgridFormat = false;
         protected bool m_showStats = true;
+
+        /// <summary>
+        /// Extra FSAssets logging, like <c>debug http</c>. Default 0 (off) even if the root logger is DEBUG.
+        /// 0: no per-cycle / per-asset extra logs.
+        /// 1: write-cycle and fallback-copy notices.
+        /// </summary>
+        public static int DebugLevel { get; set; }
 
         private static bool m_mainInitialized;
         private static object m_initLock = new object();
@@ -115,6 +124,13 @@ namespace OpenSim.Services.FSAssetService
                             "force import", "force import <conn> <table> [<start> <count>]",
                             "Import legacy assets, overwriting current content",
                             HandleImportAssets);
+                    MainConsole.Instance.Commands.AddCommand("Debug", false,
+                            "debug fsassets", "debug fsassets [<level>]",
+                            "Set FSAssets extra logging (write cycles, fallback copies).",
+                            "level <= 0 (default): no extra logs.\n"
+                            + "level >= 1: log each write cycle and each fallback copy into the local store.\n"
+                            + "No level prints the current value.",
+                            HandleDebugFsassets);
                 }
                 else
                 {
@@ -253,7 +269,7 @@ namespace OpenSim.Services.FSAssetService
 
             while (true)
             {
-                string[] files = Directory.GetFiles(m_SpoolDirectory);
+                string[] files = Directory.GetFiles(m_SpoolDirectory, "*.asset");
 
                 if (files.Length > 0)
                 {
@@ -351,13 +367,15 @@ namespace OpenSim.Services.FSAssetService
                     }
 
                     int totalTicks = System.Environment.TickCount - tickCount;
-                    if (totalTicks > 0) // Wrap?
+                    if (DebugLevel >= 1 && totalTicks > 0) // Wrap?
                     {
-                        m_log.InfoFormat("[FSASSETS]: Write cycle complete, {0} files, {1} ticks, avg {2:F2}", files.Length, totalTicks, (double)totalTicks / (double)files.Length);
+                        m_log.DebugFormat("[FSASSETS]: Write cycle complete, {0} files, {1} ticks, avg {2:F2}", files.Length, totalTicks, (double)totalTicks / (double)files.Length);
                     }
+                    // More files may have landed while this cycle ran; loop immediately.
+                    continue;
                 }
 
-                Thread.Sleep(1000);
+                m_spoolReady.WaitOne();
             }
         }
 
@@ -453,7 +471,8 @@ namespace OpenSim.Services.FSAssetService
                         asset.Metadata.ContentType =
                                 SLUtil.SLAssetTypeToContentType((int)asset.Type);
                         sha = GetSHA256Hash(asset.Data);
-                        m_log.InfoFormat("[FSASSETS]: Added asset {0} from fallback to local store", id);
+                        if (DebugLevel >= 1)
+                            m_log.DebugFormat("[FSASSETS]: Added asset {0} from fallback to local store", id);
                         Store(asset);
                     }
                 }
@@ -480,7 +499,8 @@ namespace OpenSim.Services.FSAssetService
                             asset.Metadata.ContentType =
                                     SLUtil.SLAssetTypeToContentType((int)asset.Type);
                             sha = GetSHA256Hash(asset.Data);
-                            m_log.InfoFormat("[FSASSETS]: Added asset {0} from fallback to local store", id);
+                            if (DebugLevel >= 1)
+                                m_log.DebugFormat("[FSASSETS]: Added asset {0} from fallback to local store", id);
                             Store(asset);
                         }
                     }
@@ -669,6 +689,7 @@ namespace OpenSim.Services.FSAssetService
 
                     File.Move(tempFile, finalFile);
                 }
+                m_spoolReady.Set();
             }
 
             if (asset.ID.Length == 0)
@@ -729,6 +750,24 @@ namespace OpenSim.Services.FSAssetService
             m_DataConnector.Delete(id);
 
             return true;
+        }
+
+        private void HandleDebugFsassets(string module, string[] args)
+        {
+            if (args.Length < 3)
+            {
+                MainConsole.Instance.Output("Current FSAssets debug level is {0}", DebugLevel);
+                return;
+            }
+
+            if (!int.TryParse(args[2], out int newDebug))
+            {
+                MainConsole.Instance.Output("{0} is not a valid debug level", args[2]);
+                return;
+            }
+
+            DebugLevel = newDebug < 0 ? 0 : newDebug;
+            MainConsole.Instance.Output("FSAssets debug level set to {0}", DebugLevel);
         }
 
         private void HandleShowAssets(string module, string[] args)
