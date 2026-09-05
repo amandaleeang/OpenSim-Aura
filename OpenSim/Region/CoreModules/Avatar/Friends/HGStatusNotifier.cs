@@ -1,10 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Linq;
 using System.Reflection;
-using System.Text;
 using OpenSim.Framework;
-using OpenSim.Region.Framework.Interfaces;
 using OpenSim.Services.Interfaces;
 using OpenSim.Services.Connectors.Hypergrid;
 using FriendInfo = OpenSim.Services.Interfaces.FriendInfo;
@@ -47,6 +44,8 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
                 if (Util.ParseUniversalUserIdentifier(ids[0], out UUID friendID))
                 {
                     string friendsServerURI = m_FriendsModule.UserManagementModule.GetUserServerURL(friendID, "FriendsServerURI");
+                    if (string.IsNullOrEmpty(friendsServerURI))
+                        friendsServerURI = kvp.Key;
                     if (!string.IsNullOrEmpty(friendsServerURI))
                     {
                         HGFriendsServicesConnector fConn = new(friendsServerURI);
@@ -56,7 +55,8 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
                     }
                 }
 
-                // Stock homes skip travelers (presence RegionID zero). LocateUser is the travel table.
+                // Stock homes skip travelers (presence RegionID zero). LocateUser is the
+                // travel table, and only returns a URL when the friend is on a foreign grid.
                 if (online)
                     AddTravelingFriends(kvp.Value, friendsOnline);
 
