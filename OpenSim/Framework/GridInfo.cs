@@ -349,6 +349,49 @@ namespace OpenSim.Framework
         {
             return Host.GetHashCode() + Port;
         }
+
+        /// <summary>
+        /// Gatekeeper / home URIs compared without regard to case or a trailing slash.
+        /// </summary>
+        public static bool SameGrid(string a, string b)
+        {
+            if (string.IsNullOrWhiteSpace(a) || string.IsNullOrWhiteSpace(b))
+                return false;
+
+            OSHHTPHost ha = new(a, false);
+            OSHHTPHost hb = new(b, false);
+            if (ha.IsValidHost && hb.IsValidHost)
+                return ha.Equals(hb);
+
+            return string.Equals(Util.TrimEndSlash(a.Trim()), Util.TrimEndSlash(b.Trim()),
+                StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    /// <summary>
+    /// How HG friends decide online vs offline vs traveling abroad.
+    /// Presence with a real RegionID is home-online. A travel-table row whose
+    /// GridExternalName is this home grid is a local login, not travel abroad.
+    /// RegionID zero is in-transit leftover, not "still online".
+    /// Query-time LocateUser is not enough after the viewer has already received
+    /// SendAgentOnline: LogoutAgent while abroad must fan out offline, and
+    /// LoginAgentToGrid to a foreign grid must fan out online.
+    /// </summary>
+    public static class HGFriendStatus
+    {
+        public static bool IsTravelingAbroad(string homeGrid, string gridExternalName)
+        {
+            if (string.IsNullOrWhiteSpace(gridExternalName))
+                return false;
+            return !OSHHTPHost.SameGrid(homeGrid, gridExternalName);
+        }
+
+        public static bool IsOnline(bool hasPresence, bool regionIdIsZero, bool travelingAbroad)
+        {
+            if (hasPresence && !regionIdIsZero)
+                return true;
+            return travelingAbroad;
+        }
     }
 
     public class GridInfo

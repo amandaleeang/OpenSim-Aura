@@ -159,6 +159,7 @@ namespace OpenSim.Services.HypergridService
                         throw new Exception(String.Format("[UserAgentService] failed to resolve gatekeeper host"));
                     m_MyExternalIP = ip.ToString();
                 }
+
                 // Finally some cleanup
                 m_Database.DeleteOld();
 
@@ -295,7 +296,7 @@ namespace OpenSim.Services.HypergridService
 
             m_log.DebugFormat("[USER AGENT SERVICE]: this grid: {0}, desired grid: {1}, desired region: {2}", m_GridName, gridName, region.RegionID);
 
-            if (m_GridName.Equals(gridName, StringComparison.InvariantCultureIgnoreCase))
+            if (OSHHTPHost.SameGrid(m_GridName, gridName))
             {
                 success = m_GatekeeperService.LoginAgent(source, agentCircuit, finalDestination, out reason);
             }
@@ -322,6 +323,11 @@ namespace OpenSim.Services.HypergridService
             // Everything is ok
 
             StoreTravelInfo(travel);
+
+            // Foreign sim StatusNotify cannot reach this user's home-grid friends
+            // (those entries are plain UUIDs, not UUIs). Push online from home.
+            if (HGFriendStatus.IsTravelingAbroad(m_GridName, gridName))
+                QueueFriendStatusNotify(agentCircuit.AgentID, true);
 
             return true;
         }
@@ -356,6 +362,9 @@ namespace OpenSim.Services.HypergridService
             if (fromLogin)
                 travel.ClientIPAddress = agentCircuit.IPAddress;
 
+            // One live session per user. Leftover rows from earlier logins/HG trips
+            // make LocateUser treat the avatar as still abroad (friends see them online).
+            DeleteTravelSessions(agentCircuit.AgentID, agentCircuit.SessionID);
             StoreTravelInfo(travel);
 
             return travel;
@@ -365,11 +374,21 @@ namespace OpenSim.Services.HypergridService
         {
             m_log.DebugFormat("[USER AGENT SERVICE]: User {0} logged out", userID);
 
+            // Capture before deleting travel rows. Home-login rows are not "abroad".
+            bool wasAbroad = !string.IsNullOrWhiteSpace(LocateUser(userID));
+
+            DeleteTravelSessions(userID, UUID.Zero);
             m_Database.Delete(sessionID);
 
             GridUserInfo guinfo = m_GridUserService.GetGridUserInfo(userID.ToString());
             if (guinfo is not null)
                 m_GridUserService.LoggedOut(userID.ToString(), sessionID, guinfo.LastRegionID, guinfo.LastPosition, guinfo.LastLookAt);
+
+            // Home-grid friends already got StatusChange from FriendsModule when the
+            // user logged off at home. Abroad, the foreign sim cannot notify those
+            // UUID friends — fan out from here so they are not stuck online.
+            if (wasAbroad)
+                QueueFriendStatusNotify(userID, false);
         }
 
         // We need to prevent foreign users with the same UUID as a local user
@@ -380,7 +399,7 @@ namespace OpenSim.Services.HypergridService
                 return false;
             if(!hgt.Data.TryGetValue("GridExternalName", out string htgGrid))
                 return false;
-            return htgGrid.Equals(thisGridExternalName, StringComparison.InvariantCultureIgnoreCase);
+            return OSHHTPHost.SameGrid(htgGrid, thisGridExternalName);
         }
 
         public bool VerifyClient(UUID sessionID, string reportedIP)
@@ -430,66 +449,113 @@ namespace OpenSim.Services.HypergridService
                 return new List<UUID>();
             }
 
-            List<UUID> localFriendsOnline = new();
-
             m_log.DebugFormat("[USER AGENT SERVICE]: Status notification: foreign user {0} wants to notify {1} local friends", foreignUserID, friends.Count);
 
-            // First, let's double check that the reported friends are, indeed, friends of that user
-            // And let's check that the secret matches
-            List<string> usersToBeNotified = new();
-            foreach (string uui in friends)
-            {
-                if (Util.ParseUniversalUserIdentifier(uui, out UUID localUserID, out _, out _, out _, out string secret))
-                {
-                    FriendInfo[] friendInfos = m_FriendsService.GetFriends(localUserID);
-                    foreach (FriendInfo finfo in friendInfos)
-                    {
-                        if (finfo.Friend.StartsWith(foreignUserID.ToString()) && finfo.Friend.EndsWith(secret))
-                        {
-                            // great!
-                            usersToBeNotified.Add(localUserID.ToString());
-                        }
-                    }
-                }
-            }
+            List<string> usersToBeNotified = HGFriendNotify.MatchingLocalFriends(
+                m_FriendsService, foreignUserID, friends, requireCanSeeOnline: false);
 
-            // Now, let's send the notifications
-            m_log.DebugFormat("[USER AGENT SERVICE]: Status notification: user has {0} local friends", usersToBeNotified.Count);
-
+            List<UUID> localFriendsOnline = new();
             HashSet<string> reported = new();
-            PresenceInfo[] friendSessions = m_PresenceService.GetAgents(usersToBeNotified.ToArray());
-            if (friendSessions != null)
+            foreach ((UUID id, UUID regionID) in HGFriendNotify.HomeOnline(m_PresenceService, usersToBeNotified))
             {
-                foreach (PresenceInfo pinfo in friendSessions)
-                {
-                    if (pinfo is null || pinfo.RegionID.IsZero())
-                        continue;
-                    if (!reported.Add(pinfo.UserID))
-                        continue;
-                    ForwardStatusNotificationToSim(pinfo.RegionID, foreignUserID, pinfo.UserID, online);
-                    if (UUID.TryParse(pinfo.UserID, out UUID id))
-                        localFriendsOnline.Add(id);
-                }
+                reported.Add(id.ToString());
+                ForwardStatusNotificationToSim(regionID, foreignUserID, id.ToString(), online);
+                localFriendsOnline.Add(id);
             }
 
             if (online)
-            {
-                foreach (string user in usersToBeNotified)
-                {
-                    if (reported.Contains(user) || !UUID.TryParse(user, out UUID uid))
-                        continue;
-                    if (string.IsNullOrWhiteSpace(LocateUser(uid)))
-                        continue;
-                    localFriendsOnline.Add(uid);
-                    m_log.DebugFormat("[USER AGENT SERVICE]: Local friend {0} is online (traveling)", uid);
-                }
-                return localFriendsOnline;
-            }
+                HGFriendNotify.AddTraveling(usersToBeNotified, reported, localFriendsOnline, IsTraveling);
 
-            return new List<UUID>();
+            return online ? localFriendsOnline : new List<UUID>();
         }
 
-        [Obsolete]
+        void QueueFriendStatusNotify(UUID userID, bool online)
+        {
+            Util.FireAndForget(
+                _ => NotifyFriendsOfStatus(userID, online),
+                null,
+                "UserAgentService.NotifyFriendsOfStatus");
+        }
+
+        /// <summary>
+        /// Push this local user's online/offline status to friends. Used when they
+        /// arrive on or leave a foreign grid, because the foreign sim's friends
+        /// cache stores home-grid friends as UUIDs and treats them as local to
+        /// that grid (so HG StatusNotification never runs for them).
+        /// </summary>
+        void NotifyFriendsOfStatus(UUID userID, bool online)
+        {
+            if (m_FriendsService is null)
+                return;
+
+            FriendInfo[] friends;
+            try
+            {
+                friends = m_FriendsService.GetFriends(userID);
+            }
+            catch (Exception e)
+            {
+                m_log.DebugFormat("[USER AGENT SERVICE]: GetFriends for {0} failed: {1}", userID, e.Message);
+                return;
+            }
+
+            if (friends is null || friends.Length == 0)
+                return;
+
+            List<string> localIds = new();
+            Dictionary<string, List<string>> hgByDomain = new(StringComparer.OrdinalIgnoreCase);
+
+            foreach (FriendInfo fi in friends)
+            {
+                if (fi?.Friend is null)
+                    continue;
+                if (fi.TheirFlags == -1 || (fi.MyFlags & (int)FriendRights.CanSeeOnline) == 0)
+                    continue;
+
+                if (UUID.TryParse(fi.Friend, out _))
+                {
+                    localIds.Add(fi.Friend);
+                    continue;
+                }
+
+                if (!Util.ParseUniversalUserIdentifier(fi.Friend, out _, out string url)
+                        || string.IsNullOrWhiteSpace(url))
+                    continue;
+
+                if (!hgByDomain.TryGetValue(url, out List<string> ids))
+                {
+                    ids = new List<string>();
+                    hgByDomain[url] = ids;
+                }
+                ids.Add(fi.Friend);
+            }
+
+            m_log.DebugFormat(
+                "[USER AGENT SERVICE]: Notifying {0} local and {1} HG friend domains that {2} is {3}",
+                localIds.Count, hgByDomain.Count, userID, online ? "online" : "offline");
+
+            if (localIds.Count > 0 && m_PresenceService is not null)
+            {
+                foreach ((UUID id, UUID regionID) in HGFriendNotify.HomeOnline(m_PresenceService, localIds))
+                    ForwardStatusNotificationToSim(regionID, userID, id.ToString(), online);
+            }
+
+            foreach (KeyValuePair<string, List<string>> kvp in hgByDomain)
+            {
+                try
+                {
+                    HGFriendsServicesConnector conn = new(kvp.Key);
+                    conn.StatusNotification(kvp.Value, userID, online);
+                }
+                catch (Exception e)
+                {
+                    m_log.DebugFormat(
+                        "[USER AGENT SERVICE]: HG friend status notify to {0} for {1} failed: {2}",
+                        kvp.Key, userID, e.Message);
+                }
+            }
+        }
+
         protected void ForwardStatusNotificationToSim(UUID regionID, UUID foreignUserID, string user, bool online)
         {
             if (UUID.TryParse(user, out UUID userID))
@@ -523,51 +589,19 @@ namespace OpenSim.Services.HypergridService
 
             m_log.DebugFormat("[USER AGENT SERVICE]: Foreign user {0} wants to know status of {1} local friends", foreignUserID, friends.Count);
 
-            // First, let's double check that the reported friends are, indeed, friends of that user
-            // And let's check that the secret matches and the rights
-            List<string> usersToBeNotified = new();
-            foreach (string uui in friends)
-            {
-                if (Util.ParseUniversalUserIdentifier(uui, out UUID localUserID, out _, out _, out _, out string secret))
-                {
-                    FriendInfo[] friendInfos = m_FriendsService.GetFriends(localUserID);
-                    foreach (FriendInfo finfo in friendInfos)
-                    {
-                        if (finfo.Friend.StartsWith(foreignUserID.ToString()) && finfo.Friend.EndsWith(secret) &&
-                            (finfo.TheirFlags & (int)FriendRights.CanSeeOnline) != 0 && (finfo.TheirFlags != -1))
-                        {
-                            // great!
-                            usersToBeNotified.Add(localUserID.ToString());
-                        }
-                    }
-                }
-            }
+            List<string> usersToBeNotified = HGFriendNotify.MatchingLocalFriends(
+                m_FriendsService, foreignUserID, friends, requireCanSeeOnline: true);
 
-            // Now, let's find out their status
             m_log.DebugFormat("[USER AGENT SERVICE]: GetOnlineFriends: user has {0} local friends with status rights", usersToBeNotified.Count);
 
-            HashSet<UUID> seen = new();
-            PresenceInfo[] friendSessions = m_PresenceService.GetAgents(usersToBeNotified.ToArray());
-            if (friendSessions is not null)
+            HashSet<string> seen = new();
+            foreach ((UUID id, UUID _) in HGFriendNotify.HomeOnline(m_PresenceService, usersToBeNotified))
             {
-                foreach (PresenceInfo pi in friendSessions)
-                {
-                    if (pi is null || !UUID.TryParse(pi.UserID, out UUID presenceID))
-                        continue;
-                    if (seen.Add(presenceID))
-                        online.Add(presenceID);
-                }
+                seen.Add(id.ToString());
+                online.Add(id);
             }
 
-            foreach (string user in usersToBeNotified)
-            {
-                if (!UUID.TryParse(user, out UUID uid) || seen.Contains(uid))
-                    continue;
-                if (string.IsNullOrWhiteSpace(LocateUser(uid)))
-                    continue;
-                online.Add(uid);
-                seen.Add(uid);
-            }
+            HGFriendNotify.AddTraveling(usersToBeNotified, seen, online, IsTraveling);
 
             return online;
         }
@@ -636,8 +670,14 @@ namespace OpenSim.Services.HypergridService
                 return string.Empty;
 
             foreach (HGTravelingData t in hgts)
-                if (t.Data.ContainsKey("GridExternalName") && !m_GridName.Equals(t.Data["GridExternalName"]))
-                    return t.Data["GridExternalName"];
+            {
+                if (t?.Data is null || !t.Data.TryGetValue("GridExternalName", out string grid)
+                        || string.IsNullOrWhiteSpace(grid))
+                    continue;
+                // Home login also writes hg_traveling_data. Only a foreign grid is "abroad".
+                if (HGFriendStatus.IsTravelingAbroad(m_GridName, grid))
+                    return grid;
+            }
 
             return string.Empty;
         }
@@ -703,6 +743,19 @@ namespace OpenSim.Services.HypergridService
 
         #region Misc
 
+        bool IsTraveling(UUID userId)
+        {
+            try
+            {
+                return !string.IsNullOrWhiteSpace(LocateUser(userId));
+            }
+            catch (Exception e)
+            {
+                m_log.DebugFormat("[USER AGENT SERVICE]: LocateUser failed for {0}: {1}", userId, e.Message);
+                return false;
+            }
+        }
+
         private bool IsException(string dest, int level, Dictionary<int, List<string>> exceptions)
         {
             if (string.IsNullOrEmpty(dest))
@@ -721,6 +774,22 @@ namespace OpenSim.Services.HypergridService
             }
 
             return false;
+        }
+
+        void DeleteTravelSessions(UUID userID, UUID exceptSessionID)
+        {
+            HGTravelingData[] sessions = m_Database.GetSessions(userID);
+            if (sessions is null || sessions.Length == 0)
+                return;
+
+            foreach (HGTravelingData t in sessions)
+            {
+                if (t is null)
+                    continue;
+                if (exceptSessionID.IsNotZero() && t.SessionID == exceptSessionID)
+                    continue;
+                m_Database.Delete(t.SessionID);
+            }
         }
 
         private void StoreTravelInfo(TravelingAgentInfo travel)
