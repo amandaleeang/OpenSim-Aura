@@ -235,9 +235,7 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
 
         protected override void GetOnlineFriends(UUID userID, List<string> friendList, /*collector*/ List<UUID> online)
         {
-            //m_log.DebugFormat("[HGFRIENDS MODULE]: Entering GetOnlineFriends for {0}", userID);
-
-            List<string> fList = new();
+            List<string> fList = new(friendList.Count);
             foreach (string s in friendList)
             {
                 if (s.Length < 36)
@@ -248,74 +246,42 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
                     fList.Add(s.Substring(0, 36));
             }
 
-            // FIXME: also query the presence status of friends in other grids (like in HGStatusNotifier.Notify())
-
-            PresenceInfo[] presence = PresenceService.GetAgents(fList.ToArray());
-            if (presence.Length == 0)
-                return;
-
-            if (!m_OnlineFriendsCache.TryGetValue(userID, out HashSet<UUID> friends))
-            {
-                friends = new HashSet<UUID>();
-                m_OnlineFriendsCache[userID] = friends;
-            }
-
-            foreach (PresenceInfo pi in presence)
-            {
-                if (UUID.TryParse(pi.UserID, out UUID presenceID))
-                {
-                    online.Add(presenceID);
-                    friends.Add(presenceID);
-                }
-            }
-
-            //m_log.DebugFormat("[HGFRIENDS MODULE]: Exiting GetOnlineFriends for {0}", userID);
+            // Local-grid presence only (including HG visitors currently here).
+            // Friends on other grids are filled in by StatusChange → HGStatusNotifier.
+            if (fList.Count > 0)
+                base.GetOnlineFriends(userID, fList, online);
         }
 
         protected override void StatusNotify(List<FriendInfo> friendList, UUID userID, bool online)
         {
-            //m_log.DebugFormat("[HGFRIENDS MODULE]: Entering StatusNotify for {0}", userID);
-
-            // First, let's divide the friends on a per-domain basis
-            List<FriendInfo> locallst = new(friendList.Count);
-
-            Dictionary<string, List<FriendInfo>> friendsPerDomain = new Dictionary<string, List<FriendInfo>>();
+            List<string> localRemote = new(friendList.Count);
+            Dictionary<string, List<FriendInfo>> friendsPerDomain = new();
             foreach (FriendInfo friend in friendList)
             {
                 if (UUID.TryParse(friend.Friend, out UUID friendID))
                 {
                     if (LocalStatusNotification(userID, friendID, online))
                         continue;
-                    locallst.Add(friend);
+                    localRemote.Add(friend.Friend);
                 }
-                else
+                else if (Util.ParseUniversalUserIdentifier(friend.Friend, out friendID, out string url))
                 {
-                    // it's a foreign friend
-                    if (Util.ParseUniversalUserIdentifier(friend.Friend, out friendID, out string url))
-                    {
-                        // Let's try our luck in the local sim. Who knows, maybe it's here
-                        if (LocalStatusNotification(userID, friendID, online))
-                            continue;
+                    if (LocalStatusNotification(userID, friendID, online))
+                        continue;
 
-                        if (!friendsPerDomain.TryGetValue(url, out List<FriendInfo> lst))
-                        {
-                            lst = new List<FriendInfo>();
-                            friendsPerDomain[url] = lst;
-                        }
-                        lst.Add(friend);
+                    if (!friendsPerDomain.TryGetValue(url, out List<FriendInfo> lst))
+                    {
+                        lst = new List<FriendInfo>();
+                        friendsPerDomain[url] = lst;
                     }
+                    lst.Add(friend);
                 }
             }
 
-            // For the local friends, just call the base method
-            // Let's do this first of all
-            if (locallst.Count > 0)
-                base.StatusNotify(locallst, userID, online);
+            NotifyRemoteFriendSims(localRemote, userID, online);
 
-            if(friendsPerDomain.Count > 0)
+            if (friendsPerDomain.Count > 0)
                 m_StatusNotifier.Notify(userID, friendsPerDomain, online);
-
-            //m_log.DebugFormat("[HGFRIENDS MODULE]: Exiting StatusNotify for {0}", userID);
         }
 
         protected override bool GetAgentInfo(UUID scopeID, string fid, out UUID agentID, out string first, out string last)

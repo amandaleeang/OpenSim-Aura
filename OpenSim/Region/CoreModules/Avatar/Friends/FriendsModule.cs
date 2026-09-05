@@ -544,6 +544,9 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
 
             foreach (PresenceInfo pi in presence)
             {
+                // RegionID zero is in-transit leftover, not online.
+                if (pi is null || pi.RegionID.IsZero())
+                    continue;
                 if (UUID.TryParse(pi.UserID, out UUID presenceID))
                 {
                     online.Add(presenceID);
@@ -606,7 +609,6 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
 
         protected virtual void StatusNotify(List<FriendInfo> friendList, UUID userID, bool online)
         {
-            //m_log.DebugFormat("[FRIENDS]: Entering StatusNotify for {0}", userID);
             List<string> remoteFriendStringIds = new(friendList.Count);
             foreach (FriendInfo friend in friendList)
             {
@@ -622,29 +624,28 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
                 }
             }
 
-            if (remoteFriendStringIds.Count == 0)
+            NotifyRemoteFriendSims(remoteFriendStringIds, userID, online);
+        }
+
+        /// <summary>
+        /// Notify friends on other sims of this grid. Caller has already tried LocalStatusNotification.
+        /// </summary>
+        protected void NotifyRemoteFriendSims(List<string> remoteFriendStringIds, UUID userID, bool online)
+        {
+            if (remoteFriendStringIds is null || remoteFriendStringIds.Count == 0)
                 return;
 
-            // We do this regrouping so that we can efficiently send a single request rather than one for each
-            // friend in what may be a very large friends list.
             PresenceInfo[] friendSessions = PresenceService.GetAgents(remoteFriendStringIds.ToArray());
-            if(friendSessions is null)
+            if (friendSessions is null)
                 return;
 
             foreach (PresenceInfo friendSession in friendSessions)
             {
-                // let's guard against sessions-gone-bad
-                if (friendSession is not null && friendSession.RegionID.IsNotZero())
-                {
-                    //m_log.DebugFormat("[FRIENDS]: Get region {0}", friendSession.RegionID);
-                    GridRegion region = GridService.GetRegionByUUID(m_Scenes[0].RegionInfo.ScopeID, friendSession.RegionID);
-                    if (region is not null)
-                    {
-                        m_FriendsSimConnector.StatusNotify(region, userID, friendSession.UserID, online);
-                    }
-                }
-                //else
-                //    m_log.DebugFormat("[FRIENDS]: friend session is null or the region is UUID.Zero");
+                if (friendSession is null || friendSession.RegionID.IsZero())
+                    continue;
+                GridRegion region = GridService.GetRegionByUUID(m_Scenes[0].RegionInfo.ScopeID, friendSession.RegionID);
+                if (region is not null)
+                    m_FriendsSimConnector.StatusNotify(region, userID, friendSession.UserID, online);
             }
         }
 

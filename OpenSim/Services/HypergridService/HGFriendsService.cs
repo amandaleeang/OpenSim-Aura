@@ -347,64 +347,27 @@ namespace OpenSim.Services.HypergridService
                 return [];
             }
 
-            // Let's unblock the caller right now, and take it from here async
-
             m_log.DebugFormat("[HGFRIENDS SERVICE]: Status notification: foreign user {0} wants to notify {1} local friends of {2} status",
                 foreignUserID, friends.Count, (online ? "online" : "offline"));
 
-            // First, let's double check that the reported friends are, indeed, friends of that user
-            // And let's check that the secret matches
-            List<string> usersToBeNotified = [];
-            string foreignUserIDToString = foreignUserID.ToString();
-            foreach (string uui in friends)
-            {
-                if (Util.ParseUniversalUserIdentifier(uui, out UUID localUserID, out _, out _, out _, out string secret))
-                {
-                    FriendInfo[] friendInfos = m_FriendsService.GetFriends(localUserID);
-                    foreach (FriendInfo finfo in friendInfos)
-                    {
-                        if (finfo.Friend.StartsWith(foreignUserIDToString) && finfo.Friend.EndsWith(secret))
-                        {
-                            // great!
-                            usersToBeNotified.Add(localUserID.ToString());
-                        }
-                    }
-                }
-            }
+            List<string> usersToBeNotified = HGFriendNotify.MatchingLocalFriends(
+                m_FriendsService, foreignUserID, friends, requireCanSeeOnline: false);
 
             List<UUID> localFriendsOnline = [];
             HashSet<string> reported = new();
-            PresenceInfo[] friendSessions = m_PresenceService.GetAgents(usersToBeNotified.ToArray());
-            if (friendSessions != null)
+            foreach ((UUID id, UUID regionID) in HGFriendNotify.HomeOnline(m_PresenceService, usersToBeNotified))
             {
-                foreach (PresenceInfo pinfo in friendSessions)
-                {
-                    if (pinfo is null || pinfo.RegionID.IsZero())
-                        continue;
-                    if (!reported.Add(pinfo.UserID))
-                        continue;
-                    ForwardStatusNotificationToSim(pinfo.RegionID, foreignUserID, pinfo.UserID, online);
-                    if (UUID.TryParse(pinfo.UserID, out UUID id))
-                        localFriendsOnline.Add(id);
-                }
+                reported.Add(id.ToString());
+                ForwardStatusNotificationToSim(regionID, foreignUserID, id.ToString(), online);
+                localFriendsOnline.Add(id);
             }
 
-            // Traveling locals are still online (hg_traveling_data). Presence RegionID is zero after HG TP.
+            // Traveling locals are still online (hg_traveling_data). Presence RegionID is
+            // zero after HG TP. LocateUser only counts a foreign grid, not a home login row.
             if (online)
-            {
-                foreach (string user in usersToBeNotified)
-                {
-                    if (reported.Contains(user) || !UUID.TryParse(user, out UUID uid))
-                        continue;
-                    if (!IsTraveling(uid))
-                        continue;
-                    localFriendsOnline.Add(uid);
-                    m_log.DebugFormat("[HGFRIENDS SERVICE]: Local friend {0} is online (traveling)", uid);
-                }
-                return localFriendsOnline;
-            }
+                HGFriendNotify.AddTraveling(usersToBeNotified, reported, localFriendsOnline, IsTraveling);
 
-            return [];
+            return online ? localFriendsOnline : [];
         }
 
         bool IsTraveling(UUID userId)
