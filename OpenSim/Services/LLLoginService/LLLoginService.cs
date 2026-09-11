@@ -90,6 +90,8 @@ namespace OpenSim.Services.LLLoginService
         protected string m_DeniedID0s;
         protected string m_MessageUrl;
         protected string m_DSTZone;
+        protected string m_AgentAppearanceService;
+        protected bool m_ServerSideBakeEnabled;
 
         protected bool m_allowDuplicatePresences = false;
         protected string m_messageKey;
@@ -131,6 +133,9 @@ namespace OpenSim.Services.LLLoginService
             m_ClassifiedFee = m_LoginServerConfig.GetString("ClassifiedFee", string.Empty);
             m_DestinationGuide = m_LoginServerConfig.GetString ("DestinationGuide", string.Empty);
             m_AvatarPicker = m_LoginServerConfig.GetString("AvatarPicker", string.Empty);
+            m_AgentAppearanceService = m_LoginServerConfig.GetString("AgentAppearanceService", string.Empty);
+            IConfig ssbConfig = config.Configs["ServerSideBake"];
+            m_ServerSideBakeEnabled = ssbConfig != null && ssbConfig.GetBoolean("Enabled", false);
 
             m_allowLoginFallbackToAnyRegion = m_LoginServerConfig.GetBoolean("AllowLoginFallbackToAnyRegion", m_allowLoginFallbackToAnyRegion);
 
@@ -276,6 +281,19 @@ namespace OpenSim.Services.LLLoginService
 
         public LLLoginService(IConfigSource config) : this(config, null, null)
         {
+        }
+
+        private string ResolveAgentAppearanceService(GridRegion destination)
+        {
+            string url = m_AgentAppearanceService;
+            if (string.IsNullOrWhiteSpace(url) && m_ServerSideBakeEnabled && destination != null)
+                url = destination.ServerURI + "appearance/";
+            if (string.IsNullOrWhiteSpace(url))
+                return string.Empty;
+            url = url.Trim();
+            if (!url.EndsWith("/"))
+                url += "/";
+            return url;
         }
 
         public Hashtable SetLevel(string firstName, string lastName, string passwd, int level, IPEndPoint clientIP)
@@ -633,6 +651,7 @@ namespace OpenSim.Services.LLLoginService
                         where, startLocation, position, lookAt, gestures, processedMessage, home, clientIP,
                         m_MapTileURL, m_ProfileURL, m_OpenIDURL, m_SearchURL, m_Currency, m_DSTZone,
                         m_DestinationGuide, m_AvatarPicker, realID, m_ClassifiedFee,m_MaxAgentGroups);
+                    response.AgentAppearanceService = ResolveAgentAppearanceService(destination);
 
                     m_log.DebugFormat("[LLOGIN SERVICE]: All clear. Sending login response to {0} {1}", firstName, lastName);
 
