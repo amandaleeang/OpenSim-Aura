@@ -2843,6 +2843,8 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
             sp.GotAttachmentsData = true;
             sp.StartAttachmentScriptsIfRoot();
 
+            m_scene.RequestModuleInterface<IServerSideBakeModule>()?.NotifyAttachmentsArrived(sp);
+
             return true;
         }
 
