@@ -984,9 +984,12 @@ namespace OpenSim.Region.ClientStack.LindenUDP
             zc.AddByte(1); 
             zc.AddUInt64(regionFlags); // we have nothing other base flags
             //RegionProtocols
-                // bit 0 signals server side texture baking
-                // bit 63 signals more than 6 baked textures support"
-            zc.AddUInt64(1UL << 63);
+            // bit 0 signals server side texture baking
+            // bit 63 signals more than 6 baked textures support
+            ulong regionProtocols = 1UL << 63;
+            if (m_scene.RequestModuleInterface<IServerSideBakeModule>() != null)
+                regionProtocols |= 1UL;
+            zc.AddUInt64(regionProtocols);
 
             buf.DataLength = zc.Finish();
             m_udpServer.SendUDPPacket(m_udpClient, buf, ThrottleOutPacketType.Unknown);
@@ -4434,20 +4437,37 @@ namespace OpenSim.Region.ClientStack.LindenUDP
                 Buffer.BlockCopy(textureEntry, 0, data, pos, len); pos += len;
             }
 
+            IServerSideBakeModule ssb = m_scene.RequestModuleInterface<IServerSideBakeModule>();
+            byte[] vpToSend = visualParams;
+            int cofVersion = 0;
+            if (ssb != null)
+                ssb.PrepareAppearancePacket(targetID, visualParams, out vpToSend, out cofVersion);
+
             // visual parameters
-            len = visualParams.Length;
+            len = vpToSend.Length;
             data[pos++] = (byte)len;
             if(len > 0)
-                Buffer.BlockCopy(visualParams, 0, data, pos, len); pos += len;
+                Buffer.BlockCopy(vpToSend, 0, data, pos, len); pos += len;
 
-            // no AppearanceData
-            data[pos++] = 0;
+            if (ssb != null)
+            {
+                data[pos++] = 1; // AppearanceData: version 1, CofVersion
+                data[pos++] = 1;
+                Utils.IntToBytesSafepos(cofVersion, data, pos); pos += 4;
+                Utils.UIntToBytesSafepos(0, data, pos); pos += 4;
+            }
+            else
+                data[pos++] = 0; // no AppearanceData
+
             // AppearanceHover vector 3
             data[pos++] = 1;
             //Utils.FloatToBytesSafepos(0, data, pos); pos += 4;
             //Utils.FloatToBytesSafepos(0, data, pos); pos += 4;
             Utils.Int64ZeroToBytes(data, pos); pos += 8;
             Utils.FloatToBytesSafepos(hover, data, pos); pos += 4;
+
+            if (ssb != null)
+                pos = ssb.WriteAppearanceAttachmentBlock(targetID, m_agentId, data, pos);
 
             buf.DataLength = pos;
             m_udpServer.SendUDPPacket(m_udpClient, buf, ThrottleOutPacketType.Task, null, true);
@@ -12215,6 +12235,22 @@ namespace OpenSim.Region.ClientStack.LindenUDP
             ScenePresence p = c.m_scene.GetScenePresence(c.m_agentId);
             if (p is null)
                 return;
+
+            IServerSideBakeModule ssb = c.m_scene.RequestModuleInterface<IServerSideBakeModule>();
+            if (ssb != null)
+            {
+                List<CachedTextureRequestArg> req = new List<CachedTextureRequestArg>(cachedtex.WearableData.Length);
+                for (int i = 0; i < cachedtex.WearableData.Length; i++)
+                {
+                    req.Add(new CachedTextureRequestArg
+                    {
+                        BakedTextureIndex = cachedtex.WearableData[i].TextureIndex,
+                        WearableHashID = cachedtex.WearableData[i].ID
+                    });
+                }
+                if (ssb.HandleCachedTextureRequest(c, cachedtex.AgentData.SerialNum, req))
+                    return;
+            }
 
             WearableCacheItem[] cacheItems = p.Appearance?.WearableCacheItems;
 

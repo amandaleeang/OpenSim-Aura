@@ -180,6 +180,7 @@ namespace OpenSim.Services.LLLoginService
         private string openIDURL;
 
         private string searchURL;
+        private string agentAppearanceService;
 
         // Error Flags
         private string errorReason;
@@ -543,6 +544,9 @@ namespace OpenSim.Services.LLLoginService
                 if (mapTileURL != String.Empty)
                     responseData["map-server-url"] = mapTileURL;
 
+                if (!string.IsNullOrEmpty(agentAppearanceService))
+                    responseData["agent_appearance_service"] = agentAppearanceService;
+
                 if (profileURL != String.Empty)
                     responseData["profile-server-url"] = profileURL;
 
@@ -668,6 +672,9 @@ namespace OpenSim.Services.LLLoginService
 
                 if (mapTileURL != String.Empty)
                     map["map-server-url"] = OSD.FromString(mapTileURL);
+
+                if (!string.IsNullOrEmpty(agentAppearanceService))
+                    map["agent_appearance_service"] = OSD.FromString(agentAppearanceService);
 
                 if (profileURL != String.Empty)
                     map["profile-server-url"] = OSD.FromString(profileURL);
@@ -1051,6 +1058,12 @@ namespace OpenSim.Services.LLLoginService
         {
             get { return mapTileURL; }
             set { mapTileURL = value; }
+        }
+
+        public string AgentAppearanceService
+        {
+            get { return agentAppearanceService; }
+            set { agentAppearanceService = value; }
         }
 
         public string ProfileURL
