@@ -519,6 +519,25 @@ namespace OpenSim.Region.Framework.Scenes
         private string m_newCallbackURI;
 
         /// <summary>
+        /// HTTP root of the region this presence teleported from (trailing
+        /// slash), or null. Derived from the release-callback URL. Cleared
+        /// after ReleaseAgent. Used to GET /appearance bake JPEGs.
+        /// </summary>
+        public string OriginServerURI
+        {
+            get
+            {
+                string cb = m_newCallbackURI ?? m_callbackURI;
+                if (string.IsNullOrEmpty(cb))
+                    return null;
+                int agentIdx = cb.IndexOf("/agent/", StringComparison.OrdinalIgnoreCase);
+                if (agentIdx <= 0)
+                    return null;
+                return cb.Substring(0, agentIdx) + "/";
+            }
+        }
+
+        /// <summary>
         /// Records the region from which this presence originated, if not from login.
         /// </summary>
         /// <remarks>
@@ -2335,7 +2354,8 @@ namespace OpenSim.Region.Framework.Scenes
                     }
 
                     // verify baked textures and cache (including HG login / coming home)
-                    if (m_scene.AvatarFactory != null)
+                    if (m_scene.RequestModuleInterface<IServerSideBakeModule>() == null
+                        && m_scene.AvatarFactory != null)
                     {
                         if (!m_scene.AvatarFactory.ValidateBakedTextureCache(this) && !isHGTP)
                             m_scene.AvatarFactory.QueueAppearanceSave(UUID);
@@ -2387,6 +2407,8 @@ namespace OpenSim.Region.Framework.Scenes
                 // if not cached we send greys
                 // uncomented if will wait till avatar does baking
                 //if (cachedbaked)
+                IServerSideBakeModule ssb = m_scene.RequestModuleInterface<IServerSideBakeModule>();
+                bool sendAppearanceToOthers = ssb == null || ssb.HasCachedBakes(this);
 
                 {
                     foreach (ScenePresence p in allpresences)
@@ -2397,7 +2419,8 @@ namespace OpenSim.Region.Framework.Scenes
                         if (ParcelHideThisAvatar && currentParcelUUID.NotEqual(p.currentParcelUUID) && !p.IsViewerUIGod)
                             continue;
 
-                        SendAppearanceToAgentNF(p);
+                        if (sendAppearanceToOthers)
+                            SendAppearanceToAgentNF(p);
                         if (haveAnims)
                             SendAnimPackToAgentNF(p, animIDs, animseqs, animsobjs);
                     }
@@ -4941,6 +4964,9 @@ namespace OpenSim.Region.Framework.Scenes
             cAgent.MotionState = (byte)Animator.currentControlState;
 
             Scene.AttachmentsModule?.CopyAttachments(this, cAgent);
+
+            m_scene.RequestModuleInterface<IServerSideBakeModule>()
+                ?.PrepareAppearanceForTransfer(this, cAgent.Appearance);
 
             if(isCrossUpdate)
             {

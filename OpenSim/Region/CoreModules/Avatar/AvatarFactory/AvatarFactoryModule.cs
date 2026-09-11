@@ -458,17 +458,23 @@ namespace OpenSim.Region.CoreModules.Avatar.AvatarFactory
             // throttle rebake requests
             if (missing.Count > 0)
             {
-                string spuuidstr = sp.UUID.ToString();
-                foreach (UUID id in missing)
+                IServerSideBakeModule ssb = m_scene.RequestModuleInterface<IServerSideBakeModule>();
+                if (ssb != null)
+                    ssb.TryBake(sp, true);
+                else
                 {
-                    string key = spuuidstr + id.ToString();
+                    string spuuidstr = sp.UUID.ToString();
+                    foreach (UUID id in missing)
+                    {
+                        string key = spuuidstr + id.ToString();
 
-                    if(m_rebakeThrottle.AddOrUpdate(key, 1000 * REBAKE_THROTTLE_SECONDS))
-                        continue;
+                        if(m_rebakeThrottle.AddOrUpdate(key, 1000 * REBAKE_THROTTLE_SECONDS))
+                            continue;
 
-                    m_log.Debug($"[AVFACTORY]: Missing baked texture {id} for {sp.Name}, requesting rebake");
+                        m_log.Debug($"[AVFACTORY]: Missing baked texture {id} for {sp.Name}, requesting rebake");
 
-                    sp.ControllingClient.SendRebakeAvatarTextures(id);
+                        sp.ControllingClient.SendRebakeAvatarTextures(id);
+                    }
                 }
             }
 
@@ -696,6 +702,13 @@ namespace OpenSim.Region.CoreModules.Avatar.AvatarFactory
         {
             if (((ScenePresence)sp).IsNPC)
                 return 0;
+
+            IServerSideBakeModule ssb = m_scene.RequestModuleInterface<IServerSideBakeModule>();
+            if (ssb != null)
+            {
+                ssb.TryBake(sp, true);
+                return 1;
+            }
 
             int texturesRebaked = 0;
             IAssetCache cache = m_scene.RequestModuleInterface<IAssetCache>();
