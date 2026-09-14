@@ -26,6 +26,7 @@
  */
 
 using System;
+using System.Collections.Concurrent;
 using System.Drawing;
 using System.IO;
 using OpenMetaverse;
@@ -47,6 +48,9 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
     /// </summary>
     public static class TextureBaker
     {
+        private static readonly ConcurrentDictionary<string, ManagedImage> s_library =
+            new ConcurrentDictionary<string, ManagedImage>(StringComparer.OrdinalIgnoreCase);
+
         public static bool TryDecode(byte[] j2k, out ManagedImage image)
         {
             image = null;
@@ -91,15 +95,10 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
             dest.Blue = new byte[pixels];
             dest.Alpha = new byte[pixels];
 
+            // Firestorm / avatar_lad.xml: skin_color fill, multiply grain,
+            // then alpha-blend library colour (lips, nipples, …). Grain after
+            // colour would darken those overlays.
             Fill(dest, fill, opaqueBody);
-
-            if (libraryColor != null)
-            {
-                ManagedImage color = libraryColor;
-                if (color.Width != width || color.Height != height)
-                    color = ScaleBilinear(color, width, height);
-                BlendOver(dest, color);
-            }
 
             if (libraryGrain != null)
             {
@@ -107,6 +106,14 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
                 if (grain.Width != width || grain.Height != height)
                     grain = ScaleBilinear(grain, width, height);
                 MultiplyByMask(dest, grain);
+            }
+
+            if (libraryColor != null)
+            {
+                ManagedImage color = libraryColor;
+                if (color.Width != width || color.Height != height)
+                    color = ScaleBilinear(color, width, height);
+                BlendOver(dest, color);
             }
 
             if (layers == null)
@@ -144,16 +151,23 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
             if (string.IsNullOrEmpty(fileName))
                 return null;
 
+            if (s_library.TryGetValue(fileName, out ManagedImage cached))
+                return cached;
+
             EnsureResourceDir();
 
+            ManagedImage img = null;
             try
             {
-                ManagedImage img = Baker.LoadResourceLayer(fileName);
-                if (img != null)
-                    return img;
+                img = Baker.LoadResourceLayer(fileName);
             }
             catch
             {
+            }
+            if (img != null)
+            {
+                s_library[fileName] = img;
+                return img;
             }
 
             string dir = Settings.RESOURCE_DIR;
@@ -175,7 +189,9 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
                         return null;
                     try
                     {
-                        return new ManagedImage(bmp);
+                        img = new ManagedImage(bmp);
+                        s_library[fileName] = img;
+                        return img;
                     }
                     finally
                     {
