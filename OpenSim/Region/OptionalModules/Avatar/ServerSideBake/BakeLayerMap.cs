@@ -211,6 +211,18 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
         }
 
         /// <summary>
+        /// Head / upper / lower always get a Firestorm library base (skin
+        /// colour × grain, then the colour TGA). Default bodypaint UUID means
+        /// "use that base", not "skip the head".
+        /// </summary>
+        public static bool HasLibrarySkinBase(BakeType bakeType)
+        {
+            return bakeType == BakeType.Head
+                || bakeType == BakeType.UpperBody
+                || bakeType == BakeType.LowerBody;
+        }
+
+        /// <summary>
         /// Slots that include this wearable texture index in their source list.
         /// Hair grain is Hair bake only (not Head).
         /// </summary>

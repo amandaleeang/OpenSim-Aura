@@ -44,15 +44,14 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
     {
         public static UUID FromLayers(int faceIndex, IList<ResolvedLayer> layers, Color4 fill)
         {
-            if (layers == null || layers.Count == 0)
-                return UUID.Zero;
-
-            StringBuilder sb = new StringBuilder(80 + layers.Count * 90);
-            sb.Append("ssb-v1|");
+            // Empty layers is still a bake: Firestorm library head/body + skin tint.
+            int n = layers == null ? 0 : layers.Count;
+            StringBuilder sb = new StringBuilder(80 + n * 90);
+            sb.Append("ssb-v2|");
             sb.Append(faceIndex);
             sb.Append("|fill=");
             AppendTint(sb, fill);
-            for (int i = 0; i < layers.Count; i++)
+            for (int i = 0; i < n; i++)
             {
                 ResolvedLayer layer = layers[i];
                 if (BakeLayerMap.IsUnsetTexture(layer.TextureID))

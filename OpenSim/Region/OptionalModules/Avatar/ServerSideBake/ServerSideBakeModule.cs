@@ -1456,6 +1456,19 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
             if (token.IsCancellationRequested)
                 return false;
 
+            // Firestorm stacks tattoos in Current Outfit. AgentIsNowWearing
+            // is one item per type. HG visitors have no local COF, so a
+            // force-rebake would drop the head skin Firestorm already baked.
+            bool forceNow = force;
+            bool prefer = preferIncoming;
+            if (forceNow && !resolver.UsedCof && !string.IsNullOrEmpty(foreign))
+            {
+                m_log.InfoFormat("[SSBAKE]: {0} has no Current Outfit; keeping incoming Firestorm bakes instead of recompositing a one-per-type appearance list",
+                    sp.Name);
+                forceNow = false;
+                prefer = true;
+            }
+
             WearableCacheItem[] wearableCache = sp.Appearance.WearableCacheItems;
             if (wearableCache == null)
                 wearableCache = WearableCacheItem.GetDefaultCacheItem();
@@ -1481,10 +1494,17 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
                     return false;
                 }
 
-                if (!resolved.TryGetValue(slot.BakeType, out List<ResolvedLayer> layers) || layers.Count == 0)
+                if (!resolved.TryGetValue(slot.BakeType, out List<ResolvedLayer> layers)
+                    || layers == null || layers.Count == 0)
                 {
-                    m_log.DebugFormat("[SSBAKE]: {0}: no source layers, leaving default", slot.BakeType);
-                    continue;
+                    if (!BakeLayerMap.HasLibrarySkinBase(slot.BakeType) || !resolver.HasSkin)
+                    {
+                        m_log.DebugFormat("[SSBAKE]: {0}: no source layers, leaving default", slot.BakeType);
+                        continue;
+                    }
+                    layers = new List<ResolvedLayer>();
+                    m_log.InfoFormat("[SSBAKE]: {0}: no wearable textures, baking library base + skin tint",
+                        slot.BakeType);
                 }
 
                 UUID bakeId = BakeId.FromLayers((int)slot.FaceIndex, layers, FillTintFor(slot.BakeType, resolver));
@@ -1493,12 +1513,12 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
 
                 AssetBase baked = null;
                 UUID reuseId = bakeId;
-                if (!force)
+                if (!forceNow)
                 {
                     // Arrival only: keep a bake UUID we just pulled from the
                     // previous region. Outfit change must use the wearable hash
                     // or we would republish the old clothes.
-                    if (preferIncoming)
+                    if (prefer)
                     {
                         Primitive.TextureEntryFace incomingFace =
                             sp.Appearance.Texture.FaceTextures[(int)slot.FaceIndex];
@@ -1566,7 +1586,7 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
                         images[i].ApplyTint ? " tint=" + DescribeTint(layer.Tint) : "");
                 }
 
-                if (decoded == 0)
+                if (decoded == 0 && !(BakeLayerMap.HasLibrarySkinBase(slot.BakeType) && resolver.HasSkin))
                 {
                     m_log.WarnFormat("[SSBAKE]: {0}: no layers decoded, skip", slot.BakeType);
                     continue;
@@ -1609,7 +1629,7 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
                 // Hash stays the XBakes identity. On a forced rebake mint a
                 // new TextureID so the viewer actually GET /appearance again
                 // (same hash UUID is already in its texture cache).
-                UUID fetchId = force ? UUID.Random() : bakeId;
+                UUID fetchId = forceNow ? UUID.Random() : bakeId;
                 baked = CacheBakeAsset(cache, fetchId, sp.UUID, "SSBake " + slot.BakeType, j2k);
                 if (fetchId.NotEqual(bakeId))
                     CacheBakeAsset(cache, bakeId, sp.UUID, "SSBake " + slot.BakeType, j2k);
@@ -1874,10 +1894,12 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
                 case BakeType.UpperBody:
                     opaqueBody = true;
                     libraryColor = TextureBaker.TryLoadResource("upperbody_color.tga");
+                    libraryGrain = TextureBaker.TryLoadResource("body_skingrain.tga");
                     break;
                 case BakeType.LowerBody:
                     opaqueBody = true;
                     libraryColor = TextureBaker.TryLoadResource("lowerbody_color.tga");
+                    libraryGrain = TextureBaker.TryLoadResource("body_skingrain.tga");
                     break;
                 case BakeType.Eyes:
                     opaqueBody = true;
