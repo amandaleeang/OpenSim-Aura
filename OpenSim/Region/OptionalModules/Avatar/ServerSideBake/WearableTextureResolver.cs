@@ -58,6 +58,10 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
         public Color4 SkinTint { get; private set; } = Color4.White;
         public Color4 HairTint { get; private set; } = Color4.White;
         public Color4 EyesTint { get; private set; } = Color4.White;
+        /// <summary>True when layers came from Current Outfit (Firestorm stack).</summary>
+        public bool UsedCof { get; private set; }
+        /// <summary>True when a Skin wearable was decoded.</summary>
+        public bool HasSkin { get; private set; }
 
         public WearableTextureResolver(ILog log, BakeAssetFetcher fetcher,
             IInventoryService inventory, UUID owner)
@@ -83,7 +87,8 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
 
             List<WornItem> worn = CollectFromCof();
             int appearanceCount = CountAppearance(appearance);
-            if (worn.Count > 0)
+            UsedCof = worn.Count > 0;
+            if (UsedCof)
             {
                 m_log.InfoFormat("[SSBAKE]: Current Outfit {0} wearable(s) (appearance list {1})",
                     worn.Count, appearanceCount);
@@ -118,24 +123,45 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
             {
                 cof = m_inventory.GetFolderForType(m_owner, FolderType.CurrentOutfit);
             }
-            catch
+            catch (Exception e)
             {
+                m_log.DebugFormat("[SSBAKE]: Current Outfit folder lookup failed: {0}", e.Message);
                 return result;
             }
             if (cof == null || cof.ID.IsZero())
+            {
+                m_log.Debug("[SSBAKE]: no Current Outfit folder for this agent");
                 return result;
+            }
 
             List<InventoryItemBase> items;
             try
             {
                 items = m_inventory.GetFolderItems(m_owner, cof.ID);
             }
-            catch
+            catch (Exception e)
             {
-                return result;
+                m_log.DebugFormat("[SSBAKE]: Current Outfit GetFolderItems failed: {0}", e.Message);
+                items = null;
             }
             if (items == null || items.Count == 0)
+            {
+                try
+                {
+                    InventoryCollection content = m_inventory.GetFolderContent(m_owner, cof.ID);
+                    if (content != null && content.Items != null && content.Items.Count > 0)
+                        items = content.Items;
+                }
+                catch (Exception e)
+                {
+                    m_log.DebugFormat("[SSBAKE]: Current Outfit GetFolderContent failed: {0}", e.Message);
+                }
+            }
+            if (items == null || items.Count == 0)
+            {
+                m_log.DebugFormat("[SSBAKE]: Current Outfit folder {0} has no items", cof.ID);
                 return result;
+            }
 
             items.Sort((a, b) => a.CreationDate.CompareTo(b.CreationDate));
 
@@ -247,7 +273,10 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
 
             Color4 tint = TintFromWearable(decoded, item.Type);
             if (item.Type == WearableType.Skin)
+            {
                 SkinTint = tint;
+                HasSkin = true;
+            }
             else if (item.Type == WearableType.Hair)
                 HairTint = tint;
             else if (item.Type == WearableType.Eyes)
@@ -261,7 +290,13 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
                 if (BakeLayerMap.IsBakeFace(kvp.Key))
                     continue;
                 if (BakeLayerMap.IsUnsetTexture(kvp.Value))
+                {
+                    // Firestorm: default bodypaint is the library TGA × skin
+                    // tint, not a missing layer. Do not fetch c228d1cf-….
+                    if (BakeLayerMap.IsBodypaint(kvp.Key))
+                        m_log.DebugFormat("[SSBAKE]:   {0} default (library base + skin tint)", kvp.Key);
                     continue;
+                }
 
                 List<BakeSlot> slots = BakeLayerMap.SlotsForSource(kvp.Key);
                 if (slots.Count == 0)
