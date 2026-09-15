@@ -45,16 +45,39 @@ namespace OpenSim.Groups
 
         private IOfflineIMService m_OfflineIM;
         private IUserAccountService m_UserAccounts;
+        private IUserAgentService m_UserAgent;
         private string m_HomeURI;
 
         public HGGroupsService(IConfigSource config, IOfflineIMService im, IUserAccountService users, string homeURI)
+            : this(config, im, users, homeURI, null)
+        {
+        }
+
+        public HGGroupsService(IConfigSource config, IOfflineIMService im, IUserAccountService users, string homeURI, IUserAgentService userAgent)
             : base(config, string.Empty)
         {
             m_OfflineIM = im;
             m_UserAccounts = users;
+            m_UserAgent = userAgent;
             m_HomeURI = homeURI;
             if (!m_HomeURI.EndsWith("/"))
                 m_HomeURI += "/";
+        }
+
+        /// <summary>
+        /// Empty or loopback Locations cannot be used as a foreign groups URI.
+        /// </summary>
+        internal static bool IsUnusableGroupLocation(string location)
+        {
+            if (string.IsNullOrWhiteSpace(location))
+                return true;
+            if (!Uri.TryCreate(location, UriKind.Absolute, out Uri uri) || string.IsNullOrEmpty(uri.Host))
+                return true;
+
+            string host = uri.Host;
+            return host.Equals("localhost", StringComparison.OrdinalIgnoreCase)
+                || host == "127.0.0.1" || host == "::1" || host == "0.0.0.0"
+                || host.EndsWith(".localhost", StringComparison.OrdinalIgnoreCase);
         }
 
 
@@ -63,6 +86,19 @@ namespace OpenSim.Groups
         public bool CreateGroupProxy(string RequestingAgentID, string agentID,  string accessToken, UUID groupID, string serviceLocation, string name, out string reason)
         {
             reason = string.Empty;
+
+            if (IsUnusableGroupLocation(serviceLocation))
+            {
+                string abroad = LocateAgentGrid(agentID, RequestingAgentID);
+                if (!IsUnusableGroupLocation(abroad))
+                {
+                    m_log.InfoFormat(
+                        "[Groups.HGGroupsService]: Group Location '{0}' is empty or loopback; using traveler grid {1}",
+                        serviceLocation, abroad);
+                    serviceLocation = abroad;
+                }
+            }
+
             Uri uri = null;
             try
             {
@@ -339,6 +375,34 @@ namespace OpenSim.Groups
             UserAccount account = m_UserAccounts.GetUserAccount(UUID.Zero, grec.FounderID);
             if (account != null)
                 grec.FounderUUI = Util.UniversalIdentifier(account.PrincipalID, account.FirstName, account.LastName, m_HomeURI);
+        }
+
+        private string LocateAgentGrid(string agentID, string requestingAgentID)
+        {
+            if (m_UserAgent == null)
+                return string.Empty;
+
+            UUID uid = UUID.Zero;
+            if (!UUID.TryParse(agentID, out uid) || uid.IsZero())
+                Util.ParseUniversalUserIdentifier(requestingAgentID, out uid, out _, out _, out _, out _);
+
+            if (uid.IsZero())
+                return string.Empty;
+
+            try
+            {
+                string grid = m_UserAgent.LocateUser(uid);
+                if (string.IsNullOrWhiteSpace(grid))
+                    return string.Empty;
+                if (!grid.EndsWith("/"))
+                    grid += "/";
+                return grid;
+            }
+            catch (Exception e)
+            {
+                m_log.DebugFormat("[Groups.HGGroupsService]: LocateUser failed for {0}: {1}", uid, e.Message);
+                return string.Empty;
+            }
         }
 
         private bool VerifyToken(UUID groupID, string agentID, string token)
