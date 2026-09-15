@@ -1142,6 +1142,11 @@
     ;; Leave it commented for standalones, V2
     ; GroupsServerURI = ""
 
+    ;# {GroupsExternalURI} {ServicesConnectorModule:Groups HG Service Connector} {Public URL of this world's groups service} {}
+    ;; Sent to other grids as the Location of groups created here.
+    ;; Default is this grid's HomeURI (HG groups are on that Robust). Do not use 127.0.0.1.
+    ; GroupsExternalURI = ""
+
     ;# {HomeURI} {ServicesConnectorModule:Groups HG Service Connector} {What's the home address of this world?} {}
     ;; http://mygridserver.com:9000 or http://mygridserver.com:8002
     ;; If you have this set in [Hypergrid] section of GridCommon.ini or StandaloneCommon.ini files in config-include folder, leave it commented

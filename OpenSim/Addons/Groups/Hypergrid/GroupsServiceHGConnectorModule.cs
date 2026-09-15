@@ -81,7 +81,22 @@ namespace OpenSim.Groups
 
             m_Config = config;
             m_ServiceLocation = groupsConfig.GetString("LocalService", "local"); // local or remote
-            m_LocalGroupsServiceLocation = groupsConfig.GetString("GroupsExternalURI", "http://127.0.0.1");
+            // Never advertise 127.0.0.1. Default is this grid's HomeURI (HG groups on that Robust).
+            m_LocalGroupsServiceLocation = groupsConfig.GetString("GroupsExternalURI", string.Empty);
+            if (HGGroupsService.IsUnusableGroupLocation(m_LocalGroupsServiceLocation))
+            {
+                m_LocalGroupsServiceLocation = Util.GetConfigVarFromSections<string>(
+                    config, "HomeURI", new string[] { "Startup", "Hypergrid", "Groups" }, string.Empty);
+            }
+            if (HGGroupsService.IsUnusableGroupLocation(m_LocalGroupsServiceLocation))
+            {
+                m_LocalGroupsServiceLocation = Util.GetConfigVarFromSections<string>(
+                    config, "GatekeeperURI", new string[] { "Startup", "Hypergrid", "GatekeeperService" }, string.Empty);
+            }
+            if (HGGroupsService.IsUnusableGroupLocation(m_LocalGroupsServiceLocation))
+                m_log.Warn("[Groups]: No public groups Location (set GroupsExternalURI or HomeURI); foreign grids will get a bad group address");
+            else
+                m_log.InfoFormat("[Groups]: Advertising groups Location as {0}", m_LocalGroupsServiceLocation);
             m_Scenes = new List<Scene>();
 
             m_Enabled = true;
