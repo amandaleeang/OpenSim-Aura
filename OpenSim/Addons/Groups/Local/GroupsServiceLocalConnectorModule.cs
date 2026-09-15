@@ -34,6 +34,7 @@ using System.Text;
 using OpenSim.Framework;
 using OpenSim.Region.Framework.Scenes;
 using OpenSim.Region.Framework.Interfaces;
+using OpenSim.Server.Base;
 using OpenSim.Services.Interfaces;
 
 using OpenMetaverse;
@@ -49,7 +50,7 @@ namespace OpenSim.Groups
         private static readonly ILog m_log = LogManager.GetLogger(MethodBase.GetCurrentMethod().DeclaringType);
 
         private bool m_Enabled = false;
-        private GroupsService m_GroupsService;
+        private IGroupsService m_GroupsService;
         private IUserManagement m_UserManagement;
         private List<Scene> m_Scenes;
         private ForeignImporter m_ForeignImporter;
@@ -61,16 +62,36 @@ namespace OpenSim.Groups
 
         public GroupsServiceLocalConnectorModule(IConfigSource config, IUserManagement uman)
         {
-            Init(config);
+            if (!Init(config))
+                throw new Exception("[Groups]: LocalServiceModule must be set to run a local groups service");
+
             m_UserManagement = uman;
             m_ForeignImporter = new ForeignImporter(uman);
         }
         #endregion
 
-        private void Init(IConfigSource config)
+        private bool Init(IConfigSource config)
         {
-            m_GroupsService = new GroupsService(config);
+            IConfig groupsConfig = config.Configs["Groups"];
+            string service = groupsConfig != null
+                ? groupsConfig.GetString("LocalServiceModule", string.Empty)
+                : string.Empty;
+
+            if (string.IsNullOrEmpty(service))
+            {
+                m_log.Info("[Groups]: LocalServiceModule is not set; groups service is off");
+                return false;
+            }
+
+            m_GroupsService = ServerUtils.LoadPlugin<IGroupsService>(service, new object[] { config });
+            if (m_GroupsService == null)
+            {
+                m_log.ErrorFormat("[Groups]: Could not load Groups LocalServiceModule '{0}'", service);
+                return false;
+            }
+
             m_Scenes = new List<Scene>();
+            return true;
         }
 
         #region ISharedRegionModule
@@ -87,7 +108,9 @@ namespace OpenSim.Groups
                 return;
             }
 
-            Init(config);
+            if (!Init(config))
+                return;
+
             m_Enabled = true;
 
             m_log.DebugFormat("[Groups]: Initializing {0}", this.Name);

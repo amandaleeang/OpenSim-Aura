@@ -855,7 +855,14 @@
     ;MaxOfflineIMs = 25;
 
 
+; * This is the groups service (same LocalServiceModule pattern as UserAccountService).
+; * Uncomment GroupsServiceConnector above to enable.
+; * If LocalServiceModule is empty, groups stay off.
+; *
 [Groups]
+    ; for the server connector
+    LocalServiceModule = "OpenSim.Addons.Groups.dll:GroupsService"
+
     ;; for the HG Groups service
     OfflineIMService = "OpenSim.Addons.OfflineIM.dll:OfflineIMService"
     UserAccountService = "OpenSim.Services.UserAccountService.dll:UserAccountService"

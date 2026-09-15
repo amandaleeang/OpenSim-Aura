@@ -47,7 +47,7 @@ namespace OpenSim.Groups
     {
         private static readonly ILog m_log = LogManager.GetLogger(MethodBase.GetCurrentMethod().DeclaringType);
 
-        private GroupsService m_GroupsService;
+        private IGroupsService m_GroupsService;
         private string m_ConfigName = "Groups";
 
         public GroupsServiceRobustConnector(IConfigSource config, IHttpServer server, string configName) :
@@ -68,7 +68,19 @@ namespace OpenSim.Groups
 //            else
 //                m_log.DebugFormat("[Groups.RobustConnector]: Unable to find {0} section in configuration", m_ConfigName);
 
-            m_GroupsService = new GroupsService(config);
+            string service = groupsConfig != null
+                ? groupsConfig.GetString("LocalServiceModule", string.Empty)
+                : string.Empty;
+
+            if (string.IsNullOrEmpty(service))
+            {
+                m_log.Info("[Groups.RobustConnector]: LocalServiceModule is not set; groups service is off");
+                return;
+            }
+
+            m_GroupsService = ServerUtils.LoadPlugin<IGroupsService>(service, new object[] { config });
+            if (m_GroupsService == null)
+                throw new Exception($"Could not load Groups LocalServiceModule '{service}'");
 
             IServiceAuth auth = ServiceAuth.Create(config, m_ConfigName);
 
@@ -80,9 +92,9 @@ namespace OpenSim.Groups
     {
         private static readonly ILog m_log = LogManager.GetLogger(MethodBase.GetCurrentMethod().DeclaringType);
 
-        private GroupsService m_GroupsService;
+        private IGroupsService m_GroupsService;
 
-        public GroupsServicePostHandler(GroupsService service, IServiceAuth auth) :
+        public GroupsServicePostHandler(IGroupsService service, IServiceAuth auth) :
             base("POST", "/groups", auth)
         {
             m_GroupsService = service;
