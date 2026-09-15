@@ -1118,6 +1118,10 @@
     ;; Only set this if Groups should use a different provider than DatabaseService.
     ; StorageProvider = OpenSim.Data.MySQL.dll
 
+    ;# {LocalServiceModule} {Module:Groups Module V2} {In-process groups service, same pattern as UserAccountService} {}
+    ;; for the local groups service (standalone V2). Empty means groups stay off.
+    ; LocalServiceModule = "OpenSim.Addons.Groups.dll:GroupsService"
+
     ;# {ServicesConnectorModule} {Module:GroupsModule Module:Groups Module V2} {Service connector to use for groups} {XmlRpcGroupsServicesConnector "Groups Local Service Connector" "Groups Remote Service Connector" "Groups HG Service Connector"} XmlRpcGroupsServicesConnector
     ;; Service connectors to the Groups Service as used in the GroupsModule.  Select one as follows:
     ;; -- for Flotsam Groups use XmlRpcGroupsServicesConnector
