@@ -617,7 +617,14 @@
     ;MaxOfflineIMs = 25;
 
 
+; * This is the groups service (same LocalServiceModule pattern as UserAccountService).
+; * Uncomment GroupsServiceConnector above to enable.
+; * If LocalServiceModule is empty, groups stay off.
+; *
 [Groups]
+    ; for the server connector
+    LocalServiceModule = "OpenSim.Addons.Groups.dll:GroupsService"
+
     ;; Sets the maximum number of groups an agent may join
     ; MaxAgentGroups = 42
 

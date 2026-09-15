@@ -39,7 +39,7 @@ using OpenSim.Services.Interfaces;
 
 namespace OpenSim.Groups
 {
-    public class GroupsService : GroupsServiceBase
+    public class GroupsService : GroupsServiceBase, IGroupsService
     {
         private static readonly ILog m_log = LogManager.GetLogger(MethodBase.GetCurrentMethod().DeclaringType);
 
