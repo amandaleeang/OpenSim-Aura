@@ -93,7 +93,8 @@ namespace OpenSim.Groups
                 users = ServerUtils.LoadPlugin<IUserAccountService>(usersDll, args);
             }
 
-            m_GroupsService = new HGGroupsService(config, im, users, homeURI);
+            IUserAgentService userAgent = new OpenSim.Services.Connectors.Hypergrid.UserAgentServiceConnector(homeURI);
+            m_GroupsService = new HGGroupsService(config, im, users, homeURI, userAgent);
 
             server.AddStreamHandler(new HGGroupsServicePostHandler(m_GroupsService));
         }
