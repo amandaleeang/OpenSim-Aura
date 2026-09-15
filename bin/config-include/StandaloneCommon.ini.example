@@ -358,9 +358,8 @@
     ; AllowExcept_Level_200 = "http://griefer.com:8002, http://enemy.com:8002"
 
     ;; This variable controls what is exposed to profiles of local users
-    ;; as seen from outside of this grid. Leave it uncommented for exposing
-    ;; UserTitle, UserFlags and the creation date. Uncomment and change to False
-    ;; to block this info from being exposed.
+    ;; as seen from outside of this grid (UserTitle, UserFlags, creation date).
+    ;; Default is True if unset. Set to False to hide those extra fields.
     ; ShowUserDetailsInHGProfile = True
 
 

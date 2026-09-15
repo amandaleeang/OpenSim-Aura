@@ -74,7 +74,7 @@ namespace OpenSim.Services.HypergridService
         protected static string m_MyExternalIP = "";
 
         protected static int m_LevelOutsideContacts;
-        protected static bool m_ShowDetails;
+        protected static bool m_ShowDetails = true;
 
         protected static bool m_BypassClientVerification;
 
@@ -610,7 +610,7 @@ namespace OpenSim.Services.HypergridService
             return online;
         }
 
-        public Dictionary<string, object> GetUserInfo(UUID  userID)
+        public Dictionary<string, object> GetUserInfo(UUID userID)
         {
             Dictionary<string, object> info = [];
 
