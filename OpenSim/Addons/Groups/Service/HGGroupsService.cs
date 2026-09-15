@@ -39,6 +39,17 @@ using OpenSim.Services.Interfaces;
 
 namespace OpenSim.Groups
 {
+    /// <summary>
+    /// How this grid answers GETGROUP from other grids (HG /hg-groups).
+    /// Local /groups is unchanged.
+    /// </summary>
+    internal enum GroupProfileHGAccess
+    {
+        Open,
+        Closed,
+        Token
+    }
+
     public class HGGroupsService : GroupsService
     {
         private static readonly ILog m_log = LogManager.GetLogger(MethodBase.GetCurrentMethod().DeclaringType);
@@ -47,6 +58,7 @@ namespace OpenSim.Groups
         private IUserAccountService m_UserAccounts;
         private IUserAgentService m_UserAgent;
         private string m_HomeURI;
+        private GroupProfileHGAccess m_GroupProfileHGAccess = GroupProfileHGAccess.Open;
 
         public HGGroupsService(IConfigSource config, IOfflineIMService im, IUserAccountService users, string homeURI)
             : this(config, im, users, homeURI, null)
@@ -62,6 +74,36 @@ namespace OpenSim.Groups
             m_HomeURI = homeURI;
             if (!m_HomeURI.EndsWith("/"))
                 m_HomeURI += "/";
+
+            IConfig groupsConfig = config.Configs["Groups"];
+            string access = groupsConfig != null
+                ? groupsConfig.GetString("GroupProfileHGAccess", "open")
+                : "open";
+            m_GroupProfileHGAccess = ParseGroupProfileHGAccess(access);
+            m_log.InfoFormat(
+                "[Groups.HGGroupsService]: GroupProfileHGAccess is {0}",
+                m_GroupProfileHGAccess.ToString().ToLowerInvariant());
+        }
+
+        internal static GroupProfileHGAccess ParseGroupProfileHGAccess(string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return GroupProfileHGAccess.Open;
+
+            switch (value.Trim().ToLowerInvariant())
+            {
+                case "open":
+                    return GroupProfileHGAccess.Open;
+                case "closed":
+                    return GroupProfileHGAccess.Closed;
+                case "token":
+                    return GroupProfileHGAccess.Token;
+                default:
+                    m_log.WarnFormat(
+                        "[Groups.HGGroupsService]: Unknown GroupProfileHGAccess '{0}', using open",
+                        value);
+                    return GroupProfileHGAccess.Open;
+            }
         }
 
         /// <summary>
@@ -192,8 +234,16 @@ namespace OpenSim.Groups
 
         public ExtendedGroupRecord GetGroupRecord(string RequestingAgentID, UUID GroupID, string groupName, string token)
         {
-            // check the token
-            if (!VerifyToken(GroupID, RequestingAgentID, token))
+            if (m_GroupProfileHGAccess == GroupProfileHGAccess.Closed)
+            {
+                m_log.DebugFormat(
+                    "[Groups.HGGroupsService]: GETGROUP refused (GroupProfileHGAccess=closed) for {0}",
+                    GroupID.IsZero() ? groupName : GroupID.ToString());
+                return null;
+            }
+
+            if (m_GroupProfileHGAccess == GroupProfileHGAccess.Token
+                    && !VerifyToken(GroupID, RequestingAgentID, token))
                 return null;
 
             ExtendedGroupRecord grec;
@@ -202,9 +252,16 @@ namespace OpenSim.Groups
             else
                 grec = GetGroupRecord(RequestingAgentID, GroupID);
 
-            if (grec != null)
-                FillFounderUUI(grec);
+            if (grec == null)
+                return null;
 
+            // Open still does not publish proxy rows (foreign groups stored here) without a token.
+            if (m_GroupProfileHGAccess == GroupProfileHGAccess.Open
+                    && !string.IsNullOrEmpty(grec.ServiceLocation)
+                    && !VerifyToken(GroupID, RequestingAgentID, token))
+                return null;
+
+            FillFounderUUI(grec);
             return grec;
         }
 

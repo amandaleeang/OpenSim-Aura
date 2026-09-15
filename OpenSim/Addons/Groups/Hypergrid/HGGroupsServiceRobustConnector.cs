@@ -224,12 +224,16 @@ namespace OpenSim.Groups
         {
             Dictionary<string, object> result = new Dictionary<string, object>();
 
-            if (!request.ContainsKey("RequestingAgentID") || !request.ContainsKey("AccessToken"))
+            if (!request.ContainsKey("GroupID") && !request.ContainsKey("Name"))
                 NullResult(result, "Bad network data");
             else
             {
-                string RequestingAgentID = request["RequestingAgentID"].ToString();
-                string token = request["AccessToken"].ToString();
+                string RequestingAgentID = request.ContainsKey("RequestingAgentID")
+                    ? request["RequestingAgentID"].ToString()
+                    : UUID.Zero.ToString();
+                string token = request.ContainsKey("AccessToken")
+                    ? request["AccessToken"].ToString()
+                    : string.Empty;
 
                 UUID groupID = UUID.Zero;
                 string groupName = string.Empty;

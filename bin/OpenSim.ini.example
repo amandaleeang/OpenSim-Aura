@@ -1147,6 +1147,15 @@
     ;; Default is this grid's HomeURI (HG groups are on that Robust). Do not use 127.0.0.1.
     ; GroupsExternalURI = ""
 
+    ;# {GroupProfileHGAccess} {ServicesConnectorModule:Groups HG Service Connector} {How this grid answers group profile requests from other grids} {open closed token} open
+    ;; Applies to HG GETGROUP (/hg-groups) only. Local /groups is unchanged.
+    ;; Join, members, roles, and notices still need a membership token.
+    ;; open   = reply without a membership token (needed for UUID lookup from other grids)
+    ;; closed = do not reply
+    ;; token  = membership AccessToken required (previous HG behaviour)
+    ;; Default is open if unset.
+    ; GroupProfileHGAccess = open
+
     ;# {HomeURI} {ServicesConnectorModule:Groups HG Service Connector} {What's the home address of this world?} {}
     ;; http://mygridserver.com:9000 or http://mygridserver.com:8002
     ;; If you have this set in [Hypergrid] section of GridCommon.ini or StandaloneCommon.ini files in config-include folder, leave it commented
