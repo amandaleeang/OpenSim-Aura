@@ -1121,6 +1121,9 @@
     ;# {LocalServiceModule} {Module:Groups Module V2} {In-process groups service, same pattern as UserAccountService} {}
     ;; for the local groups service (standalone V2). Empty means groups stay off.
     ; LocalServiceModule = "OpenSim.Addons.Groups.dll:GroupsService"
+    ;; Hypergrid only. Intra-grid: a SQL miss means the group is not local.
+    ;; See StandaloneHypergrid.ini / Robust.HG.ini.example.
+    ; LocalServiceModule = "OpenSim.Addons.UUIDDHT.dll:UuidDhtGroupsService"
 
     ;# {ServicesConnectorModule} {Module:GroupsModule Module:Groups Module V2} {Service connector to use for groups} {XmlRpcGroupsServicesConnector "Groups Local Service Connector" "Groups Remote Service Connector" "Groups HG Service Connector"} XmlRpcGroupsServicesConnector
     ;; Service connectors to the Groups Service as used in the GroupsModule.  Select one as follows:
@@ -1261,6 +1264,11 @@
   ;; set this to false to prevent your users to be sent to unknown
   ;; web sites by other users on their profiles
   ; AllowUserProfileWebURLs = true
+
+[UuidDht]
+    ;; Optional. DHT is on when StandaloneHypergrid.ini / Robust.HG loads the
+    ;; UuidDht* modules. Plain standalone / intra-grid do not load them.
+    ;; Known seeds: config-include/dht-seeds. See OpenSimDefaults.ini.
 
 [XBakes]
   ;# {URL} {} {Set URL for Baked texture service} {}
