@@ -149,6 +149,8 @@
     GatekeeperServiceInConnector = "${Const|PublicPort}/OpenSim.Server.Handlers.dll:GatekeeperServiceInConnector"
     UserAgentServerConnector = "${Const|PublicPort}/OpenSim.Server.Handlers.dll:UserAgentServerConnector"
     HeloServiceInConnector = "${Const|PublicPort}/OpenSim.Server.Handlers.dll:HeloServiceInConnector"
+    ;; UUID DHT on the public port (8002). Other grids reach /dht/node /dht/owns /dht/rpc here.
+    UuidDhtServiceConnector = "${Const|PublicPort}/OpenSim.Addons.UUIDDHT.dll:UuidDhtServiceConnector"
     HGFriendsServerConnector = "${Const|PublicPort}/OpenSim.Server.Handlers.dll:HGFriendsServerConnector"
     InstantMessageServerConnector = "${Const|PublicPort}/OpenSim.Server.Handlers.dll:InstantMessageServerConnector"
     HGInventoryServiceConnector = "HGInventoryService@${Const|PublicPort}/OpenSim.Server.Handlers.dll:XInventoryInConnector"
@@ -463,7 +465,7 @@
 ; *
 [UserAccountService]
     ; for the server connector
-    LocalServiceModule = "OpenSim.Services.UserAccountService.dll:UserAccountService"
+    LocalServiceModule = "OpenSim.Addons.UUIDDHT.dll:UuidDhtUserAccountService"
     ; Realm = "UserAccounts"
 
     ; These are for creating new accounts by the service
@@ -490,7 +492,7 @@
 
 [GridUserService]
     ; for the server connector
-    LocalServiceModule = "OpenSim.Services.UserAccountService.dll:GridUserService"
+    LocalServiceModule = "OpenSim.Addons.UUIDDHT.dll:UuidDhtGridUserService"
 
 
 [AgentPreferencesService]
@@ -862,7 +864,7 @@
 ; *
 [Groups]
     ; for the server connector
-    LocalServiceModule = "OpenSim.Addons.Groups.dll:GroupsService"
+    LocalServiceModule = "OpenSim.Addons.UUIDDHT.dll:UuidDhtGroupsService"
 
     ;; for the HG Groups service
     OfflineIMService = "OpenSim.Addons.OfflineIM.dll:OfflineIMService"
@@ -883,6 +885,13 @@
 
     ;; Sets the maximum number of groups an agent may join
     ; MaxAgentGroups = 42
+
+[UuidDht]
+    ;; Robust HG loads UuidDhtServiceConnector and UuidDht* LocalServiceModules
+    ;; above; that turns DHT on. Enabled is not required. Intra-grid Robust.ini
+    ;; does not load those modules.
+    ;; Overlay knobs default in OpenSimDefaults.ini. Known seeds: dht-seeds.
+    ; SeedsPath = "config-include/dht-seeds"
 
 
 [UserProfilesService]
