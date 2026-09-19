@@ -233,8 +233,9 @@ namespace OpenSim.Groups
         {
             string url = string.Empty;
             string name = string.Empty;
-            if (IsLocal(GroupID, out url, out name))
-                return m_LocalGroupsConnector.GetGroupRecord(AgentUUI(RequestingAgentID), GroupID, GroupName);
+            ExtendedGroupRecord already;
+            if (IsLocal(GroupID, out url, out name, out already))
+                return already ?? m_LocalGroupsConnector.GetGroupRecord(AgentUUI(RequestingAgentID), GroupID, GroupName);
             else if (url != string.Empty)
             {
                 ExtendedGroupMembershipData membership = m_LocalGroupsConnector.GetAgentGroupMembership(RequestingAgentID, RequestingAgentID, GroupID);
@@ -242,7 +243,7 @@ namespace OpenSim.Groups
                 if (membership != null)
                     accessToken = membership.AccessToken;
                 else
-                    return null;
+                    return already;
 
                 GroupsServiceHGConnector c = GetConnector(url);
                 if (c != null)
@@ -281,7 +282,7 @@ namespace OpenSim.Groups
                 if (membership != null)
                     accessToken = membership.AccessToken;
                 else
-                    return null;
+                    return new List<GroupMembersData>();
 
                 GroupsServiceHGConnector c = GetConnector(url);
                 if (c != null)
@@ -348,7 +349,7 @@ namespace OpenSim.Groups
                 if (membership != null)
                     accessToken = membership.AccessToken;
                 else
-                    return null;
+                    return new List<GroupRolesData>();
 
                 GroupsServiceHGConnector c = GetConnector(url);
                 if (c != null)
@@ -377,7 +378,7 @@ namespace OpenSim.Groups
                 if (membership != null)
                     accessToken = membership.AccessToken;
                 else
-                    return null;
+                    return new List<GroupRoleMembersData>();
 
                 GroupsServiceHGConnector c = GetConnector(url);
                 if (c != null)
@@ -673,23 +674,24 @@ namespace OpenSim.Groups
 
         private bool IsLocal(UUID groupID, out string serviceLocation, out string name)
         {
+            return IsLocal(groupID, out serviceLocation, out name, out _);
+        }
+
+        private bool IsLocal(UUID groupID, out string serviceLocation, out string name, out ExtendedGroupRecord group)
+        {
             serviceLocation = string.Empty;
             name = string.Empty;
+            group = null;
             if (groupID.Equals(UUID.Zero))
                 return true;
 
-            ExtendedGroupRecord group = m_LocalGroupsConnector.GetGroupRecord(UUID.Zero.ToString(), groupID, string.Empty);
+            group = m_LocalGroupsConnector.GetGroupRecord(UUID.Zero.ToString(), groupID, string.Empty);
             if (group == null)
-            {
-                //m_log.DebugFormat("[XXX]: IsLocal? group {0} not found -- no.", groupID);
                 return false;
-            }
 
-            serviceLocation = group.ServiceLocation;
+            serviceLocation = group.ServiceLocation ?? string.Empty;
             name = group.GroupName;
-            bool isLocal = (group.ServiceLocation.Length == 0);
-            //m_log.DebugFormat("[XXX]: IsLocal? {0}", isLocal);
-            return isLocal;
+            return serviceLocation.Length == 0;
         }
 
         private GroupsServiceHGConnector GetConnector(string url)
