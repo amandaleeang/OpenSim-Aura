@@ -129,7 +129,7 @@ namespace OpenSim.Groups
 
         #endregion
 
-        public UUID CreateGroup(string RequestingAgentID, string name, string charter, bool showInList, UUID insigniaID, int membershipFee, bool openEnrollment,
+        public virtual UUID CreateGroup(string RequestingAgentID, string name, string charter, bool showInList, UUID insigniaID, int membershipFee, bool openEnrollment,
             bool allowPublish, bool maturePublish, UUID founderID, out string reason)
         {
             reason = string.Empty;
@@ -208,7 +208,7 @@ namespace OpenSim.Groups
 
         }
 
-        public ExtendedGroupRecord GetGroupRecord(string RequestingAgentID, UUID GroupID)
+        public virtual ExtendedGroupRecord GetGroupRecord(string RequestingAgentID, UUID GroupID)
         {
             GroupData data = m_Database.RetrieveGroup(GroupID);
 
