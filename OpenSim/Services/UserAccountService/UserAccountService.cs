@@ -312,7 +312,7 @@ namespace OpenSim.Services.UserAccountService
         {
         }
 
-        public bool StoreUserAccount(UserAccount data)
+        public virtual bool StoreUserAccount(UserAccount data)
         {
             //            m_log.DebugFormat(
             //                "[USER ACCOUNT SERVICE]: Storing user account for {0} {1} {2}, scope {3}",
@@ -693,7 +693,7 @@ namespace OpenSim.Services.UserAccountService
         /// <param name="password"></param>
         /// <param name="email"></param>
         /// <param name="model"></param>
-        public UserAccount CreateUser(UUID scopeID, UUID principalID, string firstName, string lastName, string password, string email, string model = "")
+        public virtual UserAccount CreateUser(UUID scopeID, UUID principalID, string firstName, string lastName, string password, string email, string model = "")
         {
             firstName = firstName.Trim();
             lastName = lastName.Trim();
