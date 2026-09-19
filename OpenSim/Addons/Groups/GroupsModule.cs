@@ -327,19 +327,12 @@ namespace OpenSim.Groups
         {
             if (m_debugEnabled) m_log.DebugFormat("[Groups]: {0} called", System.Reflection.MethodBase.GetCurrentMethod().Name);
 
-            string GroupName;
-
             GroupRecord group = m_groupData.GetGroupRecord(GetRequestingAgentIDStr(remoteClient), GroupID, null);
-            if (group != null)
-            {
-                GroupName = group.GroupName;
-            }
-            else
-            {
-                GroupName = "Unknown";
-            }
+            if (group == null || string.IsNullOrEmpty(group.GroupName))
+                return;
 
-            remoteClient.SendGroupNameReply(GroupID, GroupName);
+            // Do not send "Unknown": Firestorm caches UUIDGroupNameReply as the real name.
+            remoteClient.SendGroupNameReply(GroupID, group.GroupName);
         }
 
         private void OnInstantMessage(IClientAPI remoteClient, GridInstantMessage im)
@@ -746,7 +739,8 @@ namespace OpenSim.Groups
                 m_log.DebugFormat(
                     "[Groups]: GroupMembersRequest called for {0} from client {1}", groupID, remoteClient.Name);
 
-            List<GroupMembersData> data = m_groupData.GetGroupMembers(GetRequestingAgentIDStr(remoteClient), groupID);
+            List<GroupMembersData> data = m_groupData.GetGroupMembers(GetRequestingAgentIDStr(remoteClient), groupID)
+                ?? new List<GroupMembersData>();
 
             if (m_debugEnabled)
             {
@@ -779,7 +773,8 @@ namespace OpenSim.Groups
         {
             if (m_debugEnabled) m_log.DebugFormat("[GROUPS]: {0} called", System.Reflection.MethodBase.GetCurrentMethod().Name);
 
-            List<GroupRolesData> data = m_groupData.GetGroupRoles(agentID.ToString(), groupID);
+            List<GroupRolesData> data = m_groupData.GetGroupRoles(agentID.ToString(), groupID)
+                ?? new List<GroupRolesData>();
 
             return data;
         }
@@ -788,7 +783,8 @@ namespace OpenSim.Groups
         {
             if (m_debugEnabled) m_log.DebugFormat("[Groups]: {0} called", System.Reflection.MethodBase.GetCurrentMethod().Name);
 
-            List<GroupRolesData> data = m_groupData.GetGroupRoles(GetRequestingAgentIDStr(remoteClient), groupID);
+            List<GroupRolesData> data = m_groupData.GetGroupRoles(GetRequestingAgentIDStr(remoteClient), groupID)
+                ?? new List<GroupRolesData>();
 
             return data;
         }
@@ -797,7 +793,8 @@ namespace OpenSim.Groups
         {
             if (m_debugEnabled) m_log.DebugFormat("[Groups]: {0} called", System.Reflection.MethodBase.GetCurrentMethod().Name);
 
-            List<GroupRoleMembersData> data = m_groupData.GetGroupRoleMembers(GetRequestingAgentIDStr(remoteClient), groupID);
+            List<GroupRoleMembersData> data = m_groupData.GetGroupRoleMembers(GetRequestingAgentIDStr(remoteClient), groupID)
+                ?? new List<GroupRoleMembersData>();
 
             if (m_debugEnabled)
             {
@@ -834,6 +831,11 @@ namespace OpenSim.Groups
                 profile.OpenEnrollment = groupInfo.OpenEnrollment;
                 profile.OwnerRole = groupInfo.OwnerRoleID;
                 profile.ShowInList = groupInfo.ShowInList;
+
+                // Firestorm caches UUIDGroupNameReply (including a prior "Unknown")
+                // for up to a week. Push the real name whenever the profile is opened.
+                if (!string.IsNullOrEmpty(groupInfo.GroupName))
+                    remoteClient.SendGroupNameReply(groupID, groupInfo.GroupName);
             }
             if (memberInfo != null)
             {
