@@ -1,0 +1,18 @@
+# UUID-DHT public bootstrap HomeURIs.
+# On first start, if config-include/dht-seeds is missing, the node copies this
+# file so a downloaded StandaloneHypergrid binary joins this overlay.
+# One HomeURI per line. Lines starting with # or ;; are ignored.
+# Not an OpenSim Include — [UuidDht] knobs stay in OpenSimDefaults / Robust.HG.
+#
+# Public seeds (207.180.199.55):
+#   10001 — first seed
+#   10000 — second seed
+# Other grids bootstrap from these URLs. DHT is not on Robust private 8003.
+#
+# After join, the node rewrites dht-seeds: this server first, then admitted
+# peers (up to MaxBootstrapSeeds). That file is the persistent peer list.
+# Restart re-reads it. The routing table itself stays in RAM (contacts are
+# re-proven on join). Do not persist k-buckets.
+#
+http://207.180.199.55:10001/
+http://207.180.199.55:10000/

@@ -421,3 +421,8 @@
 
     UserAccountService = OpenSim.Services.UserAccountService.dll:UserAccountService
     AuthenticationServiceModule = "OpenSim.Services.AuthenticationService.dll:PasswordAuthenticationService"
+
+[UuidDht]
+    ;; Plain standalone: stock GridUser/Groups, so DHT stays off.
+    ;; StandaloneHypergrid.ini loads UuidDht* modules after this file.
+    Enabled = false
