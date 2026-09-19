@@ -1976,6 +1976,7 @@
       <Reference name="OpenSim.Framework.Servers.HttpServer"/>
       <Reference name="OpenSim.Services.Base"/>
       <Reference name="OpenSim.Services.Interfaces"/>
+      <Reference name="OpenSim.Services.Connectors"/>
       <Reference name="OpenSim.Region.Framework"/>
       <Reference name="OpenSim.Server.Base"/>
       <Reference name="OpenSim.Server.Handlers"/>
@@ -1988,6 +1989,47 @@
         <Match buildAction="EmbeddedResource" path="Resources" pattern="*.migrations"/>
       </Files>
 
+    </Project>
+
+    <Project name="OpenSim.Addons.UUIDDHT" path="OpenSim/Addons/UUIDDHT" type="Library">
+      <Configuration name="Debug">
+        <Options>
+          <OutputPath>../../../bin/</OutputPath>
+        </Options>
+      </Configuration>
+      <Configuration name="Release">
+        <Options>
+          <OutputPath>../../../bin/</OutputPath>
+        </Options>
+      </Configuration>
+
+      <ReferencePath>../../../bin/</ReferencePath>
+      <Reference name="Nini"/>
+      <Reference name="log4net"/>
+      <Reference name="OpenMetaverse"/>
+      <Reference name="OpenMetaverseTypes"/>
+      <Reference name="OpenSim.Framework"/>
+      <Reference name="OpenSim.Framework.Servers"/>
+      <Reference name="OpenSim.Framework.Servers.HttpServer"/>
+      <Reference name="OpenSim.Region.Framework"/>
+      <Reference name="OpenSim.Services.Interfaces"/>
+      <Reference name="OpenSim.Services.UserAccountService"/>
+      <Reference name="OpenSim.Services.Connectors"/>
+      <Reference name="OpenSim.Server.Base"/>
+      <Reference name="OpenSim.Server.Handlers"/>
+      <Reference name="OpenSim.Addons.Groups"/>
+      <Reference name="Mono.Addins"/>
+      <Reference name="BouncyCastle.Cryptography"/>
+      <Reference name="System.Data.SQLite"/>
+      <Reference name="MySql.Data"/>
+      <Reference name="Npgsql"/>
+
+      <Files>
+        <Match pattern="*.cs" recurse="true">
+          <Exclude name="obj" pattern="obj"/>
+          <Exclude pattern="Tests" />
+        </Match>
+      </Files>
     </Project>
 
 
