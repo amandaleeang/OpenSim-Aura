@@ -2,13 +2,15 @@
 
 OpenSim-Aura is a fork of [OpenSimulator](https://github.com/opensim/opensim) (OpenSim).
 
-Aura focuses on Hypergrid travel, asset transfer, baked textures, profiles, attachment scripts, friends, IM, display names, and SQLite standalone backends — the parts that are slow, missing, or broken when avatars move between grids.
+OpenSim-Aura is **alpha**, the same as stock OpenSim. It is provided **as is**. Like any alpha software it is experimental and may have bugs and security issues. Do not install it on a local machine or network that holds sensitive data. Use a container or a dedicated server.
+
+Aura focuses on Hypergrid travel, asset transfer, baked textures (XBakes and Firestorm server-side bake), profiles, attachment scripts, friends, IM, display names, UUID DHT lookup, HG groups, and SQLite standalone backends — the parts that are slow, missing, or broken when avatars move between grids.
 
 Binaries are on the [Releases](https://github.com/amandaleeang/OpenSim-Aura/releases) page. To build from source, see [BUILDING.md](BUILDING.md). For installing, running, and configuring OpenSim itself, see [opensimulator.org](http://opensimulator.org).
 
 # What Aura implements
 
-Stock Hypergrid often does one HTTP GET per asset, fully sequential. Hundreds of attachment textures and meshes then take minutes. Profiles of foreign avatars fail. Bakes greyscale on every hop because TextureIDs change. Attachment scripts stay dead until detach/reattach. Friends made abroad vanish after logout. Private HG IMs cannot be answered. Display names do not carry. Groups V2, Offline IM V2, and FSAssets did not persist on SQLite. Aura addresses those.
+Stock Hypergrid often does one HTTP GET per asset, fully sequential. Hundreds of attachment textures and meshes then take minutes. Profiles of foreign avatars fail. Bakes greyscale on every hop because TextureIDs change. Firestorm 7 stays a cloud unless the sim speaks SSA. Attachment scripts stay dead until detach/reattach. Friends made abroad vanish after logout. Private HG IMs cannot be answered. Display names do not carry. Foreign UUIDs have no locator. Groups V2, Offline IM V2, and FSAssets did not persist on SQLite. Aura addresses those.
 
 ## Concurrent asset gather
 
@@ -47,6 +49,30 @@ HG visitor **viewer** fetches (inventory open/play and UDP textures) stay in the
 - On CacheId match, stored JPEG2000 is re-keyed to the incoming TextureID so the same outfit does not rebake on homecoming.
 - XBakes runs for **HG visitors** and for **avatars returning home** (`Validate` on ViaHGLogin; appearance is not saved for foreign users).
 - **Standalone** (no Robust): when `[XBakes] URL` is unset, an in-process file store under `BaseDirectory` uses the same XML and hashed paths as Robust XBakes.
+
+## Server-side baked textures (Firestorm SSA)
+
+When `[ServerSideBake] Enabled` is true (Aura default), the region sets protocol bit 0. Firestorm 7.2 then stops uploading local bakes and GET JPEG2000 from `/appearance/texture/...` on the **connected sim**. There is no Linden bake farm. Bakes stay in cache / XBakes, not the asset DB.
+
+The compositor layers Current Outfit wearables. Bake size is 512 / 1024 / 2048 from the largest layer on that body part; eyes stay 128. Rebake Textures (`IncrementCOFVersion`) force-renders. Outfit changes and leaving appearance edit reuse layer hashes.
+
+Default bodypaint matches the Firestorm library bake (skin tint × grain, then colour TGA). HG visitors have no Current Outfit folder here; incoming Firestorm bakes are kept instead of compositing one tattoo per wearable type.
+
+## UUID DHT (Hypergrid UUID locator)
+
+On **Hypergrid only**. After a GridUser or Groups SQL miss, the node FIND the UUID on a signed overlay and then calls the home grid (`get_user_info`, `GETGROUP`). Intra-grid Robust and plain standalone do not use it: a SQL miss means the UUID is not local.
+
+StandaloneHypergrid and Robust.HG load the `UuidDht*` modules; that turns DHT on. `[UuidDht] Enabled` is not required. Public bootstrap seeds are `http://207.180.199.55:10001/` and `http://207.180.199.55:10000/`. If `config-include/dht-seeds` is missing, it is copied from `dht-seeds.example` on first start.
+
+HomeURI must be a public URL (not `127.0.0.1`). Keep `uuiddht/identity-{port}.json`; losing it is a new node, not a move.
+
+## Hypergrid groups
+
+- Groups V2 uses `[Groups] LocalServiceModule` like UserAccountService. Empty means groups stay off.
+- `GroupsExternalURI` defaults to this grid’s HomeURI (not `127.0.0.1`), so joining a foreign group does not store a loopback Location.
+- `GroupProfileHGAccess` (`open` / `closed` / `token`, default `open`) is HG `GETGROUP` on `/hg-groups` only. Local `/groups` is unchanged. Join, members, roles, and notices still need a membership token.
+- `ShowUserDetailsInHGProfile` defaults true.
+- The viewer is not sent `"Unknown"` as a group name (Firestorm caches that for a week). The real name is pushed from GroupProfile.
 
 ## Hypergrid profiles
 
@@ -109,13 +135,17 @@ All SQLite connections use WAL, `busy_timeout=30000`, `synchronous=NORMAL`, and 
 - **Re-accepting an HG friendship** left the old secret in place, so later status notify never matched.
 - **Private HG IMs** could not be answered or have their profile opened without friendship.
 - **Creating a group** left the viewer on a fake “new group” row; the real name is now pushed with `AgentGroupDataUpdate`.
+- **Firestorm cached `"Unknown"`** as a group name for up to a week after a miss.
+- **YEngine script state** was dropped on a migration version mismatch; it is restored.
+- **Map tiles** ignored PBR terrain textures.
+- **Free for-sale parcels** were not marked on the land overlay.
+- **Estate DenyIdentified / DenyTransacted** were not sent to the viewer.
 
 # In progress / planned
 
 - Allow HG teleport to a sim with the **same SIM coordinates**.
 - **HOP** teleports that land at the coordinates in the URI.
 - **Group messages** via Hypergrid.
-- **Server-side baked textures**. (Considering)
 
 Not a priority: async HTTP server.
 
@@ -123,7 +153,87 @@ Not a priority: async HTTP server.
 
 Everything else (database, regions, Hypergrid URIs, groups, viewers, ports) is stock OpenSim: [Configuration](http://opensimulator.org/wiki/Configuration) and [Configuring Regions](http://opensimulator.org/wiki/Configuring_Regions).
 
-Aura adds or documents the following INI settings.
+Aura adds or documents the following INI settings. The sections below are the new or Aura-specific knobs; stock OpenSim keys are unchanged.
+
+## Architecture (Hypergrid vs not)
+
+In `OpenSim.ini` `[Architecture]`, pick **one**:
+
+```
+Include-Architecture = "config-include/StandaloneHypergrid.ini"
+```
+
+or for a Robust grid, copy `Robust.HG.ini.example` to `Robust.ini` (not `Robust.ini.example` / intra-grid).
+
+| Architecture | DHT | Notes |
+|--------------|-----|--------|
+| `StandaloneHypergrid.ini` | on | Loads `UuidDht*` LocalServiceModules. |
+| `Robust.HG.ini.example` | on | Loads `UuidDhtServiceConnector` on the **public** port and `UuidDht*` services. |
+| `Standalone.ini` | off | SQL miss = not local. |
+| `Robust.ini.example` | off | Intra-grid. Do not copy the HG DHT lines here. |
+
+Hypergrid also needs a **public** HomeURI (`[Const] BaseHostname` is not `127.0.0.1`).
+
+## `[ServerSideBake]` — Firestorm SSA
+
+In `OpenSimDefaults.ini`. Aura default is on.
+
+| Setting | Default | Meaning |
+|---------|---------|---------|
+| `Enabled` | `true` | RegionHandshake bit 0. Firestorm 7.2 uses UpdateAvatarAppearance and GET `/appearance` instead of uploading local bakes. |
+
+To turn it off in `OpenSim.ini`:
+
+```
+[ServerSideBake]
+    Enabled = false
+```
+
+Standalone still wants `[XBakes] BaseDirectory` so hashes persist across restarts (`StandaloneHypergrid.ini` / `Standalone.ini` set `BaseDirectory = "bakes"`). Grid uses `[XBakes] URL` to Robust BakedTextureService.
+
+## UUID DHT — join the overlay
+
+Loading the `UuidDht*` modules is what turns DHT on. You do **not** set `[UuidDht] Enabled = true`.
+
+**Standalone Hypergrid** already loads them in `StandaloneHypergrid.ini`. Copy `StandaloneCommon.ini.example` → `StandaloneCommon.ini` as usual.
+
+**Robust HG** already loads them in `Robust.HG.ini.example`:
+
+```
+[ServiceList]
+    UuidDhtServiceConnector = "${Const|PublicPort}/OpenSim.Addons.UUIDDHT.dll:UuidDhtServiceConnector"
+
+[UserAccountService]
+    LocalServiceModule = "OpenSim.Addons.UUIDDHT.dll:UuidDhtUserAccountService"
+
+[GridUserService]
+    LocalServiceModule = "OpenSim.Addons.UUIDDHT.dll:UuidDhtGridUserService"
+
+[Groups]
+    LocalServiceModule = "OpenSim.Addons.UUIDDHT.dll:UuidDhtGroupsService"
+```
+
+**Seeds.** On first start, if `config-include/dht-seeds` is missing, the node copies `config-include/dht-seeds.example`:
+
+```
+http://207.180.199.55:10001/
+http://207.180.199.55:10000/
+```
+
+Those two URLs are the public bootstrap. After join, the node rewrites `dht-seeds` (this server first, then admitted peers). Do not commit the living `dht-seeds` file or `uuiddht/`. Keep `uuiddht/identity-{port}.json`.
+
+Optional knobs (defaults in `OpenSimDefaults.ini`):
+
+| Setting | Default | Meaning |
+|---------|---------|---------|
+| `SeedsPath` | `config-include/dht-seeds` | Living seed list. |
+| `RpcTimeoutMs` | `2000` | HTTP POST `/dht/rpc`. |
+| `LookupTimeoutMs` | `8000` | One FIND. |
+| `ClientLookupCapMs` | `12000` | FIND uuid then FIND node. |
+| `HomeHttpTimeoutSec` | `5` | Home `GetUserInfo` / `GETGROUP` after a DHT hit. |
+| `ExpireHours` | `36` | Replica TTL unless republished. |
+
+Group UUIDs on the DHT also need Groups V2 enabled (see below). Overlay handlers are on the **public** HTTP port (`/dht/node`, `/dht/owns`, `/dht/rpc`), not Robust private 8003.
 
 ## `[EntityTransfer]` — concurrent gather
 
@@ -204,13 +314,20 @@ In `OpenSim.ini`. Leave `StorageProvider` commented to inherit `[DatabaseService
 [Groups]
     Enabled = true
     Module = "Groups Module V2"
+    LocalServiceModule = "OpenSim.Addons.Groups.dll:GroupsService"
     ServicesConnectorModule = "Groups HG Service Connector"
     LocalService = local
     MessagingEnabled = true
     MessagingModule = "Groups Messaging Module V2"
+    ; GroupProfileHGAccess = open
+    ; GroupsExternalURI = ""
 ```
 
+On StandaloneHypergrid / Robust HG, leave `LocalServiceModule` as `OpenSim.Addons.UUIDDHT.dll:UuidDhtGroupsService` (already in those example files) so group UUIDs are published and looked up on the DHT. Use `"OpenSim.Addons.Groups.dll:GroupsService"` for intra-grid. Empty `LocalServiceModule` means groups stay off.
+
 Use `"Groups Local Service Connector"` for standalone non-HG, `"Groups Remote Service Connector"` for a grided sim, and `"Groups HG Service Connector"` with `LocalService = local` (standalone) or `remote` (grid).
+
+`GroupProfileHGAccess` is `open` (default), `closed`, or `token`. `GroupsExternalURI` defaults to HomeURI; do not set `127.0.0.1`.
 
 Default SQLite storage (`SQLiteStandalone.ini`) already points Groups at `osgroups.db`. Override only if you want a different file:
 
@@ -246,7 +363,7 @@ Leave `StorageProvider` commented to inherit `[DatabaseService]`.
 
 # Bugs, discussions, and new features
 
-**OpenSim-Aura only** — bugs, discussions, and feature requests that belong to the Aura work listed above (concurrent gather, XBakes, HG profiles, attachment scripts on HG login/teleport, HG IM and friends, display names, SQLite FSAssets / Groups V2 / Offline IM V2, and the in-progress items in that list) go to **this GitHub repo**:
+**OpenSim-Aura only** — bugs, discussions, and feature requests that belong to the Aura work listed above (concurrent gather, XBakes, server-side bakes, UUID DHT, HG groups, HG profiles, attachment scripts on HG login/teleport, HG IM and friends, display names, SQLite FSAssets / Groups V2 / Offline IM V2, and the in-progress items in that list) go to **this GitHub repo**:
 
 https://github.com/amandaleeang/OpenSim-Aura/issues
 
