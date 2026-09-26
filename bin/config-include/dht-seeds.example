@@ -14,5 +14,5 @@
 # Restart re-reads it. The routing table itself stays in RAM (contacts are
 # re-proven on join). Do not persist k-buckets.
 #
-http://207.180.199.55:10001/
+http://aura.hypergrid.cc:10001/
 http://207.180.199.55:10000/
