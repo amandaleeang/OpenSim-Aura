@@ -56,12 +56,10 @@ namespace OpenSim.Services.HypergridService
 
 //        private string m_HomeURL;
         private IUserAccountService m_UserAccountService;
-        private IAvatarService m_AvatarService;
 
 //        private UserAccountCache m_Cache;
 
         private ExpiringCache<UUID, List<XInventoryFolder>> m_SuitcaseTrees = new ExpiringCache<UUID, List<XInventoryFolder>>();
-        private ExpiringCache<UUID, AvatarAppearance> m_Appearances = new ExpiringCache<UUID, AvatarAppearance>();
 
         public HGSuitcaseInventoryService(IConfigSource config, string configName)
             : base(config, configName)
@@ -87,14 +85,6 @@ namespace OpenSim.Services.HypergridService
                 m_UserAccountService = ServerUtils.LoadPlugin<IUserAccountService>(userAccountsDll, args);
                 if (m_UserAccountService == null)
                     throw new Exception(String.Format("Unable to create UserAccountService from {0}", userAccountsDll));
-
-                string avatarDll = invConfig.GetString("AvatarService", string.Empty);
-                if (avatarDll.Length == 0)
-                    throw new Exception("Please specify AvatarService in HGInventoryService configuration");
-
-                m_AvatarService = ServerUtils.LoadPlugin<IAvatarService>(avatarDll, args);
-                if (m_AvatarService == null)
-                    throw new Exception(String.Format("Unable to create m_AvatarService from {0}", avatarDll));
 
 //                m_HomeURL = Util.GetConfigVarFromSections<string>(config, "HomeURI",
 //                    new string[] { "Startup", "Hypergrid", m_ConfigName }, String.Empty);
@@ -217,6 +207,25 @@ namespace OpenSim.Services.HypergridService
         public override InventoryFolderBase GetFolderForType(UUID principalID, FolderType type)
         {
             //m_log.DebugFormat("[HG INVENTORY SERVICE]: GetFolderForType for {0} {0}", principalID, type);
+
+            // The worn outfit lives in My Inventory. The Current Outfit created under
+            // My Suitcase is an empty system folder and is not that outfit.
+            if (type == FolderType.CurrentOutfit)
+            {
+                XInventoryFolder currentOutfit = GetCurrentOutfitXFolder(principalID);
+                if (currentOutfit == null)
+                {
+                    m_log.WarnFormat("[HG SUITCASE INVENTORY SERVICE]: Found no My Inventory Current Outfit for user {0}", principalID);
+                    return null;
+                }
+
+                m_log.DebugFormat(
+                    "[HG SUITCASE INVENTORY SERVICE]: Found folder {0} {1} for type {2} for user {3}",
+                    currentOutfit.folderName, currentOutfit.folderID, type, principalID);
+
+                return ConvertToOpenSim(currentOutfit);
+            }
+
             XInventoryFolder suitcase = GetSuitcaseXFolder(principalID);
 
             if (suitcase == null)
@@ -411,9 +420,9 @@ namespace OpenSim.Services.HypergridService
                 return null;
             }
 
-            if (!IsWithinSuitcaseTree(it.Owner, it.Folder) && !IsPartOfAppearance(it.Owner, it.ID))
+            if (!IsWithinSuitcaseTree(it.Owner, it.Folder) && !IsCurrentOutfitLinkTarget(it.Owner, it.ID))
             {
-                m_log.DebugFormat("[HG SUITCASE INVENTORY SERVICE]: GetItem: item {0}/{1} (folder {2}) (user {3}) is not within Suitcase tree or Appearance",
+                m_log.DebugFormat("[HG SUITCASE INVENTORY SERVICE]: GetItem: item {0}/{1} (folder {2}) (user {3}) is not within Suitcase tree or Current Outfit",
                     it.Name, it.ID, it.Folder, it.Owner);
                 return null;
             }
@@ -602,51 +611,35 @@ namespace OpenSim.Services.HypergridService
 
             return (f != null);
         }
-        #endregion
 
-        #region Avatar Appearance
-
-        private AvatarAppearance GetAppearance(UUID principalID)
+        /// <summary>
+        /// True when itemID is the target of a link stored in the My Inventory Current Outfit.
+        /// That folder is the worn outfit. Appearance.Wearables only has one item per type.
+        /// </summary>
+        private bool IsCurrentOutfitLinkTarget(UUID principalID, UUID itemID)
         {
-            AvatarAppearance a = null;
-            if (m_Appearances.TryGetValue(principalID, out a))
-                return a;
-
-            a = m_AvatarService.GetAppearance(principalID);
-            m_Appearances.AddOrUpdate(principalID, a, 5 * 60); // 5minutes
-            return a;
-        }
-
-        private bool IsPartOfAppearance(UUID principalID, UUID itemID)
-        {
-            AvatarAppearance a = GetAppearance(principalID);
-
-            if (a == null)
+            if (itemID.IsZero())
                 return false;
 
-            // Check wearables (body parts and clothes)
-            for (int i = 0; i < a.Wearables.Length; i++)
-            {
-                for (int j = 0; j < a.Wearables[i].Count; j++)
-                {
-                    if (a.Wearables[i][j].ItemID == itemID)
-                    {
-                        //m_log.DebugFormat("[HG SUITCASE INVENTORY SERVICE]: item {0} is a wearable", itemID);
-                        return true;
-                    }
-                }
-            }
+            XInventoryFolder currentOutfit = GetCurrentOutfitXFolder(principalID);
+            if (currentOutfit == null)
+                return false;
 
-            // Check attachments
-            if (a.GetAttachmentForItem(itemID) != null)
+            XInventoryItem[] links = m_Database.GetItems(
+                    new string[] { "parentFolderID", "assetID" },
+                    new string[] { currentOutfit.folderID.ToString(), itemID.ToString() });
+
+            if (links == null || links.Length == 0)
+                return false;
+
+            foreach (XInventoryItem link in links)
             {
-                //m_log.DebugFormat("[HG SUITCASE INVENTORY SERVICE]: item {0} is an attachment", itemID);
-                return true;
+                if (link.assetType == (int)AssetType.Link || link.assetType == (int)AssetType.LinkFolder)
+                    return true;
             }
 
             return false;
         }
-
         #endregion
 
     }
