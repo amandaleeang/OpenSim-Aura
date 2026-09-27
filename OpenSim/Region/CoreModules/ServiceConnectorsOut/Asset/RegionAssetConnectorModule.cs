@@ -288,7 +288,12 @@ namespace OpenSim.Region.CoreModules.ServiceConnectorsOut.Asset
 
         public AssetBase Get(string id, string ForeignAssetService, bool StoreOnLocalGrid)
         {
-            // assumes id and ForeignAssetService are valid and resolved
+            // Visitor asset: file cache, then the home asset server. The bytes
+            // stay in the cache. The local grid database is not read or written.
+            // StoreOnLocalGrid is ignored on this path.
+            if (!string.IsNullOrEmpty(ForeignAssetService))
+                return GetVisitorAsset(id, ForeignAssetService);
+
             AssetBase asset = null;
             if (m_Cache != null)
             {
@@ -298,27 +303,44 @@ namespace OpenSim.Region.CoreModules.ServiceConnectorsOut.Asset
             }
 
             asset = GetFromLocal(id);
-            if (asset == null)
+            if (asset != null)
             {
-                asset = GetFromForeign(id, ForeignAssetService);
-                if (asset != null)
-                {
-                    if (m_AssetPerms != null && !m_AssetPerms.AllowedImport(asset.Type))
-                    {
-                        if (m_Cache != null)
-                            m_Cache.CacheNegative(id);
-                        return null;
-                    }
-                    if(StoreOnLocalGrid)
-                        StoreLocal(asset);
-                    if (m_Cache != null)
-                        m_Cache.Cache(asset);
-                }
-                else if (m_Cache != null)
-                    m_Cache.CacheNegative(id);
+                if (m_Cache != null)
+                    m_Cache.Cache(asset);
             }
             else if (m_Cache != null)
-                m_Cache.Cache(asset);
+                m_Cache.CacheNegative(id);
+
+            return asset;
+        }
+
+        private AssetBase GetVisitorAsset(string id, string homeUrl)
+        {
+            AssetBase asset = null;
+            if (m_Cache != null)
+            {
+                // False means the id is negative-cached. Do not ask home again
+                // until that entry expires.
+                if (!m_Cache.Get(id, out asset))
+                    return null;
+                if (asset != null)
+                    return asset;
+            }
+
+            asset = GetFromForeign(id, homeUrl);
+            if (asset != null)
+            {
+                if (m_AssetPerms != null && !m_AssetPerms.AllowedImport(asset.Type))
+                {
+                    if (m_Cache != null)
+                        m_Cache.CacheNegative(id);
+                    return null;
+                }
+                if (m_Cache != null)
+                    m_Cache.Cache(asset);
+            }
+            else if (m_Cache != null)
+                m_Cache.CacheNegative(id);
 
             return asset;
         }
