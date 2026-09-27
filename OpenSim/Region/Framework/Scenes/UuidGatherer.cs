@@ -242,8 +242,9 @@ namespace OpenSim.Region.Framework.Scenes
         private bool verbose = true;
 
         /// <summary>
-        /// HG import: skip leaf blob GETs when AssetsExist says they are already on this grid.
-        /// Left false for OAR/IAR and Flotsam cache walks.
+        /// Skip leaf GETs when the local grid database already has the asset.
+        /// HG gathers leave this false. A visitor asset is the file cache or
+        /// the home server, not this grid's asset database.
         /// </summary>
         protected virtual bool SkipLocalLeafGets => false;
 
@@ -1729,8 +1730,10 @@ namespace OpenSim.Region.Framework.Scenes
             m_assetServerURL = assetServerURL;
         }
 
-        // Import from home: skip leaves already in this grid's DB. Post (empty URL) still fetches.
-        protected override bool SkipLocalLeafGets => !string.IsNullOrWhiteSpace(m_assetServerURL);
+        // A home URL means each asset is read from the file cache or fetched
+        // from that home. Do not AssetsExist against the local grid database.
+        // An empty URL is the post path and uses the base gatherer.
+        protected override bool SkipLocalLeafGets => false;
 
         protected override AssetBase GetAsset(UUID uuid)
         {
@@ -1743,7 +1746,8 @@ namespace OpenSim.Region.Framework.Scenes
         public AssetBase FetchAsset(UUID assetID)
         {
             string IDstr = assetID.ToString();
-            AssetBase asset = m_assetService.Get(IDstr, m_assetServerURL, true);
+            // false: do not write the visitor asset into the local grid database.
+            AssetBase asset = m_assetService.Get(IDstr, m_assetServerURL, false);
             // Per-asset Debug is expensive (sync File+Console). Only when HTTP debug is on:
             //   debug http all|out N   (WebUtil.DebugLevel > 0)
             if (WebUtil.DebugLevel > 0)
@@ -1751,7 +1755,7 @@ namespace OpenSim.Region.Framework.Scenes
                 if (asset is null)
                     m_log.Debug($"[HGUUIDGatherer]: Failed to fetch asset {IDstr} from {m_assetServerURL}");
                 else
-                    m_log.Debug($"[HGUUIDGatherer]: Copied asset {IDstr} from {m_assetServerURL} to local asset server");
+                    m_log.Debug($"[HGUUIDGatherer]: Cached asset {IDstr} from {m_assetServerURL}");
             }
 
             return asset;

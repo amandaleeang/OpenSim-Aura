@@ -101,9 +101,10 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
         // CompleteMovement sets IsInTransit, then MakeRootAgent, then clears it.
         // The bake worker must wait for that window to close (~30ms typical).
         private const int TransitWaitMs = 10000;
-        // HG incoming attachments are gathered asynchronously. Wait for that
-        // batch (or an empty GotAttachmentsData) before publishing SSA.
-        private const int AttachmentWaitMs = 15000;
+        // One teleport attachment path: the objects in the transfer. Wait for
+        // that gather on a slow home fetch. Do not start a second rez from
+        // inventory while it is still outstanding.
+        private const int AttachmentWaitMs = 60000;
 
         private sealed class PendingCacheReply
         {
@@ -1020,9 +1021,10 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
         }
 
         /// <summary>
-        /// Wait for the incoming HG attachment batch, then rez from inventory
-        /// if the source sent none. Must run after transit so RezAttachments
-        /// is allowed to add objects.
+        /// Wait for the incoming attachment objects. Inventory rez runs only
+        /// when that batch has finished and it contained nothing (login, or a
+        /// return whose transfer carried no objects). A gather that is still
+        /// running keeps the one teleport path.
         /// </summary>
         private void EnsureAttachmentsRezzed(ScenePresence sp, CancellationToken token)
         {
@@ -1042,6 +1044,16 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
                 if (waited > 0)
                     m_log.InfoFormat("[SSBAKE]: {0} attachments arrived after {1}ms",
                         sp.Name, waited);
+                return;
+            }
+
+            // Objects were in the transfer and have not been rezzed yet.
+            // Wearing the same items from inventory attaches a second copy.
+            if (!sp.GotAttachmentsData)
+            {
+                m_log.InfoFormat(
+                    "[SSBAKE]: {0} incoming attachments still outstanding after {1}ms; not rezzing from inventory",
+                    sp.Name, waited);
                 return;
             }
 
