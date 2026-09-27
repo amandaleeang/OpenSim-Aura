@@ -70,13 +70,24 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
         // appearance packet must be that value + 1 or it is dropped.
         private readonly ConcurrentDictionary<UUID, int> m_packetCof =
             new ConcurrentDictionary<UUID, int>();
-        // First UpdateAvatarAppearance after MakeRoot is login/TP.
+        // First UpdateAvatarAppearance after MakeRoot records the viewer's
+        // COF version. A later post bakes only when the Current Outfit hash changes.
         private readonly ConcurrentDictionary<UUID, byte> m_seenAppearanceCap =
             new ConcurrentDictionary<UUID, byte>();
+        // Current Outfit fingerprint of the bake running now. Zero means the
+        // folder was empty. Generation keeps a superseded bake from clearing
+        // the one that replaced it.
+        private readonly ConcurrentDictionary<UUID, InflightOutfit> m_inflightOutfit =
+            new ConcurrentDictionary<UUID, InflightOutfit>();
+        // Fingerprint of the last bake this visit published. Absent until that
+        // publish. Zero means an empty Current Outfit, which is not an outfit id.
+        private readonly ConcurrentDictionary<UUID, UUID> m_lastOutfit =
+            new ConcurrentDictionary<UUID, UUID>();
         private readonly ConcurrentDictionary<UUID, ConcurrentQueue<PendingCacheReply>> m_pendingCacheReplies =
             new ConcurrentDictionary<UUID, ConcurrentQueue<PendingCacheReply>>();
         // Source-region GET /appearance/ base, captured at MakeRoot while
-        // CallbackURI is still set (ReleaseAgent clears it before seed).
+        // CallbackURI is still set. ReleaseAgent clears it before a matching
+        // outfit-hash GET.
         private readonly ConcurrentDictionary<UUID, string> m_originAppearance =
             new ConcurrentDictionary<UUID, string>();
         // Environment.TickCount64 after which a force rebake is allowed again.
@@ -99,6 +110,12 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
             public IClientAPI Client;
             public int Serial;
             public List<CachedTextureRequestArg> Request;
+        }
+
+        private sealed class InflightOutfit
+        {
+            public int Generation;
+            public UUID Hash;
         }
 
         private bool m_enabled;
@@ -230,13 +247,21 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
             if (sp.Appearance != null && cof > sp.Appearance.Serial)
                 sp.Appearance.Serial = cof;
 
-            // Login, TP, outfit change, and leaving edit appearance all POST
-            // this cap. Reuse cache/XBakes for unchanged slots; only Rebake
-            // Textures (IncrementCOFVersion) forces a full render.
+            // Login and TP post this once, then again when the outfit changes.
+            // The first post records the version the appearance packet must
+            // carry. MakeRoot already started the bake. A later post bakes
+            // only when the Current Outfit hash changed.
             bool firstCap = m_seenAppearanceCap.TryAdd(sp.UUID, 1);
-            m_log.InfoFormat("[SSBAKE]: UpdateAvatarAppearance {0} cof={1} last={2} first={3}",
-                sp.Name, cof, lastCof, firstCap);
-            RequestBake(sp, "UpdateAvatarAppearance");
+            bool inTransit = sp.IsInTransit;
+            m_log.InfoFormat("[SSBAKE]: UpdateAvatarAppearance {0} cof={1} last={2} first={3} transit={4}",
+                sp.Name, cof, lastCof, firstCap, inTransit);
+            if (inTransit || firstCap)
+                NoteArrivalAppearance(sp);
+            else
+            {
+                ScenePresence later = sp;
+                Util.FireAndForget(delegate { HandleLaterAppearance(later); }, null, "SSBake.Appearance");
+            }
             result["success"] = true;
             if (map != null && map.ContainsKey("cof_version"))
                 result["cof_version"] = map["cof_version"];
@@ -332,13 +357,7 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
             if (m_packetCof.TryGetValue(agentId, out packetCof) && packetCof > 0)
                 cofVersion = packetCof;
             else
-            {
-                int viewerCof;
-                if (m_viewerCof.TryGetValue(agentId, out viewerCof) && viewerCof > 0)
-                    cofVersion = viewerCof;
-                else
-                    cofVersion = 1;
-            }
+                cofVersion = ViewerCofOrSerial(agentId);
         }
 
         public int WriteAppearanceAttachmentBlock(UUID agentId, UUID toAgentId, byte[] data, int pos)
@@ -652,9 +671,8 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
                 sp.Appearance.WearableCacheItems = wearableCache;
             }
 
-            // Arrival bake is from wearables, not incoming TextureEntry IDs.
-            // If that bake is already running, wait for it instead of
-            // replying with leftover/default bake UUIDs.
+            // Arrival bake is the Current Outfit hash. If that bake is already
+            // running, wait for it instead of replying with leftover bake UUIDs.
             bool bakeRunning = BakePendingOrRunning(sp.UUID);
             if (!bakeRunning && HasCachedBakes(sp))
             {
@@ -773,16 +791,18 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
             if (sp == null)
                 return;
 
-            // TP-in may carry bake JPEG bytes on WearableCacheItems. Put them
-            // in this region's cache before CompleteMovement announces the
-            // avatar to others, matching SendOtherAgentsAvatarFullToMe.
-            RecacheIncomingBakes(sp);
+            // Do not copy incoming bake JPEGs into the asset cache here.
+            // A grey transfer uses its own texture ids, and a matching id
+            // would replace the good cached outfit before the hash is checked.
             m_seenAppearanceCap.TryRemove(sp.UUID, out _);
             m_packetCof.TryRemove(sp.UUID, out _);
+            m_viewerCof.TryRemove(sp.UUID, out _);
+            m_lastOutfit.TryRemove(sp.UUID, out _);
+            m_inflightOutfit.TryRemove(sp.UUID, out _);
             RememberOriginAppearance(sp);
 
-            // Seed what the previous region already published, then bake
-            // default/missing slots from the wearable list.
+            // One bake. Current Outfit is the outfit id. Incoming JPEGs are
+            // consulted only when their id is that hash and the cache missed.
             RequestBake(sp, "MakeRootAgent");
         }
 
@@ -792,6 +812,8 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
                 return;
             m_packetCof.TryRemove(sp.UUID, out _);
             m_originAppearance.TryRemove(sp.UUID, out _);
+            m_lastOutfit.TryRemove(sp.UUID, out _);
+            m_inflightOutfit.TryRemove(sp.UUID, out _);
             CancelBake(sp.UUID, "MakeChildAgent");
         }
 
@@ -803,72 +825,6 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
                 try { cts.Cancel(); }
                 catch (ObjectDisposedException) { }
             }
-        }
-
-        /// <summary>
-        /// Seed this region's asset cache from bake bytes already on the
-        /// presence (same-process child, or WearableCacheItem.TextureAsset).
-        /// Runs inside CompleteMovement while IsInTransit is still true, so
-        /// this must not use CanBake().
-        /// </summary>
-        private void RecacheIncomingBakes(ScenePresence sp)
-        {
-            if (sp?.Appearance?.Texture == null || sp.IsDeleted)
-                return;
-
-            IAssetCache cache = sp.Scene?.RequestModuleInterface<IAssetCache>();
-            if (cache == null)
-                return;
-
-            WearableCacheItem[] items = sp.Appearance.WearableCacheItems;
-            IAssetService assets = sp.Scene.AssetService;
-            int recached = 0;
-            foreach (BakeSlot slot in BakeLayerMap.Slots)
-            {
-                int idx = (int)slot.FaceIndex;
-                UUID bakeId = UUID.Zero;
-                byte[] data = null;
-
-                if (items != null && idx >= 0 && idx < items.Length)
-                {
-                    WearableCacheItem item = items[idx];
-                    bakeId = item.TextureID;
-                    data = item.TextureAsset?.Data;
-                }
-
-                if (BakeLayerMap.IsUnsetTexture(bakeId))
-                {
-                    Primitive.TextureEntryFace[] faces = sp.Appearance.Texture.FaceTextures;
-                    if (faces != null && idx >= 0 && idx < faces.Length && faces[idx] != null)
-                        bakeId = faces[idx].TextureID;
-                }
-
-                if (BakeLayerMap.IsUnsetTexture(bakeId))
-                    continue;
-
-                if (data == null || data.Length == 0)
-                {
-                    AssetBase existing = cache.GetCached(bakeId.ToString());
-                    if (existing?.Data == null || existing.Data.Length == 0)
-                        existing = assets?.GetCached(bakeId.ToString());
-                    data = existing?.Data;
-                }
-                if (data == null || data.Length == 0)
-                    continue;
-
-                AssetBase baked = CacheBakeAsset(cache, bakeId, sp.UUID, "SSBake " + slot.BakeType, data);
-                if (items != null && idx >= 0 && idx < items.Length)
-                    items[idx].TextureAsset = baked;
-
-                Primitive.TextureEntryFace face = sp.Appearance.Texture.GetFace((uint)idx);
-                if (face != null)
-                    face.TextureID = bakeId;
-                recached++;
-            }
-
-            if (recached > 0)
-                m_log.InfoFormat("[SSBAKE]: recached {0} incoming bake(s) for {1} so others can fetch them now",
-                    recached, sp.Name);
         }
 
         // Outfit / cache-check cancels an in-flight bake and starts over
@@ -885,10 +841,8 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
             // still true. Queue that bake and wait in the worker. Other
             // reasons (outfit / cache-check) must not start mid-transit.
             bool fromMakeRoot = string.Equals(reason, "MakeRootAgent", StringComparison.Ordinal);
-            bool attachmentsArrived = string.Equals(reason, "AttachmentsArrived", StringComparison.Ordinal);
             bool viewerRebake = string.Equals(reason, "IncrementCOFVersion", StringComparison.Ordinal);
-            bool arrivalPublish = fromMakeRoot || attachmentsArrived;
-            if (sp.IsInTransit && !arrivalPublish)
+            if (sp.IsInTransit && !fromMakeRoot)
                 return;
 
             UUID id = sp.UUID;
@@ -926,7 +880,7 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
                         // short settle. Incoming login and viewer Rebake
                         // Textures should publish as soon as the previous
                         // bake has cancelled.
-                        if (!arrivalPublish && !viewerRebake)
+                        if (!fromMakeRoot && !viewerRebake)
                             Thread.Sleep(OutfitBurstSettleMs);
                         if (token.IsCancellationRequested || !IsLatestGen(id, gen))
                         {
@@ -944,16 +898,10 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
                             return;
                         }
 
-                        if (arrivalPublish)
-                        {
+                        if (fromMakeRoot)
                             EnsureAttachmentsRezzed(sp, token);
-                            // Ask the previous region for incoming bake UUIDs.
-                            // Default or missing faces are not a full success:
-                            // TryBake fills those from the wearable list.
-                            TrySeedExistingBakes(sp);
-                        }
 
-                        bool ok = TryBake(sp, token, forceBake, arrivalPublish);
+                        bool ok = TryBake(sp, token, forceBake, gen);
 
                         if (token.IsCancellationRequested || !IsLatestGen(id, gen))
                         {
@@ -1213,7 +1161,15 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
             if (!CanBake(sp))
                 return;
 
-            m_log.InfoFormat("[SSBAKE]: attachments arrived for {0} after appearance; republish ({1} live)",
+            if (m_lastOutfit.ContainsKey(sp.UUID))
+            {
+                m_log.InfoFormat("[SSBAKE]: attachments arrived for {0} after appearance; republish ({1} live)",
+                    sp.Name, sp.GetAttachmentsCount());
+                PublishAppearance(sp);
+                return;
+            }
+
+            m_log.InfoFormat("[SSBAKE]: attachments arrived for {0} after appearance; bake ({1} live)",
                 sp.Name, sp.GetAttachmentsCount());
             RequestBake(sp, "AttachmentsArrived");
         }
@@ -1225,57 +1181,6 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
             List<ScenePresence> all = sp.Scene.GetScenePresences();
             foreach (ScenePresence p in all)
                 sp.SendAttachmentsToAgentNF(p);
-        }
-
-        /// <summary>
-        /// Copy bake JPEGs for incoming TextureEntry IDs: local Flotsam,
-        /// local XBakes, then origin GET /appearance. Skips default faces.
-        /// Does not replace TryBake — missing slots are filled from wearables.
-        /// </summary>
-        private void TrySeedExistingBakes(ScenePresence sp)
-        {
-            if (sp?.Appearance?.Texture?.FaceTextures == null)
-                return;
-
-            Scene scene = sp.Scene;
-            IAssetCache cache = scene?.RequestModuleInterface<IAssetCache>();
-            if (cache == null)
-                return;
-
-            WearableCacheItem[] xbakesStored = LoadXBakes(scene, sp.UUID, out _);
-            string appearance = OriginAppearanceUrl(sp);
-            if (!string.IsNullOrEmpty(appearance))
-                m_log.InfoFormat("[SSBAKE]: seeding bakes for {0} via {1}", sp.Name, appearance);
-            BakeAssetFetcher fetcher = new BakeAssetFetcher(m_log, scene.AssetService, cache);
-            int seeded = 0;
-            int missing = 0;
-            foreach (BakeSlot slot in BakeLayerMap.Slots)
-            {
-                Primitive.TextureEntryFace face = sp.Appearance.Texture.FaceTextures[(int)slot.FaceIndex];
-                if (face == null || BakeLayerMap.IsUnsetTexture(face.TextureID))
-                {
-                    missing++;
-                    continue;
-                }
-
-                AssetBase asset = fetcher.GetBake(face.TextureID, sp.UUID, (int)slot.FaceIndex,
-                    appearance, xbakesStored, out string src);
-                if (asset?.Data == null || asset.Data.Length == 0)
-                {
-                    missing++;
-                    m_log.DebugFormat("[SSBAKE]: seed miss {0} bake {1} for {2}",
-                        slot.BakeType, face.TextureID, sp.Name);
-                    continue;
-                }
-
-                seeded++;
-                m_log.DebugFormat("[SSBAKE]: seeded {0} bake {1} from {2} for {3}",
-                    slot.BakeType, face.TextureID, src, sp.Name);
-            }
-
-            if (seeded > 0 || missing > 0)
-                m_log.InfoFormat("[SSBAKE]: seeded {0} existing bake(s) for {1} ({2} default/missing; will bake from wearables)",
-                    seeded, sp.Name, missing);
         }
 
         private void RememberOriginAppearance(ScenePresence sp)
@@ -1396,8 +1301,7 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
             return true;
         }
 
-        private bool TryBake(IScenePresence sp, CancellationToken token, bool force = false,
-            bool preferIncoming = false)
+        private bool TryBake(IScenePresence sp, CancellationToken token, bool force, int generation)
         {
             if (sp == null || sp.IsNPC || sp.IsChildAgent)
                 return false;
@@ -1410,7 +1314,7 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
 
             try
             {
-                return BakeNow(sp, token, force, preferIncoming);
+                return BakeNow(sp, token, force, generation);
             }
             finally
             {
@@ -1424,8 +1328,7 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
                 && sp.Appearance?.Texture != null;
         }
 
-        private bool BakeNow(IScenePresence isp, CancellationToken token, bool force = false,
-            bool preferIncoming = false)
+        private bool BakeNow(IScenePresence isp, CancellationToken token, bool force, int generation)
         {
             ScenePresence sp = isp as ScenePresence;
             if (!CanBake(sp) || token.IsCancellationRequested)
@@ -1456,26 +1359,59 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
             if (token.IsCancellationRequested)
                 return false;
 
-            // Firestorm stacks tattoos in Current Outfit. AgentIsNowWearing
-            // is one item per type. HG visitors have no local COF, so a
-            // force-rebake would drop the head skin Firestorm already baked.
+            // Outfit identity is the Current Outfit hash. Reuse local cache,
+            // then XBakes, then a previous-sim bake whose id is that hash.
+            // Force composites and mints a new texture id. An empty Current
+            // Outfit is composited from the wearable list and not stored.
             bool forceNow = force;
-            bool prefer = preferIncoming;
-            if (forceNow && !resolver.UsedCof && !string.IsNullOrEmpty(foreign))
+            UUID outfitHash = resolver.UsedCof
+                ? CurrentOutfitFingerprint(resolved, resolver)
+                : UUID.Zero;
+            m_inflightOutfit[sp.UUID] = new InflightOutfit
             {
-                m_log.InfoFormat("[SSBAKE]: {0} has no Current Outfit; keeping incoming Firestorm bakes instead of recompositing a one-per-type appearance list",
-                    sp.Name);
-                forceNow = false;
-                prefer = true;
-            }
+                Generation = generation,
+                Hash = outfitHash
+            };
+            m_log.InfoFormat("[SSBAKE]: {0} outfit hash {1}",
+                sp.Name, resolver.UsedCof ? outfitHash.ToString() : "none (empty Current Outfit)");
 
+            try
+            {
+                UUID already;
+                if (!forceNow && resolver.UsedCof
+                    && m_lastOutfit.TryGetValue(sp.UUID, out already)
+                    && already.Equals(outfitHash)
+                    && HasCachedBakes(sp))
+                {
+                    m_log.InfoFormat("[SSBAKE]: {0} outfit unchanged; republish", sp.Name);
+                    if (!token.IsCancellationRequested && CanBake(sp))
+                        PublishAppearance(sp);
+                    return true;
+                }
+
+                return BakeSlots(sp, token, forceNow, generation, scene, cache, fetcher, resolver,
+                    resolved, foreign, outfitHash);
+            }
+            finally
+            {
+                ClearInflight(sp.UUID, generation);
+            }
+        }
+
+        private bool BakeSlots(ScenePresence sp, CancellationToken token, bool forceNow, int generation,
+            Scene scene, IAssetCache cache, BakeAssetFetcher fetcher, WearableTextureResolver resolver,
+            Dictionary<BakeType, List<ResolvedLayer>> resolved, string foreign, UUID outfitHash)
+        {
             WearableCacheItem[] wearableCache = sp.Appearance.WearableCacheItems;
             if (wearableCache == null)
                 wearableCache = WearableCacheItem.GetDefaultCacheItem();
 
-            IBakedTextureModule xbakes;
-            WearableCacheItem[] xbakesStored = LoadXBakes(scene, sp.UUID, out xbakes);
+            IBakedTextureModule xbakes = null;
+            WearableCacheItem[] xbakesStored = null;
+            if (resolver.UsedCof)
+                xbakesStored = LoadXBakes(scene, sp.UUID, out xbakes);
 
+            int wanted = 0;
             int produced = 0;
             int rendered = 0;
             int reused = 0;
@@ -1490,7 +1426,7 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
                 if (!CanBake(sp))
                 {
                     m_log.InfoFormat("[SSBAKE]: aborting bake, {0} is no longer in the region",
-                        isp.UUID);
+                        sp.UUID);
                     return false;
                 }
 
@@ -1511,36 +1447,19 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
                 if (bakeId.IsZero())
                     continue;
 
+                wanted++;
                 AssetBase baked = null;
-                UUID reuseId = bakeId;
-                if (!forceNow)
+                if (resolver.UsedCof && !forceNow)
                 {
-                    // Arrival only: keep a bake UUID we just pulled from the
-                    // previous region. Outfit change must use the wearable hash
-                    // or we would republish the old clothes.
-                    if (prefer)
-                    {
-                        Primitive.TextureEntryFace incomingFace =
-                            sp.Appearance.Texture.FaceTextures[(int)slot.FaceIndex];
-                        UUID incomingId = incomingFace == null ? UUID.Zero : incomingFace.TextureID;
-                        if (!BakeLayerMap.IsUnsetTexture(incomingId))
-                        {
-                            AssetBase seeded = cache.GetCached(incomingId.ToString());
-                            if (seeded?.Data != null && seeded.Data.Length > 0)
-                            {
-                                baked = seeded;
-                                reuseId = incomingId;
-                            }
-                        }
-                    }
+                    baked = TryReuseBake(bakeId, slot, cache, xbakesStored, sp.UUID);
                     if (baked == null)
-                        baked = TryReuseBake(bakeId, slot, cache, xbakesStored, sp.UUID);
+                        baked = TryFetchPreviousHash(sp, slot, bakeId, fetcher, xbakesStored);
                 }
                 if (baked != null)
                 {
                     m_log.InfoFormat("[SSBAKE]: {0} reuse {1} ({2} layer(s))",
-                        slot.BakeType, reuseId, layers.Count);
-                    ApplyBake(sp, wearableCache, slot, bakeId, reuseId, baked);
+                        slot.BakeType, bakeId, layers.Count);
+                    ApplyBake(sp, wearableCache, slot, bakeId, bakeId, baked);
                     produced++;
                     reused++;
                     continue;
@@ -1626,19 +1545,21 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
                     continue;
                 }
 
-                // Hash stays the XBakes identity. On a forced rebake mint a
-                // new TextureID so the viewer actually GET /appearance again
-                // (same hash UUID is already in its texture cache).
-                UUID fetchId = forceNow ? UUID.Random() : bakeId;
+                // Current Outfit keeps the hash as the XBakes identity. Force
+                // mints a new TextureID so the viewer GETs /appearance again.
+                // An empty Current Outfit is not an outfit id: publish a new
+                // id and do not keep the wearable-list hash.
+                bool keepHash = resolver.UsedCof;
+                UUID fetchId = (forceNow || !keepHash) ? UUID.Random() : bakeId;
                 baked = CacheBakeAsset(cache, fetchId, sp.UUID, "SSBake " + slot.BakeType, j2k);
-                if (fetchId.NotEqual(bakeId))
+                if (keepHash && fetchId.NotEqual(bakeId))
                     CacheBakeAsset(cache, bakeId, sp.UUID, "SSBake " + slot.BakeType, j2k);
 
                 m_log.InfoFormat("[SSBAKE]: {0} encoded {1} bytes -> {2}{3}",
                     slot.BakeType, j2k.Length, fetchId,
-                    fetchId.NotEqual(bakeId) ? " hash=" + bakeId : "");
+                    keepHash && fetchId.NotEqual(bakeId) ? " hash=" + bakeId : "");
 
-                ApplyBake(sp, wearableCache, slot, bakeId, fetchId, baked);
+                ApplyBake(sp, wearableCache, slot, keepHash ? bakeId : UUID.Zero, fetchId, baked);
                 produced++;
                 rendered++;
             }
@@ -1657,7 +1578,8 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
                 return false;
             }
 
-            if (xbakes != null)
+            bool complete = produced == wanted;
+            if (complete && resolver.UsedCof && xbakes != null)
                 StoreXBakes(xbakes, sp, wearableCache);
 
             bool isHG = !string.IsNullOrEmpty(foreign);
@@ -1667,17 +1589,198 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
             if (!CanBake(sp))
             {
                 m_log.InfoFormat("[SSBAKE]: bake finished but {0} already left; not sending appearance",
-                    isp.UUID);
+                    sp.UUID);
                 return produced > 0;
             }
+
+            if (complete && IsLatestGen(sp.UUID, generation))
+                m_lastOutfit[sp.UUID] = outfitHash;
 
             ReapplyBakes(sp, wearableCache);
             PublishAppearance(sp);
 
-            m_log.InfoFormat("[SSBAKE]: done {0}: {1} bake(s) ({2} rendered, {3} reused){4}",
+            m_log.InfoFormat("[SSBAKE]: done {0}: {1} bake(s) ({2} rendered, {3} reused){4}{5}",
                 sp.Name, produced, rendered, reused,
+                complete ? "" : " partial",
                 isHG ? " (HG, not saved to avatar service)" : "");
             return true;
+        }
+
+        private void NoteArrivalAppearance(ScenePresence sp)
+        {
+            if (sp.IsInTransit)
+            {
+                m_log.InfoFormat("[SSBAKE]: {0} arrival COF version recorded; bake will publish it",
+                    sp.Name);
+                return;
+            }
+
+            if (m_lastOutfit.ContainsKey(sp.UUID))
+            {
+                m_log.InfoFormat("[SSBAKE]: {0} arrival COF version recorded; republish", sp.Name);
+                ScenePresence publish = sp;
+                Util.FireAndForget(delegate { PublishAppearance(publish); }, null, "SSBake.Republish");
+                return;
+            }
+
+            if (BakePendingOrRunning(sp.UUID))
+            {
+                m_log.InfoFormat("[SSBAKE]: {0} arrival COF version recorded; in-flight bake will publish it",
+                    sp.Name);
+                return;
+            }
+
+            m_log.InfoFormat("[SSBAKE]: {0} arrival COF version recorded; starting bake", sp.Name);
+            RequestBake(sp, "UpdateAvatarAppearance");
+        }
+
+        private void HandleLaterAppearance(ScenePresence sp)
+        {
+            if (sp == null || sp.IsDeleted || sp.IsChildAgent)
+                return;
+
+            UUID fingerprint;
+            if (!TryCurrentOutfitFingerprint(sp, out fingerprint))
+            {
+                m_log.InfoFormat("[SSBAKE]: UpdateAvatarAppearance {0} could not read Current Outfit; rebake",
+                    sp.Name);
+                RequestBake(sp, "UpdateAvatarAppearance");
+                return;
+            }
+
+            UUID id = sp.UUID;
+            if (BakePendingOrRunning(id))
+            {
+                InflightOutfit inflight;
+                if (m_inflightOutfit.TryGetValue(id, out inflight) && inflight != null)
+                {
+                    if (inflight.Hash.Equals(fingerprint))
+                    {
+                        m_log.InfoFormat("[SSBAKE]: UpdateAvatarAppearance {0} outfit unchanged; bake already running",
+                            sp.Name);
+                        return;
+                    }
+
+                    m_log.InfoFormat("[SSBAKE]: UpdateAvatarAppearance {0} outfit changed during bake; rebake",
+                        sp.Name);
+                    RequestBake(sp, "UpdateAvatarAppearance");
+                    return;
+                }
+
+                m_log.InfoFormat("[SSBAKE]: UpdateAvatarAppearance {0} outfit not hashed yet; in-flight bake will read Current Outfit",
+                    sp.Name);
+                return;
+            }
+
+            UUID last;
+            if (m_lastOutfit.TryGetValue(id, out last) && last.Equals(fingerprint))
+            {
+                m_log.InfoFormat("[SSBAKE]: UpdateAvatarAppearance {0} outfit unchanged; republish cof version",
+                    sp.Name);
+                PublishAppearance(sp);
+                return;
+            }
+
+            m_log.InfoFormat("[SSBAKE]: UpdateAvatarAppearance {0} outfit changed; rebake", sp.Name);
+            RequestBake(sp, "UpdateAvatarAppearance");
+        }
+
+        private bool TryCurrentOutfitFingerprint(ScenePresence sp, out UUID fingerprint)
+        {
+            fingerprint = UUID.Zero;
+            if (sp == null || sp.IsDeleted || sp.IsChildAgent || sp.IsNPC || sp.Appearance == null)
+                return false;
+
+            Scene scene = sp.Scene;
+            if (scene == null)
+                return false;
+            IAssetCache cache = scene.RequestModuleInterface<IAssetCache>();
+            if (cache == null)
+                return false;
+
+            string foreign = ForeignAssetUrl(scene, sp.UUID);
+            BakeAssetFetcher fetcher = new BakeAssetFetcher(m_log, scene.AssetService, cache);
+            WearableTextureResolver resolver = new WearableTextureResolver(
+                m_log, fetcher, scene.InventoryService, sp.UUID);
+            Dictionary<BakeType, List<ResolvedLayer>> resolved = resolver.Resolve(sp.Appearance, foreign);
+            if (!resolver.UsedCof)
+                return true;
+
+            fingerprint = CurrentOutfitFingerprint(resolved, resolver);
+            return true;
+        }
+
+        private static UUID CurrentOutfitFingerprint(
+            Dictionary<BakeType, List<ResolvedLayer>> resolved,
+            WearableTextureResolver resolver)
+        {
+            BakeSlot[] slots = BakeLayerMap.Slots;
+            UUID[] faces = new UUID[slots.Length];
+            for (int i = 0; i < slots.Length; i++)
+            {
+                BakeSlot slot = slots[i];
+                List<ResolvedLayer> layers = null;
+                if (resolved != null)
+                    resolved.TryGetValue(slot.BakeType, out layers);
+                bool bare = layers == null || layers.Count == 0;
+                bool library = bare && BakeLayerMap.HasLibrarySkinBase(slot.BakeType) && resolver.HasSkin;
+                if (bare && !library)
+                    continue;
+
+                if (bare)
+                    layers = new List<ResolvedLayer>();
+                faces[i] = BakeId.FromLayers((int)slot.FaceIndex, layers, FillTintFor(slot.BakeType, resolver));
+            }
+            return BakeId.FromFaceHashes(faces);
+        }
+
+        private void ClearInflight(UUID agentId, int generation)
+        {
+            InflightOutfit cur;
+            if (m_inflightOutfit.TryGetValue(agentId, out cur)
+                && cur != null
+                && cur.Generation == generation)
+                m_inflightOutfit.TryRemove(agentId, out _);
+        }
+
+        private AssetBase TryFetchPreviousHash(ScenePresence sp, BakeSlot slot, UUID bakeId,
+            BakeAssetFetcher fetcher, WearableCacheItem[] xbakesStored)
+        {
+            Primitive.TextureEntryFace[] faces = sp.Appearance?.Texture?.FaceTextures;
+            int idx = (int)slot.FaceIndex;
+            Primitive.TextureEntryFace face = null;
+            if (faces != null && idx >= 0 && idx < faces.Length)
+                face = faces[idx];
+            UUID incomingId = face == null ? UUID.Zero : face.TextureID;
+            if (incomingId.IsZero() || incomingId.NotEqual(bakeId) || BakeLayerMap.IsUnsetTexture(incomingId))
+                return null;
+
+            // Bytes that rode along in the teleport. Cache and XBakes already
+            // missed, so writing this id does not replace a stored outfit.
+            WearableCacheItem[] carried = sp.Appearance.WearableCacheItems;
+            if (carried != null && idx >= 0 && idx < carried.Length)
+            {
+                byte[] data = carried[idx].TextureAsset?.Data;
+                if (carried[idx].TextureID.Equals(bakeId) && data != null && data.Length > 0)
+                {
+                    IAssetCache cache = sp.Scene?.RequestModuleInterface<IAssetCache>();
+                    if (cache != null)
+                    {
+                        m_log.InfoFormat("[SSBAKE]: {0} carried bake {1} matches outfit hash",
+                            slot.BakeType, bakeId);
+                        return CacheBakeAsset(cache, bakeId, sp.UUID, "SSBake " + slot.BakeType, data);
+                    }
+                }
+            }
+
+            string appearance = OriginAppearanceUrl(sp);
+            AssetBase asset = fetcher.GetBake(incomingId, sp.UUID, idx, appearance, xbakesStored, out string src);
+            if (asset?.Data == null || asset.Data.Length == 0)
+                return null;
+
+            m_log.InfoFormat("[SSBAKE]: {0} previous bake {1} matches outfit hash ({2})",
+                slot.BakeType, incomingId, src);
+            return asset;
         }
 
         private WearableCacheItem[] LoadXBakes(Scene scene, UUID agentId, out IBakedTextureModule xbakes)
@@ -1847,17 +1950,46 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
         // the viewer's COF when that is ahead of the last packet.
         private void ResolvePacketCof(UUID agentId)
         {
-            int viewer = 1;
-            int storedViewer;
-            if (m_viewerCof.TryGetValue(agentId, out storedViewer) && storedViewer > 0)
-                viewer = storedViewer;
+            int posted;
+            bool hasPosted = m_viewerCof.TryGetValue(agentId, out posted) && posted > 0;
             int packet = 0;
             m_packetCof.TryGetValue(agentId, out packet);
-            if (packet >= viewer)
+
+            if (!hasPosted)
+            {
+                // She already accepted Appearance.Serial. An equal CofVersion
+                // is dropped and the grey textures stay. The first packet is
+                // the next version. A republish does not climb again.
+                int serial = AppearanceSerial(agentId);
+                int floor = serial > 0 ? serial + 1 : 1;
+                if (packet < floor)
+                    packet = floor;
+                m_packetCof[agentId] = packet;
+                return;
+            }
+
+            if (packet >= posted)
                 packet++;
             else
-                packet = viewer;
+                packet = posted;
             m_packetCof[agentId] = packet;
+        }
+
+        // Posted UpdateAvatarAppearance / IncrementCOFVersion wins. Before
+        // that post, Appearance.Serial is the version she arrived with.
+        private int ViewerCofOrSerial(UUID agentId)
+        {
+            int stored;
+            if (m_viewerCof.TryGetValue(agentId, out stored) && stored > 0)
+                return stored;
+            int serial = AppearanceSerial(agentId);
+            return serial > 0 ? serial : 1;
+        }
+
+        private int AppearanceSerial(UUID agentId)
+        {
+            ScenePresence sp = FindPresence(agentId);
+            return sp?.Appearance != null ? sp.Appearance.Serial : 0;
         }
 
         private static Color4 FillTintFor(BakeType bakeType, WearableTextureResolver resolver)
