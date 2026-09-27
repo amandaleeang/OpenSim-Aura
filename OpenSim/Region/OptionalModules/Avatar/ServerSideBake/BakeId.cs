@@ -73,6 +73,27 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
             return new UUID(hash, 0);
         }
 
+        /// <summary>
+        /// One id for a whole Current Outfit, from the per-face layer hashes.
+        /// The wearable list is not an outfit id.
+        /// </summary>
+        public static UUID FromFaceHashes(IList<UUID> faceHashes)
+        {
+            int n = faceHashes == null ? 0 : faceHashes.Count;
+            StringBuilder sb = new StringBuilder(16 + n * 40);
+            sb.Append("ssb-outfit-v1");
+            for (int i = 0; i < n; i++)
+            {
+                sb.Append('|');
+                sb.Append(faceHashes[i].ToString());
+            }
+
+            byte[] hash = MD5.HashData(Encoding.ASCII.GetBytes(sb.ToString()));
+            hash[6] = (byte)((hash[6] & 0x0f) | 0x30);
+            hash[8] = (byte)((hash[8] & 0x3f) | 0x80);
+            return new UUID(hash, 0);
+        }
+
         private static void AppendTint(StringBuilder sb, Color4 c)
         {
             sb.Append(c.R.ToString("0.000", CultureInfo.InvariantCulture));
