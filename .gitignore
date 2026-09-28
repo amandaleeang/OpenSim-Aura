@@ -105,6 +105,7 @@ TAGS
 *~
 Makefile.local
 bin/.version
+bin/aura-release.txt
 compile.bat
 OpenSim/Data/Tests/test-results/
 OpenSim/Framework/Serialization/Tests/test-results/

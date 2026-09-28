@@ -174,6 +174,24 @@ or for a Robust grid, copy `Robust.HG.ini.example` to `Robust.ini` (not `Robust.
 
 Hypergrid also needs a **public** HomeURI (`[Const] BaseHostname` is not `127.0.0.1`).
 
+## Login notice
+
+On a normal login and on a Hypergrid arrival, only the arriving avatar sees a private local-chat line:
+
+```
+This Sim is running on OpenSim-Aura v1.0.8
+  https://github.com/amandaleeang/OpenSim-Aura
+```
+
+The version comes from `bin/aura-release.txt`, which the release build writes before it zips `bin`. A source build has no such file and says `dev`.
+
+`[AuraLogin] CheckForUpdates` defaults to true in `OpenSimDefaults.ini`. The simulator then asks GitHub for the latest release every six hours. When that tag is newer than `aura-release.txt`, the estate owner and estate managers get a second private chat line naming both versions and linking to that release. Parcel owners stay on the branding line. A `dev` build does not call GitHub and does not show that line. To turn the check off in `OpenSim.ini`:
+
+```
+[AuraLogin]
+    CheckForUpdates = false
+```
+
 ## `[ServerSideBake]` — Firestorm SSA
 
 In `OpenSimDefaults.ini`. Aura default is on.
