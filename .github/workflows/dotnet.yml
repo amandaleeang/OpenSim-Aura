@@ -85,6 +85,10 @@ jobs:
         echo "tag=${tag}" >> "$GITHUB_OUTPUT"
         echo "zip=opensim-aura-${tag}-${PLATFORM}.zip" >> "$GITHUB_OUTPUT"
 
+    - name: Stamp release tag
+      shell: bash
+      run: printf '%s\n' "${{ steps.vars.outputs.tag }}" > bin/aura-release.txt
+
     - name: Package (Linux)
       if: runner.os == 'Linux'
       run: zip -r "${{ steps.vars.outputs.zip }}" bin ThirdPartyLicenses README.md CONTRIBUTORS.txt LICENSE.txt
