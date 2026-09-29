@@ -37,8 +37,9 @@ using OpenSim.Services.Interfaces;
 namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
 {
     /// <summary>
-    /// Wearable textures: cache, local assets, HG /assets/.
-    /// Bake JPEGs: GetBake uses Flotsam, XBakes, then origin /appearance.
+    /// Visitor wearables and textures: Flotsam, then the home asset server.
+    /// Those bytes stay in Flotsam. Local-grid reads run only when no home URL
+    /// was given. Bake JPEGs: GetBake uses Flotsam, XBakes, then origin /appearance.
     /// </summary>
     public class BakeAssetFetcher
     {
@@ -80,20 +81,22 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
 
             if (m_assets != null)
             {
-                asset = m_assets.Get(key);
-                if (asset != null && asset.Data != null && asset.Data.Length > 0)
-                {
-                    source = "local";
-                    m_cache?.Cache(asset);
-                    return asset;
-                }
-
                 if (!string.IsNullOrEmpty(foreignAssetService))
                 {
-                    asset = m_assets.Get(key, foreignAssetService, true);
+                    // false: cache the bytes in Flotsam, do not write the local database.
+                    asset = m_assets.Get(key, foreignAssetService, false);
                     if (asset != null && asset.Data != null && asset.Data.Length > 0)
                     {
                         source = "hg:" + foreignAssetService;
+                        return asset;
+                    }
+                }
+                else
+                {
+                    asset = m_assets.Get(key);
+                    if (asset != null && asset.Data != null && asset.Data.Length > 0)
+                    {
+                        source = "local";
                         m_cache?.Cache(asset);
                         return asset;
                     }

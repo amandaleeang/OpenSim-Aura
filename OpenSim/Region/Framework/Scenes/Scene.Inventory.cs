@@ -2747,6 +2747,8 @@ namespace OpenSim.Region.Framework.Scenes
             if (item is null)
                 return null;
 
+            CopyForeignRezAssets(item.OwnerID, item.AssetID);
+
             bool success = sourcePart.Inventory.GetRezReadySceneObjects(item, newowner, newgroup,
                 out List<SceneObjectGroup> objlist, out List<Vector3> veclist,
                 out Vector3 bbox, out float _);
@@ -2873,12 +2875,25 @@ namespace OpenSim.Region.Framework.Scenes
             return objlist;
         }
 
+        /// <summary>
+        /// A foreign user's in-world rez is copied into the local asset database.
+        /// Worn attachments do not use this. A local user is a no-op.
+        /// </summary>
+        private void CopyForeignRezAssets(UUID ownerID, UUID assetID)
+        {
+            if (assetID.IsZero())
+                return;
+            RequestModuleInterface<IInventoryAccessModule>()?.CopyForeignAssetsLocal(ownerID, assetID);
+        }
+
         public SceneObjectGroup ScriptRezObject(SceneObjectPart sourcePart, TaskInventoryItem item,
                 UUID newSOGID,
                 Vector3 pos, Quaternion? rot, Vector3 vel, int param, bool atRoot)
         {
             if (item is null)
                 return null;
+
+            CopyForeignRezAssets(item.OwnerID, item.AssetID);
 
             if(TryGetSceneObjectGroup(newSOGID, out _))
                 return null;

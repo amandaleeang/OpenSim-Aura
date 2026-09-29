@@ -200,10 +200,51 @@ namespace OpenSim.Region.CoreModules.Framework.InventoryAccess
 
         public void Get(IEnumerable<UUID> assetIDs, UUID ownerID, string userAssetURL)
         {
+            GatherHome(assetIDs, userAssetURL);
+        }
+
+        /// <summary>
+        /// Gather from the home asset server into Flotsam, then copy any asset
+        /// that is not already in the local database.
+        /// </summary>
+        public void CopyToLocal(UUID assetID, UUID ownerID, string userAssetURL)
+        {
+            CopyToLocal(new[] { assetID }, ownerID, userAssetURL);
+        }
+
+        public void CopyToLocal(IEnumerable<UUID> assetIDs, UUID ownerID, string userAssetURL)
+        {
+            HGUuidGatherer gathered = GatherHome(assetIDs, userAssetURL, waitForAll: true);
+            if (gathered != null)
+                StoreGatheredLocal(gathered.GatheredUuids);
+        }
+
+        /// <summary>
+        /// Gather the assets referenced by a live object (a dropped attachment)
+        /// from the home server into Flotsam, then copy them into the local database.
+        /// </summary>
+        public void CopyObjectToLocal(SceneObjectGroup sog, string userAssetURL)
+        {
+            if (sog == null || string.IsNullOrEmpty(userAssetURL))
+                return;
+
+            HGUuidGatherer uuidGatherer = new(m_scene.AssetService, userAssetURL);
+            uuidGatherer.AddForInspection(sog);
+            RunGather(uuidGatherer, waitForAll: true);
+            StoreGatheredLocal(uuidGatherer.GatheredUuids);
+        }
+
+        private HGUuidGatherer GatherHome(IEnumerable<UUID> assetIDs, string userAssetURL)
+        {
+            return GatherHome(assetIDs, userAssetURL, waitForAll: false);
+        }
+
+        private HGUuidGatherer GatherHome(IEnumerable<UUID> assetIDs, string userAssetURL, bool waitForAll)
+        {
             if (string.IsNullOrEmpty(userAssetURL))
             {
                 m_log.Debug("[HG ASSET MAPPER]: Problems getting item assets. Asset server unknown");
-                return;
+                return null;
             }
 
             HGUuidGatherer uuidGatherer = new(m_scene.AssetService, userAssetURL);
@@ -219,9 +260,24 @@ namespace OpenSim.Region.CoreModules.Framework.InventoryAccess
                 added++;
             }
             if (added == 0)
-                return;
+                return null;
 
-            if (m_concurrent)
+            RunGather(uuidGatherer, waitForAll);
+
+            bool success = uuidGatherer.FailedUUIDs.Count == 0;
+            if (!success)
+                m_log.Debug($"[HG ASSET MAPPER]: Problems getting {added} item asset(s) (first {first}) from asset server {userAssetURL}");
+            else
+                m_log.Debug($"[HG ASSET MAPPER]: Successfully got {added} item asset(s) (first {first}, gathered {uuidGatherer.GatheredUuids.Count}) from asset server {userAssetURL}");
+            return uuidGatherer;
+        }
+
+        private void RunGather(HGUuidGatherer uuidGatherer, bool waitForAll)
+        {
+            // A local copy has to see every byte. The concurrent gather returns
+            // while a timed-out request is still in flight, so those assets
+            // would never be stored.
+            if (m_concurrent && !waitForAll)
                 uuidGatherer.GatherAllConcurrent(m_waveSize, m_timeoutMs);
             else
             {
@@ -230,12 +286,55 @@ namespace OpenSim.Region.CoreModules.Framework.InventoryAccess
                 uuidGatherer.GatherAll();
                 uuidGatherer.FetchUnfetchedLeavesSequential();
             }
+        }
 
-            bool success = uuidGatherer.FailedUUIDs.Count == 0;
-            if (!success)
-                m_log.Debug($"[HG ASSET MAPPER]: Problems getting {added} item asset(s) (first {first}) from asset server {userAssetURL}");
-            else
-                m_log.Debug($"[HG ASSET MAPPER]: Successfully got {added} item asset(s) (first {first}, gathered {uuidGatherer.GatheredUuids.Count}) from asset server {userAssetURL}");
+        private void StoreGatheredLocal(IDictionary<UUID, sbyte> gathered)
+        {
+            if (gathered == null || gathered.Count == 0)
+                return;
+
+            List<UUID> ids = new(gathered.Count);
+            foreach (UUID id in gathered.Keys)
+            {
+                if (id.IsNotZero())
+                    ids.Add(id);
+            }
+            if (ids.Count == 0)
+                return;
+
+            string[] keys = new string[ids.Count];
+            for (int i = 0; i < ids.Count; i++)
+                keys[i] = ids[i].ToString();
+
+            bool[] exist = null;
+            try
+            {
+                exist = m_scene.AssetService.AssetsExist(keys);
+            }
+            catch (Exception e)
+            {
+                m_log.Debug($"[HG ASSET MAPPER]: AssetsExist failed before local copy: {e.Message}");
+            }
+
+            int stored = 0;
+            for (int i = 0; i < ids.Count; i++)
+            {
+                if (exist != null && i < exist.Length && exist[i])
+                    continue;
+
+                AssetBase asset = m_scene.AssetService.Get(ids[i].ToString());
+                if (asset == null || asset.Data == null || asset.Data.Length == 0)
+                    continue;
+                if (asset.Temporary || asset.Local)
+                    continue;
+
+                string result = m_scene.AssetService.Store(asset);
+                if (!string.IsNullOrEmpty(result) && !result.Equals(UUID.ZeroString, StringComparison.OrdinalIgnoreCase))
+                    stored++;
+            }
+
+            if (stored > 0)
+                m_log.Debug($"[HG ASSET MAPPER]: Copied {stored} asset(s) into the local asset database");
         }
 
         public void Post(UUID assetID, UUID ownerID, string userAssetURL)
