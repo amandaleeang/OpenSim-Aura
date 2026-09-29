@@ -332,7 +332,14 @@ namespace OpenSim.Region.CoreModules.Framework.InventoryAccess
             }
 
             if (IsForeignUser(remoteClient.AgentId, out string userAssetServer) && userAssetServer.Length > 0)
-                m_assMapper.Get(item.AssetID, remoteClient.AgentId, userAssetServer);
+            {
+                // Worn attachments stay in Flotsam. An in-world rez is copied
+                // into the local asset database so it survives cache expiry.
+                if (attachment)
+                    m_assMapper.Get(item.AssetID, remoteClient.AgentId, userAssetServer);
+                else
+                    m_assMapper.CopyToLocal(item.AssetID, remoteClient.AgentId, userAssetServer);
+            }
 
             // OK, we're done fetching. Pass it up to the default RezObject
             SceneObjectGroup sog = base.RezObject(remoteClient, itemID, groupID, RayEnd, RayStart, RayTargetID, BypassRayCast, RayEndIsIntersection,
@@ -340,6 +347,22 @@ namespace OpenSim.Region.CoreModules.Framework.InventoryAccess
 
             return sog;
 
+        }
+
+        public override void CopyForeignAssetsLocal(UUID ownerID, UUID assetID)
+        {
+            if (assetID.IsZero())
+                return;
+            if (IsForeignUser(ownerID, out string userAssetServer) && userAssetServer.Length > 0)
+                m_assMapper.CopyToLocal(assetID, ownerID, userAssetServer);
+        }
+
+        public override void CopyForeignObjectLocal(UUID ownerID, SceneObjectGroup sog)
+        {
+            if (sog == null)
+                return;
+            if (IsForeignUser(ownerID, out string userAssetServer) && userAssetServer.Length > 0)
+                m_assMapper.CopyObjectToLocal(sog, userAssetServer);
         }
 
         public override void FetchItemAssets(UUID OwnerID, InventoryItemBase item)

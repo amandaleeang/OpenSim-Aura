@@ -73,6 +73,11 @@ namespace OpenSim.Region.CoreModules.ServiceConnectorsOut.Asset
         private ObjectJobEngine m_localRequestsQueue;
         private ObjectJobEngine m_remoteRequestsQueue;
 
+        // Local-database misses only. A Flotsam negative entry means the home
+        // asset server was already asked. Sharing those two stops a visitor
+        // fetch from ever reaching home.
+        private ExpiringKey<string> m_localNegative;
+
         public Type ReplaceableInterface
         {
             get { return null; }
@@ -137,6 +142,15 @@ namespace OpenSim.Region.CoreModules.ServiceConnectorsOut.Asset
 
                     m_localRequestsQueue = new ObjectJobEngine(AssetRequestProcessor, "GetAssetsWorkers", 2000, 2);
                     m_remoteRequestsQueue = new ObjectJobEngine(AssetRequestProcessor, "GetRemoteAssetsWorkers", 2000, 2);
+
+                    int negativeSeconds = 120;
+                    IConfig cacheConfig = source.Configs["AssetCache"];
+                    if (cacheConfig != null)
+                        negativeSeconds = cacheConfig.GetInt("NegativeCacheTimeout", negativeSeconds);
+                    if (negativeSeconds < 1)
+                        negativeSeconds = 1;
+                    m_localNegative = new ExpiringKey<string>(negativeSeconds * 1000);
+
                     m_Enabled = true;
                     m_log.Info("[REGIONASSETCONNECTOR]: enabled");
                 }
@@ -156,6 +170,8 @@ namespace OpenSim.Region.CoreModules.ServiceConnectorsOut.Asset
             m_localRequestsQueue = null;
             m_remoteRequestsQueue.Dispose();
             m_remoteRequestsQueue = null;
+            m_localNegative?.Dispose();
+            m_localNegative = null;
 
 
         }
@@ -274,14 +290,18 @@ namespace OpenSim.Region.CoreModules.ServiceConnectorsOut.Asset
                     if (asset != null)
                         return asset;
                 }
+                if (IsLocalNegative(id))
+                    return null;
+
                 asset = GetFromLocal(id);
-                if(m_Cache != null)
+                if (asset != null)
                 {
-                    if(asset == null)
-                        m_Cache.CacheNegative(id);
-                    else
+                    ClearLocalNegative(id);
+                    if (m_Cache != null)
                         m_Cache.Cache(asset);
                 }
+                else
+                    NoteLocalNegative(id);
             }
             return asset;
         }
@@ -302,16 +322,35 @@ namespace OpenSim.Region.CoreModules.ServiceConnectorsOut.Asset
                     return asset;
             }
 
+            if (IsLocalNegative(id))
+                return null;
+
             asset = GetFromLocal(id);
             if (asset != null)
             {
+                ClearLocalNegative(id);
                 if (m_Cache != null)
                     m_Cache.Cache(asset);
             }
-            else if (m_Cache != null)
-                m_Cache.CacheNegative(id);
+            else
+                NoteLocalNegative(id);
 
             return asset;
+        }
+
+        private bool IsLocalNegative(string id)
+        {
+            return m_localNegative != null && m_localNegative.ContainsKey(id);
+        }
+
+        private void NoteLocalNegative(string id)
+        {
+            m_localNegative?.Add(id);
+        }
+
+        private void ClearLocalNegative(string id)
+        {
+            m_localNegative?.Remove(id);
         }
 
         private AssetBase GetVisitorAsset(string id, string homeUrl)
@@ -562,6 +601,7 @@ namespace OpenSim.Region.CoreModules.ServiceConnectorsOut.Asset
                     return asset.ID;
             }
 
+            ClearLocalNegative(asset.ID);
             id = StoreLocal(asset);
 
             return string.IsNullOrEmpty(id) || id.Equals(UUID.ZeroString) ? string.Empty : id;

@@ -869,6 +869,10 @@ namespace OpenSim.Region.CoreModules.Avatar.Attachments
                 if (!m_scene.Permissions.CanRezObject(so.PrimCount, sp.UUID, sp.AbsolutePosition))
                     return;
 
+                // The dropped object stays in the region. Copy its assets into
+                // the local database. Worn attachments are not copied.
+                m_invAccessModule?.CopyForeignObjectLocal(sp.UUID, so);
+
                 bool changed = false;
                 if (inventoryID.IsNotZero())
                     changed = sp.Appearance.DetachAttachment(inventoryID);

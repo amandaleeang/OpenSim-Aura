@@ -1200,6 +1200,14 @@ namespace OpenSim.Region.CoreModules.Framework.InventoryAccess
             PrefetchLocalAssets(assetIDs);
         }
 
+        public virtual void CopyForeignAssetsLocal(UUID ownerID, UUID assetID)
+        {
+        }
+
+        public virtual void CopyForeignObjectLocal(UUID ownerID, SceneObjectGroup sog)
+        {
+        }
+
         public virtual void PostItemAssets(UUID ownerID, IList<UUID> assetIDs)
         {
             PrefetchLocalAssets(assetIDs);

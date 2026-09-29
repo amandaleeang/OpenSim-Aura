@@ -143,6 +143,20 @@ namespace OpenSim.Region.Framework.Interfaces
         void FetchItemAssets(UUID ownerID, IList<UUID> assetIDs);
 
         /// <summary>
+        /// Copy a foreign user's object asset, and the assets it references,
+        /// into the local asset database. Used when the object is rezzed into
+        /// the world. Worn attachments do not call this. No-op for a local user.
+        /// </summary>
+        void CopyForeignAssetsLocal(UUID ownerID, UUID assetID);
+
+        /// <summary>
+        /// Copy a live foreign object and the assets it references into the
+        /// local asset database. Used when a worn attachment is dropped.
+        /// No-op for a local user.
+        /// </summary>
+        void CopyForeignObjectLocal(UUID ownerID, SceneObjectGroup sog);
+
+        /// <summary>
         /// Post or prefetch nested assets for several inventory roots.
         /// Foreign owners: push to the user's home asset server.
         /// Local owners: gather via the local IAssetService (Flotsam / Robust).

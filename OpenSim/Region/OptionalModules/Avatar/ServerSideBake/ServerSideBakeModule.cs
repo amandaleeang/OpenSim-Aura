@@ -2058,10 +2058,28 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
 
         private static string ForeignAssetUrl(Scene scene, UUID agentId)
         {
-            AgentCircuitData circuit = scene?.AuthenticateHandler?.GetAgentCircuitData(agentId);
+            if (scene == null || agentId.IsZero())
+                return null;
+
+            IUserManagement users = scene.RequestModuleInterface<IUserManagement>();
+            if (users != null && users.IsLocalGridUser(agentId))
+                return null;
+
+            AgentCircuitData circuit = scene.AuthenticateHandler?.GetAgentCircuitData(agentId);
             if (circuit?.ServiceURLs != null
                 && circuit.ServiceURLs.TryGetValue("AssetServerURI", out object urlObj))
-                return urlObj?.ToString();
+            {
+                string circuitUrl = urlObj?.ToString();
+                if (!string.IsNullOrWhiteSpace(circuitUrl))
+                    return circuitUrl;
+            }
+
+            if (users != null)
+            {
+                string stored = users.GetUserServerURL(agentId, "AssetServerURI");
+                if (!string.IsNullOrWhiteSpace(stored))
+                    return stored;
+            }
             return null;
         }
 
