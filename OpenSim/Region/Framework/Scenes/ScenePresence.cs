@@ -2386,11 +2386,15 @@ namespace OpenSim.Region.Framework.Scenes
                 // then hide if necessary
                 SendInitialAvatarDataToAllAgents(allpresences);
 
-                // send this look
-                if (!IsNPC)
-                    SendAppearanceToAgent(this);
+                // AvatarAppearance carries bake TextureIDs. Do not send it
+                // until those JPEGs are in Flotsam (HasCachedBakes), or the
+                // viewer GetTexture 404s. SSBake PublishAppearance sends to
+                // self and others when the bake is stored.
+                IServerSideBakeModule ssb = m_scene.RequestModuleInterface<IServerSideBakeModule>();
+                bool bakesReady = ssb == null || ssb.HasCachedBakes(this);
 
-                // send this animations
+                if (!IsNPC && bakesReady)
+                    SendAppearanceToAgent(this);
 
                 UUID[] animIDs = null;
                 int[] animseqs = null;
@@ -2403,27 +2407,18 @@ namespace OpenSim.Region.Framework.Scenes
                 if (!IsNPC && haveAnims)
                     SendAnimPackToAgent(this, animIDs, animseqs, animsobjs);
 
-                // send look and animations to others
-                // if not cached we send greys
-                // uncomented if will wait till avatar does baking
-                //if (cachedbaked)
-                IServerSideBakeModule ssb = m_scene.RequestModuleInterface<IServerSideBakeModule>();
-                bool sendAppearanceToOthers = ssb == null || ssb.HasCachedBakes(this);
-
+                foreach (ScenePresence p in allpresences)
                 {
-                    foreach (ScenePresence p in allpresences)
-                    {
-                        if (p == this)
-                            continue;
+                    if (p == this)
+                        continue;
 
-                        if (ParcelHideThisAvatar && currentParcelUUID.NotEqual(p.currentParcelUUID) && !p.IsViewerUIGod)
-                            continue;
+                    if (ParcelHideThisAvatar && currentParcelUUID.NotEqual(p.currentParcelUUID) && !p.IsViewerUIGod)
+                        continue;
 
-                        if (sendAppearanceToOthers)
-                            SendAppearanceToAgentNF(p);
-                        if (haveAnims)
-                            SendAnimPackToAgentNF(p, animIDs, animseqs, animsobjs);
-                    }
+                    if (bakesReady)
+                        SendAppearanceToAgentNF(p);
+                    if (haveAnims)
+                        SendAnimPackToAgentNF(p, animIDs, animseqs, animsobjs);
                 }
 
                 // attachments

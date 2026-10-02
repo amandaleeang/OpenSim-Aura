@@ -30,7 +30,6 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Net;
 using System.Reflection;
-using System.Threading;
 using log4net;
 using Nini.Config;
 using OpenMetaverse;
@@ -79,7 +78,7 @@ namespace OpenSim.Capabilities.Handlers
             m_assetService = assService;
         }
 
-        public void Handle(OSHttpRequest req, OSHttpResponse response, string serviceURL = null)
+        public void Handle(OSHttpRequest req, OSHttpResponse response, string homeAssetUrl = null)
         {
             response.ContentType = "text/plain";
 
@@ -122,21 +121,14 @@ namespace OpenSim.Capabilities.Handlers
             if(!UUID.TryParse(assetStr, out UUID assetID))
                 return;
 
-            ManualResetEventSlim done = new ManualResetEventSlim(false);
-            AssetBase asset = null;
-            m_assetService.Get(assetID.ToString(), serviceURL, false, (AssetBase a) =>
-                {
-                    asset = a;
-                    done.Set();
-                });
-
-            done.Wait();
-            done.Dispose();
-            done = null;
+            // One connector lookup: Flotsam, local DB, then (HG visitor) home.
+            string id = assetID.ToString();
+            AssetBase asset = string.IsNullOrEmpty(homeAssetUrl)
+                ? m_assetService.Get(id)
+                : m_assetService.Get(id, homeAssetUrl, false);
 
             if (asset == null)
             {
-                // m_log.Warn("[GETASSET]: not found: " + query + " " + assetStr);
                 response.StatusCode = (int)HttpStatusCode.NotFound;
                 return;
             }

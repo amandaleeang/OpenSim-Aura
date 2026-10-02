@@ -155,7 +155,13 @@ namespace OpenSim.Region.ClientStack.LindenUDP
                     m_assetRequested = true;
                     AssetRequestTime = DateTime.UtcNow.Ticks;
 
-                    AssetService.Get(TextureID.ToString(), this, AssetReceived);
+                    string id = TextureID.ToString();
+                    if (InventoryAccessModule != null
+                        && InventoryAccessModule.IsForeignUser(AgentID, out string homeUrl)
+                        && !string.IsNullOrEmpty(homeUrl))
+                        AssetService.Get(id, homeUrl, false, a => AssetReceived(id, InventoryAccessModule, a));
+                    else
+                        AssetService.Get(id, this, AssetReceived);
                 }
             }
             else
@@ -417,22 +423,6 @@ namespace OpenSim.Region.ClientStack.LindenUDP
                 assetID = asset.FullID;
                 if(asset.Type != (byte)AssetType.Texture)
                     asset = null;
-            }
-            else if ((InventoryAccessModule != null) && (sender != InventoryAccessModule))
-            {
-                // Unfortunately we need this here, there's no other way.
-                // This is due to the fact that textures opened directly from the agent's inventory
-                // don't have any distinguishing feature. As such, in order to serve those when the
-                // foreign user is visiting, we need to try again after the first fail to the local
-                // asset service.
-                string assetServerURL = string.Empty;
-                if (InventoryAccessModule.IsForeignUser(AgentID, out assetServerURL) && !string.IsNullOrEmpty(assetServerURL))
-                {
-                    // Viewer fetch only; do not persist to the local asset DB.
-                    // InventoryAccessModule as sender prevents a second HG retry.
-                    AssetService.Get(id, assetServerURL, false, a => AssetReceived(id, InventoryAccessModule, a));
-                    return;
-                }
             }
 
             AssetDataCallback(assetID, asset);

@@ -80,7 +80,6 @@ namespace OpenSim.Region.ClientStack.Linden
         private static ObjectJobEngine m_workerpool = null;
         private static int m_NumberScenes = 0;
         private static object m_loadLock = new object();
-        protected IUserManagement m_UserManagement = null;
 
         #region Region Module interfaceBase Members
 
@@ -150,9 +149,6 @@ namespace OpenSim.Region.ClientStack.Linden
                     return;
                 }
 
-                if(m_UserManagement == null)
-                    m_UserManagement = s.RequestModuleInterface<IUserManagement>();
-
                 s.EventManager.OnRegisterCaps += RegisterCaps;
 
                 m_NumberScenes++;
@@ -192,12 +188,10 @@ namespace OpenSim.Region.ClientStack.Linden
             private HashSet<UUID> dropedResponses = new HashSet<UUID>();
 
             private Scene m_scene;
-            private string m_hgassets = null;
-            public PollServiceAssetEventArgs(string uri, UUID pId, Scene scene, string HGAssetSVC) :
+            public PollServiceAssetEventArgs(string uri, UUID pId, Scene scene) :
                 base(null, uri, null, null, null, null, pId, int.MaxValue)
             {
                 m_scene = scene;
-                m_hgassets = HGAssetSVC;
 
                 HasEvents = delegate(UUID requestID, UUID _)
                 {
@@ -302,7 +296,11 @@ namespace OpenSim.Region.ClientStack.Linden
 */
                 }
                 OSHttpResponse response = new OSHttpResponse(requestinfo.request);
-                m_getAssetHandler.Handle(requestinfo.request, response, m_hgassets);
+                string homeUrl = null;
+                IUserManagement um = m_scene.RequestModuleInterface<IUserManagement>();
+                if (um != null)
+                    homeUrl = um.GetUserServerURL(Id, "AssetServerURI");
+                m_getAssetHandler.Handle(requestinfo.request, response, homeUrl);
 
                 lock(responses)
                 {
@@ -338,10 +336,6 @@ namespace OpenSim.Region.ClientStack.Linden
             }
             string baseURL = String.Format("{0}://{1}:{2}", protocol, hostName, port);
             */
-            string hgassets = null;
-            if(m_UserManagement != null)
-                hgassets = m_UserManagement.GetUserServerURL(agentID, "AssetServerURI");
-
             IExternalCapsModule handler = m_scene.RequestModuleInterface<IExternalCapsModule>();
 
             if (m_GetTextureURL.Equals("localhost"))
@@ -351,7 +345,7 @@ namespace OpenSim.Region.ClientStack.Linden
                 if (handler != null)
                     handler.RegisterExternalUserCapsHandler(agentID, caps, "GetTexture", capUrl);
                 else
-                    caps.RegisterPollHandler("GetTexture", new PollServiceAssetEventArgs(capUrl, agentID, m_scene, hgassets));
+                    caps.RegisterPollHandler("GetTexture", new PollServiceAssetEventArgs(capUrl, agentID, m_scene));
             }
             else
             {
@@ -366,7 +360,7 @@ namespace OpenSim.Region.ClientStack.Linden
                 if (handler != null)
                     handler.RegisterExternalUserCapsHandler(agentID, caps, "GetMesh", capUrl);
                 else
-                    caps.RegisterPollHandler("GetMesh", new PollServiceAssetEventArgs(capUrl, agentID, m_scene, hgassets));
+                    caps.RegisterPollHandler("GetMesh", new PollServiceAssetEventArgs(capUrl, agentID, m_scene));
             }
             else if (!string.IsNullOrEmpty(m_GetMeshURL))
                 caps.RegisterHandler("GetMesh", m_GetMeshURL);
@@ -379,7 +373,7 @@ namespace OpenSim.Region.ClientStack.Linden
                 if (handler != null)
                     handler.RegisterExternalUserCapsHandler(agentID, caps, "GetMesh2", capUrl);
                 else
-                    caps.RegisterPollHandler("GetMesh2", new PollServiceAssetEventArgs(capUrl, agentID, m_scene, hgassets));
+                    caps.RegisterPollHandler("GetMesh2", new PollServiceAssetEventArgs(capUrl, agentID, m_scene));
             }
             else if (!string.IsNullOrEmpty(m_GetMesh2URL))
                 caps.RegisterHandler("GetMesh2", m_GetMesh2URL);
@@ -392,7 +386,7 @@ namespace OpenSim.Region.ClientStack.Linden
                 if (handler != null)
                     handler.RegisterExternalUserCapsHandler(agentID, caps, "ViewerAsset", capUrl);
                 else
-                    caps.RegisterPollHandler("ViewerAsset", new PollServiceAssetEventArgs(capUrl, agentID, m_scene, hgassets));
+                    caps.RegisterPollHandler("ViewerAsset", new PollServiceAssetEventArgs(capUrl, agentID, m_scene));
             }
             else if (!string.IsNullOrEmpty(m_GetAssetURL))
                 caps.RegisterHandler("ViewerAsset", m_GetAssetURL);

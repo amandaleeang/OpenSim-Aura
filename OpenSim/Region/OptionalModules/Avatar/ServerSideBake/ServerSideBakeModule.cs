@@ -70,6 +70,12 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
         // appearance packet must be that value + 1 or it is dropped.
         private readonly ConcurrentDictionary<UUID, int> m_packetCof =
             new ConcurrentDictionary<UUID, int>();
+        // Highest CofVersion this process has put on the wire for an avatar.
+        // Deliberately NOT cleared on spawn: the viewer's lastRcv survives a
+        // region hop and a quick reconnect, so the floor has to outlive
+        // m_packetCof being reset at MakeRoot.
+        private readonly ConcurrentDictionary<UUID, int> m_cofHigh =
+            new ConcurrentDictionary<UUID, int>();
         // First UpdateAvatarAppearance after MakeRoot records the viewer's
         // COF version. A later post bakes only when the Current Outfit hash changes.
         private readonly ConcurrentDictionary<UUID, byte> m_seenAppearanceCap =
@@ -102,9 +108,9 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
         // The bake worker must wait for that window to close (~30ms typical).
         private const int TransitWaitMs = 10000;
         // One teleport attachment path: the objects in the transfer. Wait for
-        // that gather on a slow home fetch. Do not start a second rez from
-        // inventory while it is still outstanding.
-        private const int AttachmentWaitMs = 60000;
+        // that gather to put every byte in Flotsam, then rez. Appearance is
+        // sent after this wait so GetTexture is cache/local-DB only.
+        private const int AttachmentWaitMs = 180000;
 
         private sealed class PendingCacheReply
         {
@@ -164,6 +170,7 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
             scene.RegisterModuleInterface<IServerSideBakeModule>(this);
             scene.EventManager.OnMakeRootAgent += OnMakeRootAgent;
             scene.EventManager.OnMakeChildAgent += OnMakeChildAgent;
+            scene.EventManager.OnNewPresence += OnNewPresence;
             scene.EventManager.OnNewClient += HandleNewClient;
             scene.EventManager.OnRegisterCaps += RegisterCaps;
         }
@@ -175,6 +182,7 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
 
             scene.EventManager.OnMakeRootAgent -= OnMakeRootAgent;
             scene.EventManager.OnMakeChildAgent -= OnMakeChildAgent;
+            scene.EventManager.OnNewPresence -= OnNewPresence;
             scene.EventManager.OnNewClient -= HandleNewClient;
             scene.EventManager.OnRegisterCaps -= RegisterCaps;
             ISimulatorFeaturesModule features = scene.RequestModuleInterface<ISimulatorFeaturesModule>();
@@ -294,6 +302,9 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
             m_viewerCof[sp.UUID] = n;
             // Viewer slams lastRcv to this returned version, then drops any
             // AvatarAppearance with CofVersion <= that. Publish one ahead.
+            // The high-water mark takes n too, so the next packet allocates
+            // n + 1 rather than repeating n.
+            m_cofHigh[sp.UUID] = n;
             m_packetCof[sp.UUID] = n;
             if (sp.Appearance != null && n > sp.Appearance.Serial)
                 sp.Appearance.Serial = n;
@@ -351,9 +362,10 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
                 Buffer.BlockCopy(src, 0, copy, 0, n);
             copy[vp11000] = 1;
             visualParamsForSend = copy;
-            // Prefer the CofVersion chosen at PublishAppearance. After
-            // IncrementCOFVersion that is viewer COF + 1 so the packet is
-            // not dropped when Firestorm slams lastRcv to the GET result.
+            // Every appearance packet about to go out takes a fresh, strictly
+            // greater CofVersion. All send paths funnel through here, so a
+            // second publish in a session climbs instead of being dropped.
+            ResolvePacketCof(agentId);
             int packetCof;
             if (m_packetCof.TryGetValue(agentId, out packetCof) && packetCof > 0)
                 cofVersion = packetCof;
@@ -807,6 +819,91 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
             RequestBake(sp, "MakeRootAgent");
         }
 
+        /// <summary>
+        /// Child agents do not rez attachments. Neighbour viewers still GetTexture
+        /// bake IDs on this sim, so copy XBakes (and any packed JPEG) into Flotsam
+        /// under those TextureIDs. Also runs for a new presence that is about to
+        /// become root, so HasCachedBakes can be true at CompleteMovement.
+        /// </summary>
+        private void OnNewPresence(ScenePresence sp)
+        {
+            if (sp == null || sp.IsNPC || sp.IsDeleted || sp.Appearance?.Texture == null)
+                return;
+
+            ScenePresence captured = sp;
+            Util.FireAndForget(_ => PrimeAppearanceCache(captured), null, "SSBake.PrimeAppearanceCache");
+        }
+
+        private void PrimeAppearanceCache(ScenePresence sp)
+        {
+            if (sp == null || sp.IsDeleted || sp.Appearance?.Texture == null)
+                return;
+
+            Scene scene = sp.Scene;
+            IAssetCache cache = scene?.RequestModuleInterface<IAssetCache>();
+            if (cache == null)
+                return;
+
+            WearableCacheItem[] packed = sp.Appearance.WearableCacheItems;
+            IBakedTextureModule xbakes = scene.RequestModuleInterface<IBakedTextureModule>();
+            WearableCacheItem[] stored = null;
+            if (xbakes != null)
+            {
+                try
+                {
+                    stored = packed != null ? xbakes.Get(sp.UUID, packed) : xbakes.Get(sp.UUID);
+                }
+                catch (Exception e)
+                {
+                    m_log.DebugFormat("[SSBAKE]: XBakes prime failed for {0}: {1}", sp.Name, e.Message);
+                }
+            }
+
+            int n = 0;
+            foreach (BakeSlot slot in BakeLayerMap.Slots)
+            {
+                int idx = (int)slot.FaceIndex;
+                Primitive.TextureEntryFace face = sp.Appearance.Texture.GetFace((uint)idx);
+                UUID bakeId = face != null ? face.TextureID : UUID.Zero;
+                if (BakeLayerMap.IsUnsetTexture(bakeId))
+                    continue;
+
+                AssetBase already = cache.GetCached(bakeId.ToString());
+                if (already?.Data != null && already.Data.Length > 0)
+                    continue;
+
+                byte[] data = FindPackedBakeData(packed, idx, bakeId);
+                if (data == null)
+                    data = FindPackedBakeData(stored, idx, bakeId);
+                if (data == null)
+                    continue;
+
+                CacheBakeAsset(cache, bakeId, sp.UUID, "SSBake " + slot.BakeType, data);
+                n++;
+            }
+
+            if (n > 0)
+                m_log.InfoFormat("[SSBAKE]: primed {0} bake(s) into Flotsam for {1}{2}",
+                    n, sp.Name, sp.IsChildAgent ? " (child)" : "");
+        }
+
+        private static byte[] FindPackedBakeData(WearableCacheItem[] items, int faceIndex, UUID bakeId)
+        {
+            if (items == null)
+                return null;
+            for (int i = 0; i < items.Length; i++)
+            {
+                WearableCacheItem item = items[i];
+                if (item?.TextureAsset?.Data == null || item.TextureAsset.Data.Length == 0)
+                    continue;
+                if ((int)item.TextureIndex == faceIndex
+                    || item.TextureID.Equals(bakeId)
+                    || item.CacheId.Equals(bakeId))
+                    return item.TextureAsset.Data;
+            }
+            return null;
+        }
+
         private void OnMakeChildAgent(ScenePresence sp)
         {
             if (sp == null)
@@ -1021,10 +1118,10 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
         }
 
         /// <summary>
-        /// Wait for the incoming attachment objects. Inventory rez runs only
-        /// when that batch has finished and it contained nothing (login, or a
-        /// return whose transfer carried no objects). A gather that is still
-        /// running keeps the one teleport path.
+        /// Wait until the incoming attachment gather has rezzed (GotAttachmentsData
+        /// or live objects). HG gather waits for all bytes before rez, so this
+        /// is also "Flotsam is populated". Inventory rez runs only when that
+        /// batch finished empty (login, or a return with no objects).
         /// </summary>
         private void EnsureAttachmentsRezzed(ScenePresence sp, CancellationToken token)
         {
@@ -1945,7 +2042,7 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
             // UDP copy only — do not mutate live visual params.
             // Do not SendAvatarDataToAllAgents: a second avatar ObjectUpdate
             // after attachments are out can drop them on SSA viewers.
-            ResolvePacketCof(sp.UUID);
+            // Each sender allocates its own CofVersion in PrepareAppearancePacket.
             sp.SendAppearanceToAgentNF(sp);
             sp.SendAppearanceToAllOtherAgents();
             AdvertiseAttachments(sp);
@@ -1960,31 +2057,46 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
         // slams lastRcv to the returned version, so the next packet must be
         // strictly greater or the viewer drops it. Login/outfit still use
         // the viewer's COF when that is ahead of the last packet.
+        //
+        // Publishing an appearance is not the only way one goes out: arrival
+        // broadcast, CompleteMovement, AgentSetAppearance and the
+        // ?avatar/appearance endpoint all reach the same sender. Allocating
+        // here and reading in PrepareAppearancePacket would hand every one of
+        // those paths the same version and the second packet of a session
+        // would be dropped. So the sender allocates, once per packet.
         private void ResolvePacketCof(UUID agentId)
         {
             int posted;
             bool hasPosted = m_viewerCof.TryGetValue(agentId, out posted) && posted > 0;
-            int packet = 0;
-            m_packetCof.TryGetValue(agentId, out packet);
+            int serial = AppearanceSerial(agentId);
 
-            if (!hasPosted)
-            {
-                // She already accepted Appearance.Serial. An equal CofVersion
-                // is dropped and the grey textures stay. The first packet is
-                // the next version. A republish does not climb again.
-                int serial = AppearanceSerial(agentId);
-                int floor = serial > 0 ? serial + 1 : 1;
-                if (packet < floor)
-                    packet = floor;
-                m_packetCof[agentId] = packet;
-                return;
-            }
+            // Never at or below the serial the viewer already accepted.
+            int floor = serial > 0 ? serial + 1 : 1;
+            if (hasPosted && posted > floor)
+                floor = posted;
 
-            if (packet >= posted)
-                packet++;
-            else
-                packet = posted;
-            m_packetCof[agentId] = packet;
+            int high;
+            m_cofHigh.TryGetValue(agentId, out high);
+            int last;
+            m_packetCof.TryGetValue(agentId, out last);
+
+            // Strictly above everything this process already sent, so a
+            // republish climbs instead of repeating.
+            int next = high + 1;
+            if (next < floor)
+                next = floor;
+
+            // Tripwire. The viewer drops any packet at or below its lastRcv,
+            // so a non-advancing version is a silently dropped appearance.
+            // The allocation above cannot do that; if this ever fires, the
+            // climb was broken.
+            if (last > 0 && next <= last)
+                m_log.WarnFormat(
+                    "[SSBAKE]: CofVersion did not advance for {0}: last={1} next={2} serial={3} posted={4} (appearance packet will be dropped)",
+                    agentId, last, next, serial, hasPosted ? posted : 0);
+
+            m_cofHigh[agentId] = next;
+            m_packetCof[agentId] = next;
         }
 
         // Posted UpdateAvatarAppearance / IncrementCOFVersion wins. Before

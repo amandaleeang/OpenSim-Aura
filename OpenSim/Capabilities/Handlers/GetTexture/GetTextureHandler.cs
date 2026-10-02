@@ -141,7 +141,7 @@ namespace OpenSim.Capabilities.Handlers
             if (format != DefaultFormat)
                 fullID = fullID + "-" + format;
 
-            // try the cache
+            // try the cache (Flotsam via the asset connector, memory and disk)
             texture = m_assetService.GetCached(fullID);
 
             if (texture == null)

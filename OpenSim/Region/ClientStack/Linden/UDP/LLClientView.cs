@@ -13021,8 +13021,14 @@ namespace OpenSim.Region.ClientStack.LindenUDP
             //    "[LLCLIENTVIEW]: Received transfer request for {0} in {1} type {2} by {3}",
             //    requestID, taskID, (SourceType)sourceType, Name);
 
-            //Note, the bool returned from the below function is useless since it is always false.
-            m_assetService.Get(requestID.ToString(), transferRequest, AssetReceived);
+            IInventoryAccessModule inventoryAccessModule = Scene.RequestModuleInterface<IInventoryAccessModule>();
+            if (inventoryAccessModule != null
+                && inventoryAccessModule.IsForeignUser(m_agentId, out string homeUrl)
+                && !string.IsNullOrEmpty(homeUrl))
+                m_assetService.Get(requestID.ToString(), homeUrl, false,
+                    a => AssetReceived(requestID.ToString(), transferRequest, a));
+            else
+                m_assetService.Get(requestID.ToString(), transferRequest, AssetReceived);
 
         }
 
@@ -13041,28 +13047,17 @@ namespace OpenSim.Region.ClientStack.LindenUDP
 
             if (asset is null)
             {
-                // Try the user's asset server
-                IInventoryAccessModule inventoryAccessModule = Scene.RequestModuleInterface<IInventoryAccessModule>();
-                if (inventoryAccessModule.IsForeignUser(m_agentId, out string assetServerURL) && !string.IsNullOrEmpty(assetServerURL))
+                SendAssetNotFound( new AssetRequestToClient()
                 {
-                    // Viewer fetch only; do not persist to the local asset DB.
-                    asset = m_scene.AssetService.Get(id, assetServerURL, false);
-                }
-
-                if (asset is null)
-                {
-                    SendAssetNotFound( new AssetRequestToClient()
-                    {
-                        AssetInf = null,
-                        AssetRequestSource = source,
-                        IsTextureRequest = false,
-                        NumPackets = 0,
-                        Params = transferRequest.TransferInfo.Params,
-                        RequestAssetID = requestID,
-                        TransferRequestID = transferRequest.TransferInfo.TransferID
-                    });
-                    return;
-                }
+                    AssetInf = null,
+                    AssetRequestSource = source,
+                    IsTextureRequest = false,
+                    NumPackets = 0,
+                    Params = transferRequest.TransferInfo.Params,
+                    RequestAssetID = requestID,
+                    TransferRequestID = transferRequest.TransferInfo.TransferID
+                });
+                return;
             }
 
             if (transferRequest.TransferInfo.SourceType == (int)SourceType.Asset)
