@@ -193,6 +193,11 @@ namespace OpenSim.Region.CoreModules.Framework.InventoryAccess
 
         #region Public interface
 
+        /// <summary>
+        /// Gather from the home asset server into Flotsam and wait until every
+        /// referenced asset has been fetched. Viewer GetTexture then reads
+        /// Flotsam / the local database only.
+        /// </summary>
         public void Get(UUID assetID, UUID ownerID, string userAssetURL)
         {
             Get(new[] { assetID }, ownerID, userAssetURL);
@@ -200,7 +205,9 @@ namespace OpenSim.Region.CoreModules.Framework.InventoryAccess
 
         public void Get(IEnumerable<UUID> assetIDs, UUID ownerID, string userAssetURL)
         {
-            GatherHome(assetIDs, userAssetURL);
+            // Wait until every byte is in Flotsam so GetTexture / ViewerAsset
+            // can be cache then local DB only.
+            GatherHome(assetIDs, userAssetURL, waitForAll: true);
         }
 
         /// <summary>

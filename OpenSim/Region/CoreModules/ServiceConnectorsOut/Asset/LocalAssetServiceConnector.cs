@@ -272,7 +272,7 @@ namespace OpenSim.Region.CoreModules.ServiceConnectorsOut.Asset
             if (m_Cache != null)
             {
                 AssetBase asset;
-                if (!m_Cache.GetFromMemory(id, out asset))
+                if (!m_Cache.Get(id, out asset))
                 {
                     callBack(null);
                     return;

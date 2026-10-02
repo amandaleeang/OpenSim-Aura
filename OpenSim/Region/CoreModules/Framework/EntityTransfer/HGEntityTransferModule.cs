@@ -693,6 +693,35 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
             return true;
         }
 
+        /// <summary>
+        /// Fetch every referenced asset into Flotsam before rez / appearance.
+        /// Concurrent waves are allowed; this method still waits for in-flight
+        /// GETs and then pulls any remaining leaves.
+        /// </summary>
+        private void GatherHomeUntilComplete(HGUuidGatherer uuidGatherer, Func<bool> cancelled)
+        {
+            int timeoutMs = m_gatherTimeoutSec * 1000;
+            int waitPendingMs = Math.Max(timeoutMs, 120000);
+
+            if (m_concurrentAssetGather)
+            {
+                uuidGatherer.GatherAllConcurrent(m_gatherConcurrent, timeoutMs);
+                if (cancelled())
+                    return;
+                uuidGatherer.WaitForPendingFetches(waitPendingMs);
+                if (cancelled())
+                    return;
+                uuidGatherer.FetchUnfetchedLeavesSequential();
+            }
+            else
+            {
+                uuidGatherer.GatherAll();
+                if (cancelled())
+                    return;
+                uuidGatherer.FetchUnfetchedLeavesSequential();
+            }
+        }
+
         public override bool HandleIncomingSceneObject(SceneObjectGroup so, Vector3 newPosition)
         {
             UUID OwnerID = so.OwnerID;
@@ -730,13 +759,7 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
             }
 
             AgentCircuitData aCircuit = m_scene.AuthenticateHandler.GetAgentCircuitData(OwnerID);
-            if (aCircuit == null || (aCircuit.teleportFlags & (uint)Constants.TeleportFlags.ViaHGLogin) == 0)
-            {
-                // First region in local grid already pulled attachment assets, or no circuit.
-                return base.HandleIncomingSceneObject(so, newPosition);
-            }
-
-            if (!TryGetAssetServerURI(aCircuit, out string url))
+            if (aCircuit == null || !TryGetAssetServerURI(aCircuit, out string url))
                 return base.HandleIncomingSceneObject(so, newPosition);
 
             SceneObjectGroup defso = so;
@@ -744,61 +767,33 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
                 string.Format("HG UUID Gather for attachment {0} for {1}", defso.Name, aCircuit.Name),
                 () =>
                 {
+                    bool left()
+                    {
+                        ScenePresence p = m_scene.GetScenePresence(OwnerID);
+                        return p == null || p.IsDeleted;
+                    }
+
                     IDictionary<UUID, sbyte> ids = new Dictionary<UUID, sbyte>();
                     HGUuidGatherer uuidGatherer = new HGUuidGatherer(m_scene.AssetService, url, ids);
                     uuidGatherer.AddForInspection(defso);
 
-                    int timeoutMs = m_gatherTimeoutSec * 1000;
+                    GatherHomeUntilComplete(uuidGatherer, left);
 
-                    if (m_concurrentAssetGather)
+                    if (left())
                     {
-                        uuidGatherer.GatherAllConcurrent(m_gatherConcurrent, timeoutMs);
-
-                        if (uuidGatherer.FetchTimeouts > 0 && uuidGatherer.AssetGetCount == 0)
-                        {
-                            m_log.WarnFormat(
-                                "[HG ENTITY TRANSFER]: Removing incoming scene object jobs for HG user {0} as gather of {1} from {2} had {3} timeouts and no assets retrieved",
-                                so.OwnerID, defso.Name, url, uuidGatherer.FetchTimeouts);
-                            RemoveIncomingSceneObjectJobs(OwnerID.ToString());
-                            return;
-                        }
+                        defso = null;
+                        uuidGatherer = null;
+                        return;
                     }
-                    else
+
+                    if (uuidGatherer.AssetGetCount == 0 &&
+                        (uuidGatherer.FetchTimeouts > 0 || uuidGatherer.FailedUUIDs.Count > 0))
                     {
-                        while (!uuidGatherer.Complete)
-                        {
-                            int tickStart = Util.EnvironmentTickCount();
-                            uuidGatherer.GatherNext();
-
-                            int ticksElapsed = Util.EnvironmentTickCountSubtract(tickStart);
-                            if (ticksElapsed > timeoutMs)
-                            {
-                                m_log.WarnFormat(
-                                    "[HG ENTITY TRANSFER]: Removing incoming scene object jobs for HG user {0} as gather of {1} from {2} took {3} ms to respond (> {4} ms)",
-                                    so.OwnerID, defso.Name, url, ticksElapsed, timeoutMs);
-                                RemoveIncomingSceneObjectJobs(OwnerID.ToString());
-                                return;
-                            }
-                        }
-
-                        foreach (UUID id in ids.Keys)
-                        {
-                            if (uuidGatherer.IsFetched(id))
-                                continue;
-
-                            int tickStart = Util.EnvironmentTickCount();
-                            uuidGatherer.FetchAsset(id);
-
-                            int ticksElapsed = Util.EnvironmentTickCountSubtract(tickStart);
-                            if (ticksElapsed > timeoutMs)
-                            {
-                                m_log.WarnFormat(
-                                    "[HG ENTITY TRANSFER]: Removing incoming scene object jobs for HG user {0} as fetch of {1} from {2} took {3} ms to respond (> {4} ms)",
-                                    so.OwnerID, id, url, ticksElapsed, timeoutMs);
-                                RemoveIncomingSceneObjectJobs(OwnerID.ToString());
-                                return;
-                            }
-                        }
+                        m_log.WarnFormat(
+                            "[HG ENTITY TRANSFER]: Removing incoming scene object jobs for HG user {0} as gather of {1} from {2} retrieved nothing (timeouts={3} failed={4})",
+                            so.OwnerID, defso.Name, url, uuidGatherer.FetchTimeouts, uuidGatherer.FailedUUIDs.Count);
+                        RemoveIncomingSceneObjectJobs(OwnerID.ToString());
+                        return;
                     }
 
                     base.HandleIncomingSceneObject(defso, newPosition);
@@ -821,18 +816,13 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
                 return false;
             }
 
-            // Local homecoming: assets are already here, no gather. Foreign ViaHGLogin: gather, then base.
+            // Local users: assets are already here. HG visitors (first login
+            // or intra-grid TP): gather into this sim's Flotsam, then rez.
             if (OwnerID.IsZero() || m_scene.UserManagementModule.IsLocalGridUser(OwnerID))
                 return base.HandleIncomingAttachments(sp, attachments);
 
             AgentCircuitData aCircuit = m_scene.AuthenticateHandler.GetAgentCircuitData(OwnerID);
-            if (aCircuit == null || (aCircuit.teleportFlags & (uint)Constants.TeleportFlags.ViaHGLogin) == 0)
-            {
-                // First region in local grid already pulled attachment assets, or no circuit.
-                return base.HandleIncomingAttachments(sp, attachments);
-            }
-
-            if (!TryGetAssetServerURI(aCircuit, out string url))
+            if (aCircuit == null || !TryGetAssetServerURI(aCircuit, out string url))
                 return base.HandleIncomingAttachments(sp, attachments);
 
             ScenePresence defsp = sp;
@@ -866,88 +856,27 @@ namespace OpenSim.Region.CoreModules.Framework.EntityTransfer
                         return;
                     }
 
-                    int timeoutMs = m_gatherTimeoutSec * 1000;
+                    GatherHomeUntilComplete(uuidGatherer, () => sp.IsDeleted);
 
-                    if (m_concurrentAssetGather)
+                    if (sp.IsDeleted)
                     {
-                        uuidGatherer.GatherAllConcurrent(m_gatherConcurrent, timeoutMs);
-
-                        if (sp.IsDeleted)
-                        {
-                            defsp = null;
-                            uuidGatherer = null;
-                            toadd = null;
-                            return;
-                        }
-
-                        // Unreachable remote asset server: every request timed out and nothing was retrieved.
-                        if (uuidGatherer.FetchTimeouts > 0 && uuidGatherer.AssetGetCount == 0)
-                        {
-                            m_log.WarnFormat(
-                                "[HG ENTITY TRANSFER]: Aborting fetch attachments assets for HG user {0} from {1}: {2} timeouts and no assets retrieved",
-                                defsp.Name, url, uuidGatherer.FetchTimeouts);
-                            defsp = null;
-                            uuidGatherer = null;
-                            toadd = null;
-                            return;
-                        }
+                        defsp = null;
+                        uuidGatherer = null;
+                        toadd = null;
+                        return;
                     }
-                    else
+
+                    // Unreachable remote asset server: nothing was retrieved.
+                    if (toadd.Count > 0 && uuidGatherer.AssetGetCount == 0 &&
+                        (uuidGatherer.FetchTimeouts > 0 || uuidGatherer.FailedUUIDs.Count > 0))
                     {
-                        while (!uuidGatherer.Complete)
-                        {
-                            if (sp.IsDeleted)
-                            {
-                                defsp = null;
-                                uuidGatherer = null;
-                                toadd = null;
-                                return;
-                            }
-
-                            int tickStart = Util.EnvironmentTickCount();
-                            uuidGatherer.GatherNext();
-
-                            int ticksElapsed = Util.EnvironmentTickCountSubtract(tickStart);
-                            if (ticksElapsed > timeoutMs)
-                            {
-                                m_log.WarnFormat(
-                                    "[HG ENTITY TRANSFER]: Aborting fetch attachments assets for HG user {0} as gather from {1} took {2} ms to respond (> {3} ms)",
-                                    defsp.Name, url, ticksElapsed, timeoutMs);
-                                defsp = null;
-                                uuidGatherer = null;
-                                toadd = null;
-                                return;
-                            }
-                        }
-
-                        foreach (UUID id in ids.Keys)
-                        {
-                            if (sp.IsDeleted)
-                            {
-                                defsp = null;
-                                uuidGatherer = null;
-                                toadd = null;
-                                return;
-                            }
-
-                            if (uuidGatherer.IsFetched(id))
-                                continue;
-
-                            int tickStart = Util.EnvironmentTickCount();
-                            uuidGatherer.FetchAsset(id);
-
-                            int ticksElapsed = Util.EnvironmentTickCountSubtract(tickStart);
-                            if (ticksElapsed > timeoutMs)
-                            {
-                                m_log.WarnFormat(
-                                    "[HG ENTITY TRANSFER]: Aborting fetch attachments assets for HG user {0} as fetch of {1} from {2} took {3} ms to respond (> {4} ms)",
-                                    defsp.Name, id, url, ticksElapsed, timeoutMs);
-                                defsp = null;
-                                uuidGatherer = null;
-                                toadd = null;
-                                return;
-                            }
-                        }
+                        m_log.WarnFormat(
+                            "[HG ENTITY TRANSFER]: Aborting fetch attachments assets for HG user {0} from {1}: timeouts={2} failed={3} retrieved=0",
+                            defsp.Name, url, uuidGatherer.FetchTimeouts, uuidGatherer.FailedUUIDs.Count);
+                        defsp = null;
+                        uuidGatherer = null;
+                        toadd = null;
+                        return;
                     }
 
                     base.HandleIncomingAttachments(sp, toadd);

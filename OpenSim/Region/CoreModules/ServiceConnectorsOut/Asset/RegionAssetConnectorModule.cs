@@ -308,9 +308,9 @@ namespace OpenSim.Region.CoreModules.ServiceConnectorsOut.Asset
 
         public AssetBase Get(string id, string ForeignAssetService, bool StoreOnLocalGrid)
         {
-            // Visitor asset: file cache, then the home asset server. The bytes
-            // stay in the cache. The local grid database is not read or written.
-            // StoreOnLocalGrid is ignored on this path.
+            // Visitor asset: Flotsam, then this sim's DB, then home.
+            // Home is not contacted when the UUID is already here.
+            // StoreOnLocalGrid is ignored on this path (no extra DB write).
             if (!string.IsNullOrEmpty(ForeignAssetService))
                 return GetVisitorAsset(id, ForeignAssetService);
 
@@ -366,6 +366,15 @@ namespace OpenSim.Region.CoreModules.ServiceConnectorsOut.Asset
                     return asset;
             }
 
+            // Second visit / intra-grid: copy-on-rez and local uploads live here.
+            asset = GetFromLocal(id);
+            if (asset != null)
+            {
+                if (m_Cache != null)
+                    m_Cache.Cache(asset);
+                return asset;
+            }
+
             asset = GetFromForeign(id, homeUrl);
             if (asset != null)
             {
@@ -405,7 +414,9 @@ namespace OpenSim.Region.CoreModules.ServiceConnectorsOut.Asset
             AssetBase asset = null;
             if (m_Cache != null)
             {
-                if (!m_Cache.GetFromMemory(id, out asset))
+                // Memory and disk. MemoryCacheEnabled is only which Flotsam
+                // tier holds the bytes, not whether this request may use the cache.
+                if (!m_Cache.Get(id, out asset))
                 {
                     callBack(id, sender, null);
                     return false;
@@ -460,7 +471,7 @@ namespace OpenSim.Region.CoreModules.ServiceConnectorsOut.Asset
             AssetBase asset = null;
             if (m_Cache != null)
             {
-                if (!m_Cache.GetFromMemory(id, out asset))
+                if (!m_Cache.Get(id, out asset))
                 {
                     callBack(null);
                     return;
