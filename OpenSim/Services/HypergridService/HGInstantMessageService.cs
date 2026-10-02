@@ -160,6 +160,12 @@ namespace OpenSim.Services.HypergridService
                 success = TrySendInstantMessage(im, "", true, false);
             }
 
+            // Standalone shares this service with the region IM connector, so
+            // Incoming always hits the local scene first. A miss still needs
+            // LocateUser: the recipient may be a local account traveling abroad.
+            if (!success && m_IMSimConnector != null)
+                success = TrySendToTravelingUser(im);
+
             if (!success && m_InGatekeeper) // we do this only in the Gatekeeper IM service
                 UndeliveredMessage(im);
 
@@ -258,10 +264,45 @@ namespace OpenSim.Services.HypergridService
                 m_UserLocationMap.AddOrUpdate(toAgentID, url, 120);
                 return true;
             }
-            else
-                m_UserLocationMap.Remove(toAgentID);
 
+            m_UserLocationMap.Remove(toAgentID);
+            m_log.DebugFormat("[HG IM SERVICE]: Unable to send to user {0} at {1}", toAgentID, url);
             return false;
+        }
+
+        /// <summary>
+        /// Forward an incoming IM to a local user who is traveling on another grid.
+        /// Skips local presence so standalone does not XML-RPC grid_instant_message to itself.
+        /// </summary>
+        bool TrySendToTravelingUser(GridInstantMessage im)
+        {
+            if (m_UserAgentService == null)
+                return false;
+
+            UUID toAgentID = new UUID(im.toAgentID);
+            if (m_UserLocationMap.TryGetValue(toAgentID, out string cached)
+                    && ForwardIMToGrid(cached, im, toAgentID))
+                return true;
+
+            m_log.DebugFormat("[HG IM SERVICE]: User is not present. Checking location with User Agent service");
+            string url;
+            try
+            {
+                url = m_UserAgentService.LocateUser(toAgentID);
+            }
+            catch (Exception e)
+            {
+                m_log.Warn("[HG IM SERVICE]: LocateUser call failed ", e);
+                return false;
+            }
+
+            if (string.IsNullOrEmpty(url))
+            {
+                m_log.DebugFormat("[HG IM SERVICE]: Unable to locate user {0}", toAgentID);
+                return false;
+            }
+
+            return ForwardIMToGrid(url, im, toAgentID);
         }
 
         private bool UndeliveredMessage(GridInstantMessage im)
