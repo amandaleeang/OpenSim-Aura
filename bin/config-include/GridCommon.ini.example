@@ -1,4 +1,5 @@
 ; This is the main configuration file for an instance of OpenSim running in grid mode
+; On first start, OpenSim copies this file to GridCommon.ini when that file is missing.
 
 [DatabaseService]
     ;
@@ -67,8 +68,9 @@
 
 
 [Modules]
-    ;; Asset cache module.
-    ;; Warning this is required for several region features
+    ;; Asset cache module. Flotsam is required and on by default.
+    ;; First start copies FlotsamCache.ini.example when FlotsamCache.ini is missing.
+    ;; Memory cache is off in that example; disk file cache is on.
 
     AssetCaching = "FlotsamAssetCache"
     Include-FlotsamCache = "config-include/FlotsamCache.ini"
@@ -188,8 +190,8 @@
     ; OutboundPermission = True
 
     ;; Send visual reminder to local users that their inventories are unavailable while they are traveling
-    ;; and available when they return. True by default.
-    ;RestrictInventoryAccessAbroad = True
+    ;; and available when they return. False with XInventory (full inventory abroad).
+    RestrictInventoryAccessAbroad = False
 
     ;; Warning: advanced and unusual. Default is false.
     ;; Enables configurations where grids share user services, including inventory,

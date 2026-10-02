@@ -129,15 +129,10 @@
     FriendsServiceConnector = "${Const|PrivatePort}/OpenSim.Server.Handlers.dll:FriendsServiceConnector"
     MapAddServiceConnector = "${Const|PrivatePort}/OpenSim.Server.Handlers.dll:MapAddServiceConnector"
     MapGetServiceConnector = "${Const|PublicPort}/OpenSim.Server.Handlers.dll:MapGetServiceConnector"
-    ;; Uncomment this if you want offline IM to work
-    ; OfflineIMServiceConnector = "${Const|PrivatePort}/OpenSim.Addons.OfflineIM.dll:OfflineIMServiceRobustConnector"
-    ;; Uncomment this if you want Groups V2 to work
-    ; GroupsServiceConnector = "${Const|PrivatePort}/OpenSim.Addons.Groups.dll:GroupsServiceRobustConnector"
-    ;; Uncomment to provide bakes caching
-    ; BakedTextureService = "${Const|PrivatePort}/OpenSim.Server.Handlers.dll:XBakesConnector"
-
-    ;; Uncomment for UserProfiles see [UserProfilesService] to configure...
-    ; UserProfilesServiceConnector = "${Const|PublicPort}/OpenSim.Server.Handlers.dll:UserProfilesConnector"
+    OfflineIMServiceConnector = "${Const|PrivatePort}/OpenSim.Addons.OfflineIM.dll:OfflineIMServiceRobustConnector"
+    GroupsServiceConnector = "${Const|PrivatePort}/OpenSim.Addons.Groups.dll:GroupsServiceRobustConnector"
+    BakedTextureService = "${Const|PrivatePort}/OpenSim.Server.Handlers.dll:XBakesConnector"
+    UserProfilesServiceConnector = "${Const|PublicPort}/OpenSim.Server.Handlers.dll:UserProfilesConnector"
 
     ;; Uncomment if you want to have centralized estate data
     ; EstateDataService = "${Const|PrivatePort}/OpenSim.Server.Handlers.dll:EstateDataRobustConnector"
@@ -155,8 +150,7 @@
     InstantMessageServerConnector = "${Const|PublicPort}/OpenSim.Server.Handlers.dll:InstantMessageServerConnector"
     HGInventoryServiceConnector = "HGInventoryService@${Const|PublicPort}/OpenSim.Server.Handlers.dll:XInventoryInConnector"
     HGAssetServiceConnector = "HGAssetService@${Const|PublicPort}/OpenSim.Server.Handlers.dll:AssetServiceConnector"
-    ;; Uncomment this if you want Groups V2, HG to work
-    ; HGGroupsServiceConnector = "${Const|PublicPort}/OpenSim.Addons.Groups.dll:HGGroupsServiceRobustConnector"
+    HGGroupsServiceConnector = "${Const|PublicPort}/OpenSim.Addons.Groups.dll:HGGroupsServiceRobustConnector"
 
 ; * This is common for all services, it's the network setup for the entire
 ; * server instance, if none is specified above
@@ -543,8 +537,10 @@
     ;; for hypergrid
     UserAgentService = "OpenSim.Services.HypergridService.dll:UserAgentService"
 
-    ; This inventory service will be used to initialize the user's inventory
-    HGInventoryServicePlugin = "HGInventoryService@OpenSim.Services.HypergridService.dll:HGSuitcaseInventoryService"
+    ; This inventory service will be used to initialize the user's inventory.
+    ; Aura default is XInventory (full home inventory on HG). Suitcase is optional.
+    HGInventoryServicePlugin = "HGInventoryService@OpenSim.Services.InventoryService.dll:XInventoryService"
+    ; HGInventoryServicePlugin = "HGInventoryService@OpenSim.Services.HypergridService.dll:HGSuitcaseInventoryService"
     ; NOTE: HGInventoryServiceConstructorArg is deprecated. For now it will work, but see above
 	;       for the correct method if passing additional arguments.
     ;; end hypergrid
@@ -780,18 +776,20 @@
 ; *
 [HGInventoryService]
     ; For the InventoryServiceInConnector
-    LocalServiceModule    = "OpenSim.Services.HypergridService.dll:HGSuitcaseInventoryService"
+    ;; Aura default: XInventory (full home inventory on HG).
+    LocalServiceModule    = "OpenSim.Services.InventoryService.dll:XInventoryService"
     ;; alternatives:
-    ;;  HG1.5, more permissive, not recommended, but still supported
+    ;;  Suitcase, inventory limited to My Suitcase while abroad
+    ;LocalServiceModule    = "OpenSim.Services.HypergridService.dll:HGSuitcaseInventoryService"
+    ;;  HG1.5, more permissive than suitcase
     ;LocalServiceModule    = "OpenSim.Services.HypergridService.dll:HGInventoryService"
-    ;;  HG1.0, totally permissive, not recommended, but OK for grids with 100% trust
-    ;LocalServiceModule    = "OpenSim.Services.InventoryService.dll:XInventoryService"
 
     UserAccountsService = "OpenSim.Services.UserAccountService.dll:UserAccountService"
     AvatarService = "OpenSim.Services.AvatarService.dll:AvatarService"
 
-    ; HGInventoryService is a public-facing inventory service that allows users to
-    ; interact with their suitcase folder when on a foreign grid.  This reuses the general inventory service connector.
+    ; HGInventoryService is the public-facing inventory service used while the
+    ; user is on a foreign grid. Aura default is XInventory (full home inventory).
+    ; This reuses the general inventory service connector.
     ; Hence, if the user has set up authentication in [Network] to protect their private services
     ; make sure it is not set here.
     AuthType = None
@@ -859,7 +857,7 @@
 
 
 ; * This is the groups service (same LocalServiceModule pattern as UserAccountService).
-; * Uncomment GroupsServiceConnector above to enable.
+; * GroupsServiceConnector and HGGroupsServiceConnector are enabled above.
 ; * If LocalServiceModule is empty, groups stay off.
 ; *
 [Groups]
@@ -896,7 +894,7 @@
 
 [UserProfilesService]
     LocalServiceModule = "OpenSim.Services.UserProfilesService.dll:UserProfilesService"
-    Enabled = false
+    Enabled = true
     ;; Configure this for separate profiles database
     ;; ConnectionString = "Data Source=localhost;Database=opensim;User ID=opensim;Password=*****;Old Guids=true;"
     ;; Realm = UserProfiles

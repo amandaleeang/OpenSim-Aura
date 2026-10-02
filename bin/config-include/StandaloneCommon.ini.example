@@ -1,11 +1,13 @@
 ; This is the main configuration file for an instance of OpenSim running in standalone mode
+; Aura default database is SQLite. On first start, OpenSim copies this file to
+; StandaloneCommon.ini when that file is missing.
 
 [DatabaseService]
     ;
     ; ### Choose the DB
     ;
 
-    ; SQLite
+    ; SQLite (default)
     Include-Storage = "config-include/storage/SQLiteStandalone.ini";
 
     ; MySQL
@@ -69,8 +71,9 @@
     ; HomeURIAlias = myoldname.something.org, 127.0.0.1,127.0.0.1:8043	
 
 [Modules]
-    ;; Asset cache module.
-    ;; Warning this is required for several region features
+    ;; Asset cache module. Flotsam is required and on by default.
+    ;; First start copies FlotsamCache.ini.example when FlotsamCache.ini is missing.
+    ;; Memory cache is off in that example; disk file cache is on.
 
     AssetCaching = "FlotsamAssetCache"
     Include-FlotsamCache = "config-include/FlotsamCache.ini"
@@ -81,10 +84,18 @@
 [AssetService]
     DefaultAssetLoader = "OpenSim.Framework.AssetLoader.Filesystem.dll"
     AssetLoaderArgs = "assets/AssetSets.xml"
+    ;; Async CAP asset path (RegionAssetConnector). Defaults: local 4, remote 8.
+    ; LocalAssetRequestWorkers = 4
+    ; RemoteAssetRequestWorkers = 8
+    ;; Batch foreign-import StoreLocal to local DB.
+    ;; Cache immediately; flush when size reached or every LocalStoreFlushMs; flush on shutdown.
+    LocalStoreBatchEnabled = true
+    LocalStoreBatchSize = 16
+    LocalStoreFlushMs = 250
 
-    ;; FSAssets: store asset bytes on disk and metadata in the database.
-    ;; Uncomment ALL of these together, plus [HGAssetService] LocalServiceModule
-    ;; (Hypergrid only) and [GridService] AssetService below.
+    ;; FSAssets is optional and off by default. Uncomment ALL of these together,
+    ;; plus [HGAssetService] LocalServiceModule (Hypergrid only) and
+    ;; [GridService] AssetService below.
     ;; BaseDirectory and SpoolDirectory must be on the same physical filesystem.
     ;; Leave HypergridAssetService as HGAssetServiceConnector (outbound to other grids).
     ; LocalServiceModule    = "OpenSim.Services.FSAssetService.dll:FSAssetConnector"
@@ -388,8 +399,8 @@
     ; OutboundPermission = True
 
     ;; Send visual reminder to local users that their inventories are unavailable while they are traveling
-    ;; and available when they return. True by default.
-    ;RestrictInventoryAccessAbroad = True
+    ;; and available when they return. False with XInventory (full inventory abroad).
+    RestrictInventoryAccessAbroad = False
 
 [HGFriendsModule]
     ; User level required to be able to send friendship invitations to foreign users
@@ -412,7 +423,7 @@
 
 [UserProfilesService]
     ;; To use, set Enabled to true then configure for your site...
-    Enabled = false
+    Enabled = true
     LocalServiceModule = "OpenSim.Services.UserProfilesService.dll:UserProfilesService"
 
     ;; Configure this for separate databse

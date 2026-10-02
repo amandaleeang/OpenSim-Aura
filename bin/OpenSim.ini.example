@@ -1,22 +1,24 @@
 ;; This is the main configuration file for OpenSimulator.
 ;; If it's named OpenSim.ini then it will be loaded by OpenSimulator.
-;; If it's named OpenSim.ini.example then you will need to copy it to
-;; OpenSim.ini first (if that file does not already exist)
+;; On first start, if OpenSim.ini is missing, the simulator copies this
+;; file to OpenSim.ini. It also copies config-include StandaloneCommon.ini,
+;; GridCommon.ini, and FlotsamCache.ini from their .example files when those
+;; live files are missing. Existing files are left unchanged.
 ;;
-;; Once you have copied OpenSim.ini.example to OpenSim.ini you will at least
-;; need to set the constants in the [Const] section and pick an architecture
-;; in the [Architecture] section at the end of this file. The architecture
-;; will require a suitable .ini file in the config-include directory, either
-;; StandaloneCommon.ini or GridCommon.ini which you can copy and modify from the
-;; available .example files.
+;; After that copy you still need to set the constants in the [Const] section
+;; (public hostname and ports). The default architecture is Standalone Hypergrid
+;; (config-include/StandaloneHypergrid.ini). That include needs
+;; config-include/StandaloneCommon.ini, which defaults to SQLite.
 ;;
 ;; The settings in this file are in the form "<key> = <value>".  For example,
 ;; save_crashes = false in the [Startup] section below.
 ;;
-;; All settings are initially commented out and the default value used, as
+;; Most settings are initially commented out and the default value used, as
 ;; found in OpenSimDefaults.ini.  To change a setting, first uncomment it by
 ;; deleting the initial semicolon (;) and then change the value.  This will
-;; override the value in OpenSimDefaults.ini
+;; override the value in OpenSimDefaults.ini.
+;; Aura first-start defaults (architecture, Groups V2, Offline IM V2, user
+;; profiles, concurrent gather) are uncommented in this example.
 ;;
 ;; If you want to find out what configuration OpenSimulator has finished with
 ;; once all the configuration files are loaded then type "config show" on the
@@ -41,8 +43,7 @@
 ;;    satisfied.
 ;;
 ;; ;  denotes a commented out option.
-;;    Any options added to OpenSim.ini.example should be initially commented
-;;    out.
+;;    New options should be commented unless they are Aura first-start defaults.
 
 
 [Const]
@@ -816,14 +817,14 @@
     ;; give / take-from-prim, and grid-mode Gets from Robust.
     ;; When false, use the legacy sequential GatherNext + FetchAsset path.
     ;; Formerly HGConcurrentAssetGather (still accepted).
-    ;ConcurrentAssetGather = true
+    ConcurrentAssetGather = true
 
     ;# {UuidGatherConcurrent} {} {Maximum concurrent asset requests per gather/post wave} {1 4 8 16 32} 8
     ;; How many requests to run at once against an HG home asset server or the
     ;; local grid Robust asset service (ConcurrentAssetGather=true).
     ;; Requests run in waves of at most this many at a time.  Ignored when false.
     ;; Formerly HGUuidGatherConcurrent (still accepted).
-    ;UuidGatherConcurrent = 8
+    UuidGatherConcurrent = 8
 
     ;# {UuidGatherTimeout} {} {Timeout in seconds for each asset fetch / post wave} {} 30
     ;; With ConcurrentAssetGather=true: a single asset request that has not
@@ -845,11 +846,11 @@
     ;; web service to do this. See OpenSim wiki.
     ; OfflineMessageModule = OfflineMessageModule
     ;; Or, alternatively, use this one, which works for both standalones and grids
-    ; OfflineMessageModule = "Offline Message Module V2"
+    OfflineMessageModule = "Offline Message Module V2"
 
     ;; Required on Hypergrid standalone (InGatekeeper) so incoming IMs to
     ;; offline local users are stored. Robust.HG.ini.example has the same key.
-    ; OfflineIMService = "OpenSim.Addons.OfflineIM.dll:OfflineIMService"
+    OfflineIMService = "OpenSim.Addons.OfflineIM.dll:OfflineIMService"
 
     ;# {OfflineMessageURL} {OfflineMessageModule:OfflineMessageModule Offline Message Module V2:Offline Message Module V2} {URL of offline messaging service} {}
     ;; URL of web service for offline message storage. Leave it commented if your service is local to the sim.
@@ -1099,7 +1100,7 @@
 [Groups]
     ;# {Enabled} {} {Enable groups?} {true false} false
     ;; Enables the groups module
-    ; Enabled = false
+    Enabled = true
 
     ;# {LevelGroupCreate} {Enabled:true} {User level for creating groups} {} 0
     ;; Minimum user level required to create groups
@@ -1110,7 +1111,7 @@
     ;; http://code.google.com/p/flotsam/
     ; Module = Default
     ;; or... use Groups Module V2, which works for standalones and robust grids
-    ; Module = "Groups Module V2"
+    Module = "Groups Module V2"
 
     ;# {StorageProvider} {Module:Groups Module V2} {The DLL that provides the storage for V2} {OpenSim.Data.MySQL.dll}
     ;; Storage dll for Groups Module V2. Leave commented to inherit
@@ -1123,7 +1124,7 @@
     ; LocalServiceModule = "OpenSim.Addons.Groups.dll:GroupsService"
     ;; Hypergrid only. Intra-grid: a SQL miss means the group is not local.
     ;; See StandaloneHypergrid.ini / Robust.HG.ini.example.
-    ; LocalServiceModule = "OpenSim.Addons.UUIDDHT.dll:UuidDhtGroupsService"
+    LocalServiceModule = "OpenSim.Addons.UUIDDHT.dll:UuidDhtGroupsService"
 
     ;# {ServicesConnectorModule} {Module:GroupsModule Module:Groups Module V2} {Service connector to use for groups} {XmlRpcGroupsServicesConnector "Groups Local Service Connector" "Groups Remote Service Connector" "Groups HG Service Connector"} XmlRpcGroupsServicesConnector
     ;; Service connectors to the Groups Service as used in the GroupsModule.  Select one as follows:
@@ -1132,11 +1133,11 @@
     ;; -- for V2 Groups, grided sim, non-HG use "Groups Remote Service Connector"
     ;; -- for V2 Groups, HG, both standalone and grided sim, use "Groups HG Service Connector"
     ;; Note that the quotes "" around the words are important!
-    ; ServicesConnectorModule = XmlRpcGroupsServicesConnector
+    ServicesConnectorModule = "Groups HG Service Connector"
 
     ;# {LocalService} {ServicesConnectorModule:Groups HG Service Connector} {Is the group service in this process or elsewhere?} {local remote} local
     ;; Used for V2 in HG only. If standalone, set this to local; if grided sim, set this to remote
-    ; LocalService = local
+    LocalService = local
 
     ;# {SecretKey} {ServicesConnectorModule:Groups Remote Service Connector} {Secret key between sim and remote group service} {} ""
     ;; Used for V2 in Remote only.
@@ -1169,16 +1170,16 @@
     ; HomeURI = ""
 
     ;# {MessagingEnabled} {Module:GroupsModule Module:Groups Module V2} {Is groups messaging enabled?} {true false} true
-    ; MessagingEnabled = true
+    MessagingEnabled = true
 
     ;# {MessagingModule} {MessagingEnabled:true} {Module to use for groups messaging} {GroupsMessagingModule "Groups Messaging Module V2"} GroupsMessagingModule
     ; MessagingModule = GroupsMessagingModule
     ; or use "Groups Messaging Module V2" for Groups V2
-    ; MessagingModule = "Groups Messaging Module V2"
+    MessagingModule = "Groups Messaging Module V2"
 
     ;# {NoticesEnabled} {Module:GroupsModule Module:Groups Module V2} {Enable group notices?} {true false} true
     ;; Enable Group Notices
-    ; NoticesEnabled = true
+    NoticesEnabled = true
 
     ;# {MessageOnlineUsersOnly} {Module:GroupsModule Module} {Message online users only?} {true false} false
     ; Experimental option to only message online users rather than all users
@@ -1258,7 +1259,7 @@
   ;# {ProfileServiceURL} {} {Set url to UserProfilesService} {}
   ;; Set the value of the url to your UserProfilesService
   ;; If un-set / "" the module is disabled
-  ;; ProfileServiceURL = ${Const|BaseURL}:${Const|PublicPort}
+  ProfileServiceURL = ${Const|BaseURL}:${Const|PublicPort}
 
   ;# {AllowUserProfileWebURLs} {} {allow user profiles web urls} {true false} true
   ;; set this to false to prevent your users to be sent to unknown
@@ -1280,6 +1281,14 @@
   ;# {BaseDirectory} {} {Local bake store directory when URL is unset} {}
   ;; BaseDirectory = "bakes"
 
+[ServerSideBake]
+  ;; Server-side classic + BoM texture compositor. Watch [SSBAKE] in the log.
+  ;; Console: ssb bake <first-name> <last-name>
+  ;; Sets RegionProtocols bit 0 so the viewer stops local baking and posts
+  ;; UpdateAvatarAppearance on rebake. Bake textures are served from this
+  ;; sim (/appearance and GetTexture), not a central bake farm.
+  Enabled = true
+
 ;;
 ;; Optional module to highlight God names in the viewer.
 ;; Uncomment and customize appropriately if you want this behavior.
@@ -1290,18 +1299,12 @@
 ;    Surnames = "Kryztlsk"
 
 [Architecture]
-    ;# {Include-Architecture} {} {Choose one of the following architectures} {config-include/Standalone.ini config-include/StandaloneHypergrid.ini config-include/Grid.ini config-include/GridHypergrid.ini} config-include/Standalone.ini
-    ;; Uncomment one of the following includes as required.  For instance, to create a standalone OpenSim,
-    ;; uncomment Include-Architecture = "config-include/Standalone.ini"
+    ;# {Include-Architecture} {} {Choose one of the following architectures} {config-include/Standalone.ini config-include/StandaloneHypergrid.ini config-include/Grid.ini config-include/GridHypergrid.ini} config-include/StandaloneHypergrid.ini
+    ;; Uncomment one of the following includes as required. Aura default is
+    ;; Standalone Hypergrid. On first start the matching *Common.ini is copied
+    ;; from its .example if it is missing (SQLite in StandaloneCommon.ini.example).
     ;;
-    ;; Then you will need to copy and edit the corresponding *Common.example file in config-include/
-    ;; that the referenced .ini file goes on to include.
-    ;;
-    ;; For instance, if you chose "config-include/Standalone.ini" then you will need to copy
-    ;; "config-include/StandaloneCommon.ini.example" to "config-include/StandaloneCommon.ini" before
-    ;; editing it to set the database and backend services that OpenSim will use.
-    ;;
-    Include-Architecture = "config-include/Standalone.ini"
-    ; Include-Architecture = "config-include/StandaloneHypergrid.ini"
+    ; Include-Architecture = "config-include/Standalone.ini"
+    Include-Architecture = "config-include/StandaloneHypergrid.ini"
     ; Include-Architecture = "config-include/Grid.ini"
     ; Include-Architecture = "config-include/GridHypergrid.ini"
