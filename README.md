@@ -157,7 +157,7 @@ Aura adds or documents the following INI settings. The sections below are the ne
 
 ## Architecture (Hypergrid vs not)
 
-In `OpenSim.ini` `[Architecture]`, pick **one**:
+In `OpenSim.ini`, set `[Const] BaseHostname` and ports to your public address. Then in `[Architecture]`, pick **one**. Aura default:
 
 ```
 Include-Architecture = "config-include/StandaloneHypergrid.ini"
@@ -213,7 +213,7 @@ Standalone still wants `[XBakes] BaseDirectory` so hashes persist across restart
 
 Loading the `UuidDht*` modules is what turns DHT on. You do **not** set `[UuidDht] Enabled = true`.
 
-**Standalone Hypergrid** already loads them in `StandaloneHypergrid.ini`. Copy `StandaloneCommon.ini.example` → `StandaloneCommon.ini` as usual.
+**Standalone Hypergrid** already loads them in `StandaloneHypergrid.ini`.
 
 **Robust HG** already loads them in `Robust.HG.ini.example`:
 
@@ -332,7 +332,7 @@ In `OpenSim.ini`. Leave `StorageProvider` commented to inherit `[DatabaseService
 [Groups]
     Enabled = true
     Module = "Groups Module V2"
-    LocalServiceModule = "OpenSim.Addons.Groups.dll:GroupsService"
+    LocalServiceModule = "OpenSim.Addons.UUIDDHT.dll:UuidDhtGroupsService"
     ServicesConnectorModule = "Groups HG Service Connector"
     LocalService = local
     MessagingEnabled = true
