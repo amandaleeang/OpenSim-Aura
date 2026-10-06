@@ -51,6 +51,8 @@ namespace OpenSim.Services.Connectors.Hypergrid
 
         private string m_ServerURL;
         private GridRegion m_Gatekeeper;
+        [ThreadStatic]
+        static string t_DestinationServerURI;
 
         public UserAgentServiceConnector(string url)
         {
@@ -122,11 +124,19 @@ namespace OpenSim.Services.Connectors.Hypergrid
             };
 
             m_Gatekeeper = gatekeeper;
+            t_DestinationServerURI = destination.ServerURI;
 
             //Console.WriteLine("   >>> LoginAgentToGrid <<< " + home.ServerURI);
 
             uint flags = fromLogin ? (uint)TeleportFlags.ViaLogin : (uint)TeleportFlags.ViaHome;
-            return CreateAgent(source, home, aCircuit, flags, new EntityTransferContext(), out reason);
+            try
+            {
+                return CreateAgent(source, home, aCircuit, flags, new EntityTransferContext(), out reason);
+            }
+            finally
+            {
+                t_DestinationServerURI = null;
+            }
         }
 
 
@@ -142,7 +152,8 @@ namespace OpenSim.Services.Connectors.Hypergrid
             args["gatekeeper_serveruri"] = OSD.FromString(m_Gatekeeper.ServerURI);
             args["gatekeeper_host"] = OSD.FromString(m_Gatekeeper.ExternalHostName);
             args["gatekeeper_port"] = OSD.FromString(m_Gatekeeper.HttpPort.ToString());
-            args["destination_serveruri"] = OSD.FromString(destination.ServerURI);
+            string destUri = t_DestinationServerURI ?? destination.ServerURI;
+            args["destination_serveruri"] = OSD.FromString(destUri);
         }
 
         public void SetClientToken(UUID sessionID, string token)

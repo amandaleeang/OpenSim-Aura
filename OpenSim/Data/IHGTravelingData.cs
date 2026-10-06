@@ -38,6 +38,7 @@ namespace OpenSim.Data
         public UUID SessionID;
         public UUID UserID;
         public string GridExternalName = string.Empty;
+        public string RegionExternalName = string.Empty;
         public string ServiceToken = string.Empty;
         public string ClientIPAddress = string.Empty;
         public Dictionary<string, string> Data;

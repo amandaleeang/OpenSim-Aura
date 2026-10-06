@@ -128,8 +128,6 @@ namespace OpenSim.Server.Handlers.Hypergrid
         public string host;
         public int port;
         public string gatekeeperServerURI;
-        public string destinationServerURI;
-
     }
 
 }

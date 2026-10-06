@@ -16,3 +16,11 @@ CREATE TABLE hg_traveling_data(
 
 COMMIT;
 
+:VERSION 3         # --------------------------
+
+BEGIN TRANSACTION;
+
+ALTER TABLE hg_traveling_data ADD COLUMN RegionExternalName VARCHAR(255) NOT NULL DEFAULT "";
+
+COMMIT;
+

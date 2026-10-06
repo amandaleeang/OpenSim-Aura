@@ -29,8 +29,10 @@ using System;
 using System.Collections.Generic;
 using OpenMetaverse;
 using OpenSim.Framework;
+using OpenSim.Services.Connectors.Friends;
 using OpenSim.Services.Interfaces;
 using FriendInfo = OpenSim.Services.Interfaces.FriendInfo;
+using GridRegion = OpenSim.Services.Interfaces.GridRegion;
 
 namespace OpenSim.Services.HypergridService
 {
@@ -117,17 +119,47 @@ namespace OpenSim.Services.HypergridService
             IPresenceService presence,
             bool online,
             Func<UUID, bool> hasTravelSession,
-            Action<UUID, UUID> forwardHome)
+            Action<UUID, UUID> forwardHome,
+            Action<UUID> forwardTravel = null)
         {
             List<UUID> returning = new();
             foreach ((UUID id, UUID regionID) in WhoIsOnline(presence, matched, hasTravelSession))
             {
                 if (regionID.IsNotZero())
                     forwardHome?.Invoke(regionID, id);
+                else
+                    forwardTravel?.Invoke(id);
                 if (online)
                     returning.Add(id);
             }
             return online ? returning : [];
+        }
+
+        public static void ForwardTravelingStatus(
+            string destUri,
+            string homeUri,
+            IFriendsSimConnector local,
+            FriendsSimConnector remote,
+            UUID foreignUserID,
+            UUID localId,
+            bool online)
+        {
+            if (string.IsNullOrWhiteSpace(destUri))
+                return;
+
+            if (local is not null
+                    && !string.IsNullOrWhiteSpace(homeUri)
+                    && OSHHTPHost.SameGrid(homeUri, destUri))
+            {
+                local.StatusNotify(foreignUserID, localId, online);
+                return;
+            }
+
+            if (remote is null)
+                return;
+
+            GridRegion region = new() { ServerURI = destUri };
+            remote.StatusNotify(region, foreignUserID, localId.ToString(), online);
         }
     }
 }

@@ -354,9 +354,39 @@ namespace OpenSim.Services.HypergridService
                 m_FriendsService, foreignUserID, friends, requireCanSeeOnline: false);
             List<UUID> localFriendsOnline = HGFriendNotify.ApplyStatusNotification(
                 matched, m_PresenceService, online, HasTravelSession,
-                (regionID, localId) => ForwardStatusNotificationToSim(regionID, foreignUserID, localId.ToString(), online));
+                (regionID, localId) => ForwardStatusNotificationToSim(regionID, foreignUserID, localId.ToString(), online),
+                localId => ForwardStatusNotificationToTraveling(localId, foreignUserID, online));
 
             return localFriendsOnline;
+        }
+
+        string GetTravelRegionURI(UUID userId)
+        {
+            if (m_UserAgentService is UserAgentService uas)
+            {
+                try
+                {
+                    return uas.GetTravelRegionURI(userId);
+                }
+                catch (Exception e)
+                {
+                    m_log.DebugFormat("[HGFRIENDS SERVICE]: GetTravelRegionURI failed for {0}: {1}", userId, e.Message);
+                    return string.Empty;
+                }
+            }
+            return string.Empty;
+        }
+
+        void ForwardStatusNotificationToTraveling(UUID localId, UUID foreignUserID, bool online)
+        {
+            string dest = GetTravelRegionURI(localId);
+            if (string.IsNullOrWhiteSpace(dest))
+                return;
+            m_log.DebugFormat("[HGFRIENDS SERVICE]: Traveling Notify to {0}, user {1} is {2}",
+                dest, foreignUserID, online ? "online" : "offline");
+            HGFriendNotify.ForwardTravelingStatus(
+                dest, m_HomeURI, m_FriendsLocalSimConnector, m_FriendsSimConnector,
+                foreignUserID, localId, online);
         }
 
         bool HasTravelSession(UUID userId)
