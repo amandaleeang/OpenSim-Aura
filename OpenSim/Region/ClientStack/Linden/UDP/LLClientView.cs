@@ -4440,8 +4440,10 @@ namespace OpenSim.Region.ClientStack.LindenUDP
             IServerSideBakeModule ssb = m_scene.RequestModuleInterface<IServerSideBakeModule>();
             byte[] vpToSend = visualParams;
             int cofVersion = 0;
+            byte appearanceVersion = 1;
             if (ssb != null)
-                ssb.PrepareAppearancePacket(targetID, visualParams, out vpToSend, out cofVersion);
+                ssb.PrepareAppearancePacket(targetID, m_agentId, visualParams,
+                    out vpToSend, out cofVersion, out appearanceVersion);
 
             // visual parameters
             len = vpToSend.Length;
@@ -4451,8 +4453,10 @@ namespace OpenSim.Region.ClientStack.LindenUDP
 
             if (ssb != null)
             {
-                data[pos++] = 1; // AppearanceData: version 1, CofVersion
-                data[pos++] = 1;
+                // AppearanceVersion and vp11000 must match. 1 = self SSA
+                // /appearance; 0 = other avatars (host RequestImage / GetTexture).
+                data[pos++] = 1; // AppearanceData
+                data[pos++] = appearanceVersion;
                 Utils.IntToBytesSafepos(cofVersion, data, pos); pos += 4;
                 Utils.UIntToBytesSafepos(0, data, pos); pos += 4;
             }
@@ -9883,6 +9887,7 @@ namespace OpenSim.Region.ClientStack.LindenUDP
                 args.PacketNumber = block.Packet;
                 args.Priority = block.DownloadPriority;
                 args.requestSequence = imageRequest.Header.Sequence;
+                args.RequestType = block.Type;
 
                 // NOTE: This is not a built in part of the LLUDP protocol, but we double the
                 // priority of avatar textures to get avatars rezzing in faster than the

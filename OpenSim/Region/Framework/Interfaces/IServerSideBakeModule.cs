@@ -72,12 +72,14 @@ namespace OpenSim.Region.Framework.Interfaces
         void PrepareAppearanceForTransfer(IScenePresence sp, AvatarAppearance outbound);
 
         /// <summary>
-        /// Packet-only visual params for AvatarAppearance: copy grown so
-        /// index 251 is 1. Does not mutate live appearance. cofVersion is
-        /// the value chosen at publish (viewer COF, or slam+1 after Rebake).
+        /// Packet-only visual params for AvatarAppearance. Does not mutate
+        /// live appearance. cofVersion is the value chosen at publish.
+        /// appearanceVersion is 1 (SSA, vp11000=1) for self and 0 for every
+        /// other recipient so Firestorm RequestImage/GetTexture dest Flotsam
+        /// instead of login /appearance.
         /// </summary>
-        void PrepareAppearancePacket(UUID agentId, byte[] visualParams,
-            out byte[] visualParamsForSend, out int cofVersion);
+        void PrepareAppearancePacket(UUID agentId, UUID toAgentId, byte[] visualParams,
+            out byte[] visualParamsForSend, out int cofVersion, out byte appearanceVersion);
 
         /// <summary>
         /// Write AvatarAppearance AttachmentBlock at data[pos]. Returns new pos.

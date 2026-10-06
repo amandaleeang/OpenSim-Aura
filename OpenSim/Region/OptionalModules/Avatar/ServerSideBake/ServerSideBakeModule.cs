@@ -344,11 +344,13 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
             return null;
         }
 
-        public void PrepareAppearancePacket(UUID agentId, byte[] visualParams,
-            out byte[] visualParamsForSend, out int cofVersion)
+        public void PrepareAppearancePacket(UUID agentId, UUID toAgentId, byte[] visualParams,
+            out byte[] visualParamsForSend, out int cofVersion, out byte appearanceVersion)
         {
             visualParamsForSend = visualParams ?? Array.Empty<byte>();
             cofVersion = 0;
+            // Self = SSA. Any other recipient = host bake from this sim.
+            appearanceVersion = UseHostBakesForRecipient(agentId, toAgentId) ? (byte)0 : (byte)1;
             ScenePresence sp = FindPresence(agentId);
             if (sp?.Appearance == null)
                 return;
@@ -360,7 +362,7 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
             byte[] copy = new byte[sendLen];
             if (n > 0)
                 Buffer.BlockCopy(src, 0, copy, 0, n);
-            copy[vp11000] = 1;
+            copy[vp11000] = appearanceVersion;
             visualParamsForSend = copy;
             // Every appearance packet about to go out takes a fresh, strictly
             // greater CofVersion. All send paths funnel through here, so a
@@ -371,6 +373,16 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
                 cofVersion = packetCof;
             else
                 cofVersion = ViewerCofOrSerial(agentId);
+        }
+
+        // Self stays SSA (AppearanceVersion 1): Firestorm GETs own bakes from
+        // the login AgentAppearanceService. Every other avatar is version 0
+        // with matching vp11000 so Firestorm FTT_HOST_BAKE RequestImage hits
+        // this sim's Flotsam (login /appearance is home for HG visitors and
+        // 404s dest hashes). All send paths use PrepareAppearancePacket.
+        private bool UseHostBakesForRecipient(UUID ownerId, UUID toAgentId)
+        {
+            return !toAgentId.IsZero() && !ownerId.Equals(toAgentId);
         }
 
         public int WriteAppearanceAttachmentBlock(UUID agentId, UUID toAgentId, byte[] data, int pos)
@@ -472,7 +484,7 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
                 return;
             }
 
-            if (!TryParseAppearanceTextureId(httpRequest, out UUID textureID, out UUID agentId))
+            if (!TryParseAppearanceTextureId(httpRequest, out UUID textureID, out UUID agentId, out _))
             {
                 m_log.WarnFormat("[SSBAKE]: GET /appearance bad path={0}",
                     httpRequest.UriPath);
@@ -486,8 +498,8 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
                 // Instant 404. Do not AssetService.Get() a bake UUID: bakes are
                 // local cache only, and a Robust miss is a ~10s hang that keeps
                 // incoming avatars as clouds.
-                m_log.WarnFormat("[SSBAKE]: GET /appearance miss {0}", textureID);
                 httpResponse.StatusCode = (int)HttpStatusCode.NotFound;
+                m_log.WarnFormat("[SSBAKE]: GET /appearance miss texture {0}", textureID);
                 return;
             }
 
@@ -522,10 +534,11 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
         }
 
         private static bool TryParseAppearanceTextureId(IOSHttpRequest httpRequest,
-            out UUID textureID, out UUID agentId)
+            out UUID textureID, out UUID agentId, out int slot)
         {
             textureID = UUID.Zero;
             agentId = UUID.Zero;
+            slot = -1;
             string qid = httpRequest.QueryString?["texture_id"];
             if (!string.IsNullOrEmpty(qid) && UUID.TryParse(qid, out textureID))
                 return true;
@@ -552,9 +565,12 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
             {
                 for (int i = 0; i < parts.Length - 1; i++)
                 {
-                    if (parts[i].Equals("texture", StringComparison.OrdinalIgnoreCase)
-                        && UUID.TryParse(parts[i + 1], out agentId))
-                        break;
+                    if (!parts[i].Equals("texture", StringComparison.OrdinalIgnoreCase)
+                        || !UUID.TryParse(parts[i + 1], out agentId))
+                        continue;
+                    if (i + 2 < parts.Length - 1)
+                        int.TryParse(parts[i + 2], out slot);
+                    break;
                 }
             }
             return true;
@@ -627,11 +643,11 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
         private void HandleSetAppearance(IClientAPI client, Primitive.TextureEntry textureEntry,
             byte[] visualParams, Vector3 avSize, WearableCacheItem[] cacheItems)
         {
-            // AvatarFactory applies the viewer's TextureEntry (including a
-            // Ctrl-Alt-R local rebake) then QueueAppearanceSend. Keep our
-            // published bake IDs so others do not see viewer-local uploads.
-            // If the viewer sent different bake IDs after we have already
-            // published, treat that as a manual rebake request.
+            // AvatarFactory applies the viewer's TextureEntry then
+            // QueueAppearanceSend. Dayturn (and a Firestorm local tex-refresh)
+            // send new bake IDs without a COF change. Put the published
+            // hashes back so others do not see viewer-local uploads.
+            // Force composite is IncrementCOFVersion only.
             Scene scene = client.Scene as Scene;
             ScenePresence sp = scene?.GetScenePresence(client.AgentId);
             if (sp == null || sp.IsChildAgent || sp.IsNPC)
@@ -648,15 +664,7 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
                             return;
 
                         m_log.DebugFormat("[SSBAKE]: SetAppearance from {0}", sp.Name);
-                        bool viewerAskedForRebake = ViewerBakesDifferFromLast(sp);
-                        bool restored = RestoreLastBakes(sp);
-                        if (viewerAskedForRebake)
-                        {
-                            m_log.InfoFormat("[SSBAKE]: viewer rebake for {0} (SetAppearance bake IDs changed); rebake",
-                                sp.Name);
-                            RequestBake(sp, "SetAppearance-force", true);
-                        }
-                        else if (restored)
+                        if (RestoreLastBakes(sp))
                         {
                             m_log.InfoFormat("[SSBAKE]: restored server bake IDs after SetAppearance for {0}",
                                 sp.Name);
@@ -1337,29 +1345,6 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
                 sent, sp.Name);
         }
 
-        // True when we have already published server bakes and the viewer's
-        // TextureEntry no longer matches them (Ctrl-Alt-R local rebake).
-        private bool ViewerBakesDifferFromLast(ScenePresence sp)
-        {
-            if (!CanBake(sp) || !m_lastBakeIds.TryGetValue(sp.UUID, out UUID[] faces))
-                return false;
-
-            foreach (BakeSlot slot in BakeLayerMap.Slots)
-            {
-                int idx = (int)slot.FaceIndex;
-                UUID last = (idx >= 0 && idx < faces.Length) ? faces[idx] : UUID.Zero;
-                Primitive.TextureEntryFace face = sp.Appearance.Texture.FaceTextures[idx];
-                UUID current = (face == null) ? UUID.Zero : face.TextureID;
-                if (BakeLayerMap.IsUnsetTexture(current))
-                    current = UUID.Zero;
-                if (BakeLayerMap.IsUnsetTexture(last))
-                    last = UUID.Zero;
-                if (current.NotEqual(last))
-                    return true;
-            }
-            return false;
-        }
-
         private bool RestoreLastBakes(ScenePresence sp)
         {
             if (!CanBake(sp) || !m_lastBakeIds.TryGetValue(sp.UUID, out UUID[] faces))
@@ -2038,8 +2023,9 @@ namespace OpenSim.Region.OptionalModules.Avatar.ServerSideBake
             }
 
             // Self first. SendAppearance writes AppearanceData
-            // (AppearanceVersion=1, CofVersion) and AttachmentBlock on the
-            // UDP copy only — do not mutate live visual params.
+            // (AppearanceVersion 1 for self SSA, 0 for every other
+            // recipient) and AttachmentBlock on the UDP copy only — do not
+            // mutate live visual params.
             // Do not SendAvatarDataToAllAgents: a second avatar ObjectUpdate
             // after attachments are out can drop them on SSA viewers.
             // Each sender allocates its own CofVersion in PrepareAppearancePacket.

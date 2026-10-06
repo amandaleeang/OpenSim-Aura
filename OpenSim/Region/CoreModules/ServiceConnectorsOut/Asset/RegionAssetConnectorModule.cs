@@ -387,8 +387,11 @@ namespace OpenSim.Region.CoreModules.ServiceConnectorsOut.Asset
                 if (m_Cache != null)
                     m_Cache.Cache(asset);
             }
-            else if (m_Cache != null)
-                m_Cache.CacheNegative(id);
+            else
+            {
+                if (m_Cache != null)
+                    m_Cache.CacheNegative(id);
+            }
 
             return asset;
         }

@@ -610,7 +610,6 @@ namespace OpenSim.Region.CoreModules.Asset
                     UpdateWeakReference(id,asset);
                     if (m_updateFileTimeOnCacheHit)
                         UpdateFileLastAccessTime(GetFileName(id));
-
                     return true;
                 }
             }
@@ -623,6 +622,7 @@ namespace OpenSim.Region.CoreModules.Asset
                     UpdateWeakReference(id,asset);
                     if (m_MemoryCacheEnabled)
                         UpdateMemoryCache(id, asset);
+                    return true;
                 }
             }
             return true;
