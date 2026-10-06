@@ -369,13 +369,8 @@ namespace OpenSim.Framework
     }
 
     /// <summary>
-    /// How HG friends decide online vs offline vs traveling abroad.
-    /// Presence with a real RegionID is home-online. A travel-table row whose
-    /// GridExternalName is this home grid is a local login, not travel abroad.
-    /// RegionID zero is in-transit leftover, not "still online".
-    /// Query-time LocateUser is not enough after the viewer has already received
-    /// SendAgentOnline: LogoutAgent while abroad must fan out offline, and
-    /// LoginAgentToGrid to a foreign grid must fan out online.
+    /// Friend online is the viewer session: a travel row (home or abroad) or
+    /// presence with a real RegionID. LocateUser is only the foreign URL for IM.
     /// </summary>
     public static class HGFriendStatus
     {
@@ -386,11 +381,11 @@ namespace OpenSim.Framework
             return !OSHHTPHost.SameGrid(homeGrid, gridExternalName);
         }
 
-        public static bool IsOnline(bool hasPresence, bool regionIdIsZero, bool travelingAbroad)
+        public static bool IsOnline(bool hasPresence, bool regionIdIsZero, bool hasTravelSession)
         {
-            if (hasPresence && !regionIdIsZero)
+            if (hasTravelSession)
                 return true;
-            return travelingAbroad;
+            return hasPresence && !regionIdIsZero;
         }
     }
 

@@ -35,8 +35,7 @@ using FriendInfo = OpenSim.Services.Interfaces.FriendInfo;
 namespace OpenSim.Services.HypergridService
 {
     /// <summary>
-    /// Shared pieces of HG friend online/offline handling used by UserAgentService
-    /// and HGFriendsService (secret match, home presence, traveling fallback).
+    /// Shared HG friend handling: secret match, then session online.
     /// </summary>
     static class HGFriendNotify
     {
@@ -74,45 +73,61 @@ namespace OpenSim.Services.HypergridService
             return users;
         }
 
-        public static List<(UUID UserID, UUID RegionID)> HomeOnline(IPresenceService presence, List<string> userIds)
+        public static List<(UUID UserID, UUID RegionID)> WhoIsOnline(
+            IPresenceService presence, List<string> userIds, Func<UUID, bool> hasTravelSession)
         {
             List<(UUID UserID, UUID RegionID)> result = new();
-            if (presence is null || userIds is null || userIds.Count == 0)
+            if (userIds is null || userIds.Count == 0)
                 return result;
 
-            PresenceInfo[] sessions = presence.GetAgents(userIds.ToArray());
-            if (sessions is null)
-                return result;
+            Dictionary<string, PresenceInfo> byUser = new(StringComparer.OrdinalIgnoreCase);
+            if (presence is not null)
+            {
+                PresenceInfo[] sessions = presence.GetAgents(userIds.ToArray());
+                if (sessions is not null)
+                {
+                    foreach (PresenceInfo pinfo in sessions)
+                    {
+                        if (pinfo?.UserID is null)
+                            continue;
+                        byUser[pinfo.UserID] = pinfo;
+                    }
+                }
+            }
 
             HashSet<string> seen = new();
-            foreach (PresenceInfo pinfo in sessions)
+            foreach (string user in userIds)
             {
-                if (pinfo is null || pinfo.RegionID.IsZero())
+                if (!seen.Add(user) || !UUID.TryParse(user, out UUID uid))
                     continue;
-                if (!seen.Add(pinfo.UserID) || !UUID.TryParse(pinfo.UserID, out UUID uid))
+                byUser.TryGetValue(user, out PresenceInfo pinfo);
+                bool hasPresence = pinfo is not null;
+                bool regionZero = !hasPresence || pinfo.RegionID.IsZero();
+                bool liveTravel = hasTravelSession is not null && hasTravelSession(uid);
+                if (!HGFriendStatus.IsOnline(hasPresence, regionZero, liveTravel))
                     continue;
-                result.Add((uid, pinfo.RegionID));
+                result.Add((uid, regionZero ? UUID.Zero : pinfo.RegionID));
             }
 
             return result;
         }
 
-        public static void AddTraveling(
-            List<string> users, HashSet<string> alreadyHomeOnline, List<UUID> into, Func<UUID, bool> isTraveling)
+        public static List<UUID> ApplyStatusNotification(
+            List<string> matched,
+            IPresenceService presence,
+            bool online,
+            Func<UUID, bool> hasTravelSession,
+            Action<UUID, UUID> forwardHome)
         {
-            if (users is null || into is null || isTraveling is null)
-                return;
-
-            foreach (string user in users)
+            List<UUID> returning = new();
+            foreach ((UUID id, UUID regionID) in WhoIsOnline(presence, matched, hasTravelSession))
             {
-                if ((alreadyHomeOnline is not null && alreadyHomeOnline.Contains(user))
-                        || !UUID.TryParse(user, out UUID uid))
-                    continue;
-                if (!isTraveling(uid))
-                    continue;
-                into.Add(uid);
-                alreadyHomeOnline?.Add(user);
+                if (regionID.IsNotZero())
+                    forwardHome?.Invoke(regionID, id);
+                if (online)
+                    returning.Add(id);
             }
+            return online ? returning : [];
         }
     }
 }

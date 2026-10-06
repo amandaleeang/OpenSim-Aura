@@ -280,7 +280,9 @@ namespace OpenSim.Region.CoreModules.Avatar.Friends
 
             NotifyRemoteFriendSims(localRemote, userID, online);
 
-            if (friendsPerDomain.Count > 0)
+            // Offline HG fan-out is UserAgentService.LogoutAgent only. Online
+            // still queries peer homes (stock StatusNotification is push+query).
+            if (online && friendsPerDomain.Count > 0)
                 m_StatusNotifier.Notify(userID, friendsPerDomain, online);
         }
 

@@ -350,28 +350,30 @@ namespace OpenSim.Services.HypergridService
             m_log.DebugFormat("[HGFRIENDS SERVICE]: Status notification: foreign user {0} wants to notify {1} local friends of {2} status",
                 foreignUserID, friends.Count, (online ? "online" : "offline"));
 
-            List<string> usersToBeNotified = HGFriendNotify.MatchingLocalFriends(
+            List<string> matched = HGFriendNotify.MatchingLocalFriends(
                 m_FriendsService, foreignUserID, friends, requireCanSeeOnline: false);
+            List<UUID> localFriendsOnline = HGFriendNotify.ApplyStatusNotification(
+                matched, m_PresenceService, online, HasTravelSession,
+                (regionID, localId) => ForwardStatusNotificationToSim(regionID, foreignUserID, localId.ToString(), online));
 
-            List<UUID> localFriendsOnline = [];
-            HashSet<string> reported = new();
-            foreach ((UUID id, UUID regionID) in HGFriendNotify.HomeOnline(m_PresenceService, usersToBeNotified))
-            {
-                reported.Add(id.ToString());
-                ForwardStatusNotificationToSim(regionID, foreignUserID, id.ToString(), online);
-                localFriendsOnline.Add(id);
-            }
-
-            // Traveling locals are still online (hg_traveling_data). Presence RegionID is
-            // zero after HG TP. LocateUser only counts a foreign grid, not a home login row.
-            if (online)
-                HGFriendNotify.AddTraveling(usersToBeNotified, reported, localFriendsOnline, IsTraveling);
-
-            return online ? localFriendsOnline : [];
+            return localFriendsOnline;
         }
 
-        bool IsTraveling(UUID userId)
+        bool HasTravelSession(UUID userId)
         {
+            if (m_UserAgentService is UserAgentService uas)
+            {
+                try
+                {
+                    return uas.HasTravelSession(userId);
+                }
+                catch (Exception e)
+                {
+                    m_log.DebugFormat("[HGFRIENDS SERVICE]: HasTravelSession failed for {0}: {1}", userId, e.Message);
+                    return false;
+                }
+            }
+
             if (m_UserAgentService is null)
                 return false;
             try

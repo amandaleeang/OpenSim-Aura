@@ -117,12 +117,12 @@ namespace OpenSim.Services.PresenceService
                 (presence == null) ? null : presence.RegionID.ToString());
 
             bool ret = m_Database.Delete("SessionID", sessionID.ToString());
-            if(inCache)
-            {
-                BySessionCache.Remove(sessionID);
-                if(presence is not null)
-                    ByUserCache.Remove(presence.UserID);
-            }
+            // Always drop the user cache. A session-cache miss left ByUserCache
+            // holding a RegionID, and GetAgents refreshes that TTL, so HG friends
+            // kept seeing the avatar online after logout.
+            BySessionCache.Remove(sessionID);
+            if (presence is not null)
+                ByUserCache.Remove(presence.UserID);
             return ret;
         }
 

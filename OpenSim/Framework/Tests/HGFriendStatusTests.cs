@@ -58,9 +58,6 @@ namespace OpenSim.Framework.Tests
         [Test]
         public void Offline_is_not_online()
         {
-            // No presence, not abroad — logged out. Leftover RegionID-zero presence
-            // without a foreign travel row must not keep HG friends seeing you online.
-            // LogoutAgent deletes the foreign travel row, then fans out offline.
             Assert.That(HGFriendStatus.IsOnline(false, true, false), Is.False);
             Assert.That(HGFriendStatus.IsOnline(true, true, false), Is.False);
         }
@@ -72,9 +69,8 @@ namespace OpenSim.Framework.Tests
         }
 
         [Test]
-        public void Traveling_abroad_is_online_even_without_home_presence()
+        public void Travel_session_is_online()
         {
-            // After HG TP, home presence is logged out (RegionID zero / missing).
             Assert.That(HGFriendStatus.IsOnline(false, true, true), Is.True);
             Assert.That(HGFriendStatus.IsOnline(true, true, true), Is.True);
         }
