@@ -162,7 +162,6 @@ namespace OpenSim.Services.HypergridService
 
                 // Finally some cleanup
                 m_Database.DeleteOld();
-
             }
         }
 
@@ -397,11 +396,9 @@ namespace OpenSim.Services.HypergridService
         public bool IsAgentComingHome(UUID sessionID, string thisGridExternalName)
         {
             HGTravelingData hgt = m_Database.Get(sessionID);
-            if (hgt is null || hgt.Data is null)
+            if (hgt is null || string.IsNullOrWhiteSpace(hgt.GridExternalName))
                 return false;
-            if(!hgt.Data.TryGetValue("GridExternalName", out string htgGrid))
-                return false;
-            return OSHHTPHost.SameGrid(htgGrid, thisGridExternalName);
+            return OSHHTPHost.SameGrid(hgt.GridExternalName, thisGridExternalName);
         }
 
         public bool VerifyClient(UUID sessionID, string reportedIP)
@@ -431,17 +428,16 @@ namespace OpenSim.Services.HypergridService
         public bool VerifyAgent(UUID sessionID, string token)
         {
             HGTravelingData hgt = m_Database.Get(sessionID);
-            if (hgt is null || hgt.Data is null)
+            if (hgt is null)
             {
                 m_log.Debug($"[USER AGENT SERVICE]: Token verification for session {sessionID}: no such session");
                 return false;
             }
 
-            if(!hgt.Data.TryGetValue("ServiceToken", out string hgttoken))
+            if (string.IsNullOrEmpty(hgt.ServiceToken))
                 return false;
 
-            //m_log.DebugFormat("[USER AGENT SERVICE]: Verifying agent token {0} against {1}", token, hgttoken);
-            return hgttoken.Equals(token);
+            return hgt.ServiceToken.Equals(token);
         }
 
         [Obsolete]
@@ -675,8 +671,8 @@ namespace OpenSim.Services.HypergridService
 
             foreach (HGTravelingData t in hgts)
             {
-                if (t?.Data is null || !t.Data.TryGetValue("GridExternalName", out string grid)
-                        || string.IsNullOrWhiteSpace(grid))
+                string grid = t?.GridExternalName ?? string.Empty;
+                if (string.IsNullOrWhiteSpace(grid))
                     continue;
                 // Home login also writes hg_traveling_data. Only a foreign grid is "abroad".
                 if (HGFriendStatus.IsTravelingAbroad(m_GridName, grid))
@@ -803,12 +799,9 @@ namespace OpenSim.Services.HypergridService
             {
                 SessionID = travel.SessionID,
                 UserID = travel.UserID,
-                Data = new Dictionary<string, string>
-                {
-                    ["GridExternalName"] = travel.GridExternalName,
-                    ["ServiceToken"] = travel.ServiceToken,
-                    ["ClientIPAddress"] = travel.ClientIPAddress
-                }
+                GridExternalName = travel.GridExternalName ?? string.Empty,
+                ServiceToken = travel.ServiceToken ?? string.Empty,
+                ClientIPAddress = travel.ClientIPAddress ?? string.Empty
             };
 
             m_Database.Store(hgt);
@@ -827,14 +820,13 @@ namespace OpenSim.Services.HypergridService
 
         public TravelingAgentInfo(HGTravelingData t)
         {
-            if (t.Data is not null)
-            {
-                SessionID = new UUID(t.SessionID);
-                UserID = new UUID(t.UserID);
-                GridExternalName = t.Data["GridExternalName"];
-                ServiceToken = t.Data["ServiceToken"];
-                ClientIPAddress = t.Data["ClientIPAddress"];
-            }
+            if (t is null)
+                return;
+            SessionID = t.SessionID;
+            UserID = t.UserID;
+            GridExternalName = t.GridExternalName ?? string.Empty;
+            ServiceToken = t.ServiceToken ?? string.Empty;
+            ClientIPAddress = t.ClientIPAddress ?? string.Empty;
         }
 
         public TravelingAgentInfo(TravelingAgentInfo old)
