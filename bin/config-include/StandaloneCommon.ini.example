@@ -49,7 +49,7 @@
     ;; that runs the Gatekeeper service.
     ;; For example http://myworld.com:9000 or http://myworld.com:8002
     ;; This is a default that can be overwritten in some sections.
-    ; GatekeeperURI = "${Const|BaseURL}:${Const|PublicPort}"
+    GatekeeperURI = "${Const|BaseURL}:${Const|PublicPort}"
 
     ;# {GatekeeperURIAlias} {Hypergrid} {alternative hostnames (FQDN) or IPs of the gatekeeper of this world and port (default 80 or 443 if entry starts with https://)} {}
     ;; comma separated list,
